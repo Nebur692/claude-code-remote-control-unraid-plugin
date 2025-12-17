@@ -366,11 +366,60 @@ $symlink_ok = $symlink_target === "$appdata_path/.claude";
 # Claude Code startup script for Unraid
 # Called by Unraid's init system on boot
 
+LOGFILE="/var/log/claude-code-install.log"
+INSTALL_SCRIPT="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh"
+
+wait_for_network() {
+    local max_wait=120
+    local waited=0
+    echo "Waiting for network..."
+    while [ $waited -lt $max_wait ]; do
+        # Check if we can reach a reliable host
+        if ping -c 1 -W 2 8.8.8.8 &>/dev/null || ping -c 1 -W 2 1.1.1.1 &>/dev/null; then
+            echo "Network is available."
+            return 0
+        fi
+        sleep 5
+        waited=$((waited + 5))
+        echo "Waiting for network... (${waited}s/${max_wait}s)"
+    done
+    echo "WARNING: Network not available after ${max_wait}s"
+    return 1
+}
+
+wait_for_array() {
+    local max_wait=300
+    local waited=0
+    echo "Waiting for array..."
+    while [ $waited -lt $max_wait ]; do
+        if [ -d "/mnt/user" ]; then
+            echo "Array is available."
+            return 0
+        fi
+        sleep 5
+        waited=$((waited + 5))
+        echo "Waiting for array... (${waited}s/${max_wait}s)"
+    done
+    echo "WARNING: Array not available after ${max_wait}s"
+    return 1
+}
+
+do_install() {
+    echo "=== Claude Code Startup $(date) ===" > "$LOGFILE"
+
+    # Wait for dependencies
+    wait_for_network >> "$LOGFILE" 2>&1
+    wait_for_array >> "$LOGFILE" 2>&1
+
+    # Run the actual install
+    "$INSTALL_SCRIPT" >> "$LOGFILE" 2>&1
+}
+
 case "$1" in
     start)
         echo "Starting Claude Code..."
         # Run install script in background to not block boot
-        nohup /usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh > /var/log/claude-code-install.log 2>&1 &
+        nohup bash -c "$(declare -f wait_for_network wait_for_array do_install); LOGFILE='$LOGFILE'; INSTALL_SCRIPT='$INSTALL_SCRIPT'; do_install" > /dev/null 2>&1 &
         ;;
     stop)
         echo "Stopping Claude Code..."
