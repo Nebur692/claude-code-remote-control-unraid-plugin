@@ -16,9 +16,9 @@ The plugin file (`claude-code.plg`) is an XML document containing:
 - File creation directives using `<FILE>` elements
 
 Key components within the plugin:
-- **Install script** (`install-claude.sh`): Downloads Node.js if needed, installs Claude Code via npm, sets up symlinks for persistent storage
+- **Install script** (`install-claude.sh`): Installs Claude Code via the official native installer, sets up symlinks for persistent storage
 - **Web UI** (`claude-code.page`): PHP page shown at Settings → Utilities → Claude Code
-- **Startup scripts**: `rc.claude-code` (rc.d) and `starting_svcs` (event hook)
+- **Startup script** (`rc.claude-code`): rc.d script that waits for network/array, then runs install
 
 ## Development Workflow
 

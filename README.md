@@ -18,9 +18,10 @@ Credentials are automatically saved to your appdata folder via symlink.
 
 ## How It Works
 
-- Installs Node.js + Claude Code on boot (RAM-based)
+- Installs Claude Code via the [official native installer](https://code.claude.com/docs/en/quickstart) on boot
 - Symlinks `~/.claude/` to appdata folder on array (default: `/mnt/user/appdata/claude-code/.claude`)
 - Configurable via web UI: **Settings → Utilities → Claude Code**
+- Auto-updates are built into the native installer
 
 ## Requirements
 
