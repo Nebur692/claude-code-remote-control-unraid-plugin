@@ -1,5 +1,7 @@
 # Claude Code Unraid Plugin
 
+![Claude Code Unraid Plugin](assets/banner.jpg)
+
 Installs [Claude Code](https://github.com/anthropics/claude-code) CLI on Unraid.
 
 ## Install
