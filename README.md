@@ -10,24 +10,33 @@ plugin install https://raw.githubusercontent.com/brianpugh/unraid-claude-code/ma
 
 ## Usage
 
+Open the Unraid terminal and run:
+
 ```bash
 claude
 ```
 
-Credentials are automatically saved to your appdata folder via symlink.
-
-## How It Works
-
-- Installs Claude Code via the [official native installer](https://code.claude.com/docs/en/quickstart) on boot
-- Symlinks `~/.claude/` to appdata folder on array (default: `/mnt/user/appdata/claude-code/.claude`)
-- Configurable via web UI: **Settings → Utilities → Claude Code**
-- Auto-updates are built into the native installer
+Authentication and settings persist across reboots automatically. Configure the appdata path via **Settings > Utilities > Claude Code**.
 
 ## Requirements
 
 - Unraid 6.12.0+
-- Array must be started (for appdata storage)
-- Internet connection
+- Array started, or appdata on an [Unassigned Devices](https://forums.unraid.net/topic/92462-unassigned-devices/) mount
+- Internet connection (first install only)
+
+## Troubleshooting
+
+Check the install log:
+
+```bash
+cat /var/log/claude-code-install.log
+```
+
+Manually re-run the installer:
+
+```bash
+/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh
+```
 
 ## Development
 
