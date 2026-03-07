@@ -1,16 +1,13 @@
-<?xml version="1.0"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Containers>
-  <Plugin>
-    <TemplateURL>https://raw.githubusercontent.com/brianpugh/unraid-claude-code/main/claude-code.xml</TemplateURL>
-    <Name>Claude Code</Name>
-    <Category>Tools:Utilities Productivity</Category>
-    <Description>Claude Code CLI - AI-powered coding assistant from Anthropic. Use Claude directly in your Unraid terminal for code generation, debugging, and more. Authentication and settings persist across reboots automatically.</Description>
-    <Overview>Claude Code CLI - AI-powered coding assistant from Anthropic. Use Claude directly in your Unraid terminal for code generation, debugging, and more. Authentication and settings persist across reboots automatically.</Overview>
-    <PluginURL>https://raw.githubusercontent.com/brianpugh/unraid-claude-code/main/claude-code.plg</PluginURL>
-    <Project>https://github.com/brianpugh/unraid-claude-code</Project>
-    <Support>https://github.com/brianpugh/unraid-claude-code/issues</Support>
-    <Icon>https://raw.githubusercontent.com/brianpugh/unraid-claude-code/main/claude-icon.png</Icon>
-    <Date>2026-03-06</Date>
-    <MinVer>6.12.0</MinVer>
-  </Plugin>
+<Plugin>True</Plugin>
+<PluginURL>https://raw.githubusercontent.com/brianpugh/unraid-claude-code/main/claude-code.plg</PluginURL>
+<PluginAuthor>brianpugh</PluginAuthor>
+<Beta>False</Beta>
+<Category>Tools:Utilities</Category>
+<Name>Claude Code</Name>
+<MinVer>6.12.0</MinVer>
+<Description>Claude Code CLI - AI-powered coding assistant from Anthropic. Use Claude directly in your Unraid terminal for code generation, debugging, and more. Authentication and settings persist across reboots automatically.</Description>
+<Support>https://forums.unraid.net/topic/197615-plugin-claude-code/</Support>
+<Icon>https://raw.githubusercontent.com/brianpugh/unraid-claude-code/main/claude-icon.png</Icon>
 </Containers>

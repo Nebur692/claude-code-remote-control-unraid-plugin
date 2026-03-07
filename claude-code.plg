@@ -2,7 +2,7 @@
 
 <PLUGIN name="claude-code" author="brianpugh" version="2026.03.06"
         pluginURL="https://raw.githubusercontent.com/brianpugh/unraid-claude-code/main/claude-code.plg"
-        supportURL="https://github.com/brianpugh/unraid-claude-code/issues"
+        supportURL="https://forums.unraid.net/topic/197615-plugin-claude-code/"
         icon="https://raw.githubusercontent.com/brianpugh/unraid-claude-code/main/claude-icon.png"
         min="6.12.0">
 
