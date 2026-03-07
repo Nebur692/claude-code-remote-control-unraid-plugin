@@ -3,7 +3,7 @@
   <Plugin>
     <TemplateURL>https://raw.githubusercontent.com/brianpugh/unraid-claude-code/main/claude-code.xml</TemplateURL>
     <Name>Claude Code</Name>
-    <Category>Tools:Utilities Productivity:</Category>
+    <Category>Tools:Utilities Productivity</Category>
     <Description>Claude Code CLI - AI-powered coding assistant from Anthropic. Use Claude directly in your Unraid terminal for code generation, debugging, and more. Authentication and settings persist across reboots automatically.</Description>
     <Overview>Claude Code CLI - AI-powered coding assistant from Anthropic. Use Claude directly in your Unraid terminal for code generation, debugging, and more. Authentication and settings persist across reboots automatically.</Overview>
     <PluginURL>https://raw.githubusercontent.com/brianpugh/unraid-claude-code/main/claude-code.plg</PluginURL>

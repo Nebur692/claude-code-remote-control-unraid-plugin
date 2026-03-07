@@ -23,3 +23,9 @@ replace = "###{new_version}"
 filename = "claude-code.plg"
 search = "plugin v{current_version}"
 replace = "plugin v{new_version}"
+
+[[tool.bumpversion.files]]
+filename = "claude-code.xml"
+search = "<Date>{current_version}</Date>"
+replace = "<Date>{new_version}</Date>"
+serialize = ["{year}-{month}-{day}"]
