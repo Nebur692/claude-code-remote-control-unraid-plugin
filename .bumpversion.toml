@@ -1,5 +1,5 @@
 [tool.bumpversion]
-current_version = "2025.11.27"
+current_version = "2026.03.06"
 commit = true
 commit_args = ""
 tag = true
@@ -7,7 +7,7 @@ tag_name = "v{new_version}"
 tag_message = "Release v{new_version}"
 allow_dirty = false
 parse = "(?P<year>\\d{4})\\.(?P<month>\\d{2})\\.(?P<day>\\d{2})"
-serialize = ["{year}.{month}.{day}"]
+serialize = ["{year}.{month:0>2}.{day:0>2}"]
 
 [[tool.bumpversion.files]]
 filename = "claude-code.plg"
@@ -28,4 +28,4 @@ replace = "plugin v{new_version}"
 filename = "claude-code.xml"
 search = "<Date>{current_version}</Date>"
 replace = "<Date>{new_version}</Date>"
-serialize = ["{year}-{month}-{day}"]
+serialize = ["{year}-{month:0>2}-{day:0>2}"]
