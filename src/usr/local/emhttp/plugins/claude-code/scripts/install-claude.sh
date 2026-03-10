@@ -163,7 +163,7 @@ setup_persistence() {
     mkdir -p "$APPDATA_PATH/.claude"
 
     # Create symlink (ln -sf handles removing existing symlink)
-    ln -sf "$APPDATA_PATH/.claude" "$CLAUDE_CONFIG_RUNTIME"
+    ln -snf "$APPDATA_PATH/.claude" "$CLAUDE_CONFIG_RUNTIME"
 
     # Save auto-detected path to config so it's consistent on future boots
     if [ "$AUTO_DETECTED" = true ]; then
@@ -185,9 +185,10 @@ setup_claude_json() {
         mv "$src" "$dest"
     fi
 
-    # Create symlink if appdata copy exists
-    if [ -f "$dest" ] && [ ! -L "$src" ]; then
-        ln -sf "$dest" "$src"
+    # Ensure the symlink exists
+    if [ ! -L "$src" ]; then
+        touch "$dest"
+        ln -snf "$dest" "$src"
         echo "Linked .claude.json to appdata."
     fi
 }

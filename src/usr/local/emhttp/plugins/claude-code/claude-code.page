@@ -123,9 +123,7 @@ _(Getting Started)_:
 
 _(Update Claude Code)_:
 : <form markdown="1" method="POST" action="/update.php" target="progressFrame">
-<input type="hidden" name="#command" value="/bin/bash">
-<input type="hidden" name="#arg[1]" value="-c">
-<input type="hidden" name="#arg[2]" value="source /boot/config/plugins/claude-code/claude-code.cfg 2>/dev/null; APPDATA_PATH=${APPDATA_PATH:-/mnt/user/appdata/claude-code}; rm -f &quot;$APPDATA_PATH/bin/claude&quot; /root/.local/bin/claude /usr/local/bin/claude; /usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh">
+<input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/update-claude.sh">
 <input type="submit" value="_(Update)_">
 </form>
 

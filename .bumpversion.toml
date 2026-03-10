@@ -18,8 +18,3 @@ replace = 'ENTITY version   "{new_version}"'
 filename = "claude-code.plg"
 search = "###{current_version}"
 replace = "###{new_version}"
-
-[[tool.bumpversion.files]]
-filename = "claude-code.plg"
-search = "plugin v{current_version}"
-replace = "plugin v{new_version}"

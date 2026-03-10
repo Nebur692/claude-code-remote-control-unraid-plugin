@@ -25,8 +25,6 @@
 - Replaced rc.d polling with disks_mounted event hook
 - Added logrotate for install log
 - Added Update button to web UI
-
-###2026.03.06
 - Initial release
 - Installs Claude Code CLI
 - Persistent authentication via user-configurable appdata folder
@@ -65,8 +63,6 @@ if grep -q "rc.claude-code" /boot/config/go 2>/dev/null; then
     echo "Migrating: removing old /boot/config/go entries..."
     sed -i '/# Start Claude Code/d' /boot/config/go
     sed -i '/rc.claude-code/d' /boot/config/go
-    # Clean up any resulting blank lines at end of file
-    sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' /boot/config/go
 fi
 
 # Remove old rc.d script
@@ -79,14 +75,14 @@ fi
 rm -rf /usr/local/emhttp/plugins/claude-code/icons 2>/dev/null || true
 
 # ---- Clean up old package versions from flash ----
-rm -f $(ls /boot/config/plugins/claude-code/claude-code-*.txz 2>/dev/null | grep -v '&pkg;') 2>/dev/null || true
+find /boot/config/plugins/claude-code -name "claude-code-*.txz" ! -name "&pkg;" -delete 2>/dev/null || true
 
 # ---- Install package ----
 upgradepkg --install-new /boot/config/plugins/claude-code/&pkg;
 
 # Run install script now (first-time install or plugin update)
 LOGFILE="/var/log/claude-code-install.log"
-echo "=== Claude Code plugin install $(date) ===" > "$LOGFILE"
+echo "=== Claude Code plugin install $(date) ===" >> "$LOGFILE"
 /usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh >> "$LOGFILE" 2>&1
 
 echo ""
@@ -113,8 +109,9 @@ rm -f /usr/local/bin/claude 2>/dev/null || true
 CLAUDE_REAL_DIR=$(readlink -f /root/.claude 2>/dev/null || echo "/root/.claude")
 rm -rf "$CLAUDE_REAL_DIR/local" 2>/dev/null || true
 
-# Remove config symlink
+# Remove config symlinks
 rm -f /root/.claude 2>/dev/null || true
+rm -f /root/.claude.json 2>/dev/null || true
 
 # Remove the Slackware package
 removepkg claude-code 2>/dev/null || true
