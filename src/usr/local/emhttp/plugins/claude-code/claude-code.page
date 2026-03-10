@@ -29,112 +29,119 @@ $symlink_target = is_link("/root/.claude") ? readlink("/root/.claude") : null;
 $symlink_ok = $symlink_target === "$appdata_path/.claude";
 ?>
 
-<style>
-.status-ok { color: green; font-weight: bold; }
-.status-warn { color: orange; font-weight: bold; }
-.status-error { color: red; font-weight: bold; }
-.code-block {
-    background: #1e1e1e;
-    color: #d4d4d4;
-    padding: 15px;
-    border-radius: 5px;
-    font-family: monospace;
-    margin: 10px 0;
-}
-.section { margin-bottom: 20px; }
-</style>
+<table class="tablesorter shift ups">
+<thead><tr><th>_(Status)_</th></tr></thead>
+</table>
 
-<div style="padding: 20px;">
-    <h2>Claude Code</h2>
-    <p>Claude Code CLI for Unraid - AI-powered coding assistant in your terminal.</p>
+<div style="width: 75%; float:left">
 
-    <div class="section">
-        <h3>Status</h3>
-        <table>
-            <tr>
-                <td><strong>Claude Code:</strong></td>
-                <td><?= $claude_installed
-                    ? "<span class='status-ok'>$claude_version</span>"
-                    : "<span class='status-error'>Not installed</span>" ?></td>
-            </tr>
-            <tr>
-                <td><strong>Array:</strong></td>
-                <td><?= $array_started
-                    ? "<span class='status-ok'>Started</span>"
-                    : "<span class='status-error'>Not started</span>" ?></td>
-            </tr>
-            <tr>
-                <td><strong>Authentication:</strong></td>
-                <td><?= $has_auth
-                    ? "<span class='status-ok'>Configured</span>"
-                    : "<span class='status-warn'>Not authenticated</span>" ?></td>
-            </tr>
-            <tr>
-                <td><strong>Symlink:</strong></td>
-                <td><?= $symlink_ok
-                    ? "<span class='status-ok'>OK</span>"
-                    : "<span class='status-warn'>Not configured</span>" ?></td>
-            </tr>
-        </table>
-    </div>
+_(Claude Code)_:
+: <?= $claude_installed
+    ? "<span class='green-text'><b>$claude_version</b></span>"
+    : "<span class='red-text'><b>_(Not installed)_</b></span>" ?>
 
-    <div class="section">
-        <h3>Settings</h3>
-        <form method="POST" action="/update.php" target="progressFrame">
-            <input type="hidden" name="#file" value="<?= $cfg_file ?>">
-            <input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh">
+_(Array)_:
+: <?= $array_started
+    ? "<span class='green-text'><b>_(Started)_</b></span>"
+    : "<span class='red-text'><b>_(Not started)_</b></span>" ?>
 
-            <dl>
-                <dt>Appdata Path:</dt>
-                <dd>
-                    <input type="text" name="APPDATA_PATH" value="<?= htmlspecialchars($appdata_path) ?>" size="50">
-                </dd>
-            </dl>
-            <dl>
-                <dt>&nbsp;</dt>
-                <dd>
-                    <input type="submit" value="Apply">
-                    <input type="button" value="Done" onclick="done()">
-                </dd>
-            </dl>
-        </form>
-        <p><em>Store Claude config on your array to avoid flash wear.</em></p>
-    </div>
+_(Authentication)_:
+: <?= $has_auth
+    ? "<span class='green-text'><b>_(Configured)_</b></span>"
+    : "<span class='orange-text'><b>_(Not authenticated)_</b></span>" ?>
 
-    <div class="section">
-        <h3>Usage</h3>
-        <p>Open the Unraid terminal (top-right corner) and run:</p>
-        <div class="code-block">claude</div>
-    </div>
+_(Persistence Symlink)_:
+: <?= $symlink_ok
+    ? "<span class='green-text'><b>_(OK)_</b></span>"
+    : "<span class='orange-text'><b>_(Not configured)_</b></span>" ?>
 
-    <?php if (!$has_auth): ?>
-    <div class="section">
-        <h3>First-Time Setup</h3>
-        <ol>
-            <li>Make sure the array is started</li>
-            <li>Open terminal and run <code>claude</code></li>
-            <li>Follow the authentication prompts</li>
-            <li>Your credentials are automatically saved to the appdata folder</li>
-        </ol>
-    </div>
-    <?php endif; ?>
+:claude_code_status_plug:
+> Claude Code is an AI-powered coding assistant CLI from Anthropic.
+>
+> + **Claude Code**: Shows the installed version, or "Not installed" if the binary is not yet available.
+> + **Array**: The Unraid array must be started for persistent storage to work.
+> + **Authentication**: Shows whether Claude credentials have been saved. Run `claude` in the terminal to authenticate.
+> + **Persistence Symlink**: Indicates whether `~/.claude` is correctly symlinked to your appdata folder.
+:end
 
-    <div class="section">
-        <h3>Update Claude Code</h3>
-        <form method="POST" action="/update.php" target="progressFrame">
-            <input type="hidden" name="#command" value="/bin/bash">
-            <input type="hidden" name="#arg[1]" value="-c">
-            <input type="hidden" name="#arg[2]" value="source /boot/config/plugins/claude-code/claude-code.cfg 2>/dev/null; APPDATA_PATH=${APPDATA_PATH:-/mnt/user/appdata/claude-code}; rm -f &quot;$APPDATA_PATH/bin/claude&quot; /root/.local/bin/claude /usr/local/bin/claude; /usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh">
-            <input type="submit" value="Update">
-            <span style="margin-left: 10px; color: #666;">Clears cached binary and re-downloads the latest version.</span>
-        </form>
-    </div>
+&nbsp;
 
-    <div class="section">
-        <h3>Reinstall Claude Code</h3>
-        <form method="POST" action="/update.php" target="progressFrame">
-            <input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh">
-            <input type="submit" value="Reinstall">
-        </form>
-    </div>
-</div>
+<table class="tablesorter shift ups">
+<thead><tr><th>_(Settings)_</th></tr></thead>
+</table>
+
+<form markdown="1" method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#file" value="claude-code/claude-code.cfg">
+<input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh">
+
+_(Appdata Path)_:
+: <input type="text" name="APPDATA_PATH" value="<?=htmlspecialchars($appdata_path);?>" placeholder="/mnt/user/appdata/claude-code" size="50">
+
+:claude_code_appdata_path_plug:
+> Path where Claude Code stores its configuration, authentication tokens, and cached binary.
+> This should be on your array (not the flash drive) to avoid flash wear from the ~150MB binary.
+>
+> If left empty, the install script auto-detects the path from your Docker appdata configuration.
+> Common locations:
+>
+> + `/mnt/user/appdata/claude-code` — Default (user share)
+> + `/mnt/cache/appdata/claude-code` — Cache drive directly
+:end
+
+<input type="submit" name="#apply" value="_(Apply)_"><input type="button" value="_(Done)_" onclick="done()">
+</form>
+
+&nbsp;
+
+<table class="tablesorter shift ups">
+<thead><tr><th>_(Usage)_</th></tr></thead>
+</table>
+
+_(Getting Started)_:
+: Open the Unraid terminal (top-right ` >_ ` icon) and run: `claude`
+
+:claude_code_usage_plug:
+> **First-Time Setup:**
+>
+> 1. Make sure the array is started.
+> 2. Open terminal and run `claude`.
+> 3. Follow the authentication prompts.
+> 4. Your credentials are automatically saved to the appdata folder and persist across reboots.
+>
+> **Tips:**
+>
+> + Claude Code is re-installed automatically on each boot via the `disks_mounted` event hook.
+> + The binary is cached in appdata so subsequent boots are fast (no re-download needed).
+> + Check `/var/log/claude-code-install.log` if you encounter issues.
+:end
+
+&nbsp;
+
+<table class="tablesorter shift ups">
+<thead><tr><th>_(Maintenance)_</th></tr></thead>
+</table>
+
+_(Update Claude Code)_:
+: <form markdown="1" method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#command" value="/bin/bash">
+<input type="hidden" name="#arg[1]" value="-c">
+<input type="hidden" name="#arg[2]" value="source /boot/config/plugins/claude-code/claude-code.cfg 2>/dev/null; APPDATA_PATH=${APPDATA_PATH:-/mnt/user/appdata/claude-code}; rm -f &quot;$APPDATA_PATH/bin/claude&quot; /root/.local/bin/claude /usr/local/bin/claude; /usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh">
+<input type="submit" value="_(Update)_">
+</form>
+
+:claude_code_update_plug:
+> Clears the cached Claude Code binary and re-downloads the latest version from Anthropic.
+> Use this after a new Claude Code release to get the latest features and fixes.
+:end
+
+_(Reinstall Claude Code)_:
+: <form markdown="1" method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh">
+<input type="submit" value="_(Reinstall)_">
+</form>
+
+:claude_code_reinstall_plug:
+> Re-runs the install script without clearing the cached binary.
+> If the cached binary is still valid, this is a fast operation.
+> Use this if Claude Code stopped working but you don't need the latest version.
+:end
