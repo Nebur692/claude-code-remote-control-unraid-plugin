@@ -1,12 +1,31 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="brianpugh" version="2026.03.06"
-        pluginURL="https://raw.githubusercontent.com/brianpugh/unraid-claude-code/main/claude-code.plg"
+<!DOCTYPE PLUGIN [
+  <!ENTITY name      "claude-code">
+  <!ENTITY author    "brianpugh">
+  <!ENTITY version   "2026.03.06">
+  <!ENTITY github    "brianpugh/unraid-claude-code">
+  <!ENTITY gitURL    "https://raw.githubusercontent.com/&github;/main">
+  <!ENTITY pluginURL "&gitURL;/claude-code.plg">
+  <!ENTITY launch    "Settings/ClaudeCode">
+  <!ENTITY pkg       "&name;-&version;-noarch-1.txz">
+  <!ENTITY sha256    "PENDING">
+]>
+
+<PLUGIN name="&name;" author="&author;" version="&version;"
+        pluginURL="&pluginURL;"
+        launch="&launch;"
         supportURL="https://forums.unraid.net/topic/197615-plugin-claude-code/"
-        icon="https://raw.githubusercontent.com/brianpugh/unraid-claude-code/main/claude-icon.png"
+        icon="&gitURL;/claude-icon.png"
         min="6.12.0">
 
 <CHANGES>
+###&version;
+- Refactored to Slackware package (.txz) convention
+- Replaced rc.d polling with disks_mounted event hook
+- Added logrotate for install log
+- Added Update button to web UI
+
 ###2026.03.06
 - Initial release
 - Installs Claude Code CLI
@@ -18,543 +37,66 @@ Claude Code CLI - AI-powered coding assistant from Anthropic.
 Use Claude directly in your terminal for code generation, debugging, and more.
 </DESCRIPTION>
 
-<!-- Create directories -->
-<FILE Run="/bin/bash">
-<INLINE>
-mkdir -p /boot/config/plugins/claude-code
-mkdir -p /usr/local/emhttp/plugins/claude-code/scripts
-mkdir -p /usr/local/emhttp/plugins/claude-code/icons
-</INLINE>
-</FILE>
-
-<!-- Download icon -->
-<FILE Name="/usr/local/emhttp/plugins/claude-code/icons/claude-code.png">
-<URL>https://raw.githubusercontent.com/brianpugh/unraid-claude-code/main/claude-icon.png</URL>
-</FILE>
-
 <!-- Configuration file (only created if not exists, to preserve user settings across reinstalls) -->
 <FILE Run="/bin/bash">
 <INLINE>
 <![CDATA[
 if [ ! -f /boot/config/plugins/claude-code/claude-code.cfg ]; then
+    mkdir -p /boot/config/plugins/claude-code
     echo 'APPDATA_PATH=""' > /boot/config/plugins/claude-code/claude-code.cfg
 fi
 ]]>
 </INLINE>
 </FILE>
 
-<!-- Install/setup script -->
-<FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh" Mode="0755">
-<INLINE>
-<![CDATA[
-#!/bin/bash
-
-# Don't use set -e - we want to continue even if some steps fail
-
-PLUGIN_CFG="/boot/config/plugins/claude-code/claude-code.cfg"
-CLAUDE_CONFIG_RUNTIME="/root/.claude"
-
-# Load config
-if [ -f "$PLUGIN_CFG" ]; then
-    source "$PLUGIN_CFG"
-fi
-
-# Auto-detect appdata path if not set
-AUTO_DETECTED=false
-if [ -z "$APPDATA_PATH" ]; then
-    AUTO_DETECTED=true
-    echo "Auto-detecting appdata path..."
-
-    # Method 1: Check Docker default storage path
-    if [ -f "/boot/config/docker.cfg" ]; then
-        DOCKER_APPDATA=$(grep -E '^DOCKER_APP_CONFIG_PATH=' /boot/config/docker.cfg 2>/dev/null | cut -d'"' -f2)
-        if [ -n "$DOCKER_APPDATA" ] && [ -d "$(dirname "$DOCKER_APPDATA")" ]; then
-            APPDATA_PATH="${DOCKER_APPDATA%/}/claude-code"
-            echo "Detected from Docker config: $APPDATA_PATH"
-        fi
-    fi
-
-    # Method 2: Look for existing appdata directories
-    if [ -z "$APPDATA_PATH" ]; then
-        for candidate in /mnt/user/appdata /mnt/disks/*/appdata /mnt/cache/appdata; do
-            if [ -d "$candidate" ]; then
-                APPDATA_PATH="$candidate/claude-code"
-                echo "Found appdata directory: $APPDATA_PATH"
-                break
-            fi
-        done
-    fi
-
-    # Fallback
-    if [ -z "$APPDATA_PATH" ]; then
-        APPDATA_PATH="/mnt/user/appdata/claude-code"
-        echo "Using default: $APPDATA_PATH"
-    fi
-fi
-
-CACHED_BINARY="$APPDATA_PATH/bin/claude"
-
-echo "=== Claude Code Installation ==="
-
-ensure_symlink() {
-    # Always ensure /usr/local/bin/claude symlink exists so claude is on
-    # PATH for interactive shells (which don't have ~/.local/bin in PATH)
-    if [ -x /usr/local/bin/claude ]; then
-        return 0
-    fi
-    for candidate in /root/.local/bin/claude /root/.claude/local/bin/claude; do
-        if [ -x "$candidate" ]; then
-            ln -sf "$candidate" /usr/local/bin/claude
-            echo "Symlinked $candidate -> /usr/local/bin/claude"
-            return 0
-        fi
-    done
-    return 1
-}
-
-restore_cached_binary() {
-    # Restore binary from appdata cache (avoids re-downloading on every boot)
-    if [ -f "$CACHED_BINARY" ]; then
-        echo "Restoring Claude Code from cache..."
-        mkdir -p /root/.local/bin
-        cp "$CACHED_BINARY" /root/.local/bin/claude
-        chmod +x /root/.local/bin/claude
-        return 0
-    fi
-    return 1
-}
-
-cache_binary() {
-    # Cache the binary to appdata so it survives reboots
-    if [ -x /root/.local/bin/claude ]; then
-        mkdir -p "$APPDATA_PATH/bin"
-        cp /root/.local/bin/claude "$CACHED_BINARY"
-        echo "Cached Claude binary for future boots."
-    fi
-}
-
-install_claude_code() {
-    # Check if claude works (not just exists)
-    local ver
-    ver=$(claude --version 2>/dev/null)
-    if [ -n "$ver" ]; then
-        echo "Claude Code already installed: $ver"
-        ensure_symlink
-        return 0
-    fi
-
-    # Try restoring from cache first (fast, no network needed)
-    if restore_cached_binary; then
-        ensure_symlink
-        ver=$(claude --version 2>/dev/null)
-        if [ -n "$ver" ]; then
-            echo "Claude Code restored from cache: $ver"
-            return 0
-        fi
-        echo "Cached binary didn't work, falling back to installer..."
-    fi
-
-    # Full install via native installer
-    echo "Installing Claude Code via native installer..."
-    local installer
-    installer=$(mktemp /tmp/claude-install.XXXXXX)
-    if ! curl -fsSL https://claude.ai/install.sh -o "$installer"; then
-        echo "Failed to download installer."
-        rm -f "$installer"
-        return 1
-    fi
-    if ! bash "$installer"; then
-        echo "Installer script failed."
-        rm -f "$installer"
-        return 1
-    fi
-    rm -f "$installer"
-
-    ensure_symlink
-    cache_binary
-
-    if command -v claude &> /dev/null; then
-        echo "Claude Code installed successfully!"
-    else
-        echo "WARNING: Claude Code installer completed but 'claude' not found in PATH"
-        return 1
-    fi
-}
-
-wait_for_appdata_mount() {
-    # Determine the mount point for our appdata path
-    local wait_mount="/mnt/user"
-    case "$APPDATA_PATH" in
-        /mnt/disks/*)
-            # Unassigned Devices: extract mount like /mnt/disks/vms
-            wait_mount=$(echo "$APPDATA_PATH" | cut -d/ -f1-4)
-            ;;
-        /mnt/cache/*)
-            wait_mount="/mnt/cache"
-            ;;
-    esac
-
-    local max_wait=120
-    local waited=0
-    echo "Waiting for $wait_mount..."
-    while [ $waited -lt $max_wait ]; do
-        if mountpoint -q "$wait_mount" 2>/dev/null; then
-            echo "$wait_mount is available."
-            return 0
-        fi
-        sleep 5
-        waited=$((waited + 5))
-        echo "Waiting for $wait_mount... (${waited}s/${max_wait}s)"
-    done
-    echo "WARNING: $wait_mount not available after ${max_wait}s"
-    return 1
-}
-
-setup_persistence() {
-    echo "Setting up persistent storage..."
-    echo "Appdata path: $APPDATA_PATH"
-
-    # Check if appdata mount is available
-    if ! wait_for_appdata_mount; then
-        echo "WARNING: Appdata mount not available. Persistence will be configured later."
-        return 0
-    fi
-
-    # Early exit if symlink is already correct
-    if [ -L "$CLAUDE_CONFIG_RUNTIME" ] && [ "$(readlink "$CLAUDE_CONFIG_RUNTIME")" = "$APPDATA_PATH/.claude" ]; then
-        echo "Persistence already configured."
-        return 0
-    fi
-
-    # Create appdata directory if it doesn't exist
-    mkdir -p "$APPDATA_PATH"
-
-    # If runtime config exists as a real directory (not symlink), migrate it
-    if [ -d "$CLAUDE_CONFIG_RUNTIME" ] && [ ! -L "$CLAUDE_CONFIG_RUNTIME" ]; then
-        echo "Migrating existing Claude config to appdata..."
-        if [ -d "$APPDATA_PATH/.claude" ]; then
-            # Merge: appdata takes precedence, but copy any missing files from runtime
-            # Use -a (archive) -n (no clobber); dotglob ensures hidden files are included
-            shopt -s dotglob
-            cp -an "$CLAUDE_CONFIG_RUNTIME"/* "$APPDATA_PATH/.claude/" 2>/dev/null || true
-            shopt -u dotglob
-        else
-            mv "$CLAUDE_CONFIG_RUNTIME" "$APPDATA_PATH/.claude"
-        fi
-        rm -rf "$CLAUDE_CONFIG_RUNTIME"
-    fi
-
-    # Create .claude directory in appdata if needed
-    mkdir -p "$APPDATA_PATH/.claude"
-
-    # Create symlink (ln -sf handles removing existing symlink)
-    ln -sf "$APPDATA_PATH/.claude" "$CLAUDE_CONFIG_RUNTIME"
-
-    # Save auto-detected path to config so it's consistent on future boots
-    if [ "$AUTO_DETECTED" = true ]; then
-        echo "APPDATA_PATH=\"$APPDATA_PATH\"" > "$PLUGIN_CFG"
-        echo "Saved appdata path to config."
-    fi
-
-    echo "Persistence configured: $CLAUDE_CONFIG_RUNTIME -> $APPDATA_PATH/.claude"
-}
-
-setup_claude_json() {
-    # /root/.claude.json is a separate config file on tmpfs, lost on reboot.
-    # Persist it by symlinking to appdata.
-    local src="/root/.claude.json"
-    local dest="$APPDATA_PATH/.claude.json"
-
-    # If real file exists (not symlink), move it to appdata
-    if [ -f "$src" ] && [ ! -L "$src" ]; then
-        mv "$src" "$dest"
-    fi
-
-    # Create symlink if appdata copy exists
-    if [ -f "$dest" ] && [ ! -L "$src" ]; then
-        ln -sf "$dest" "$src"
-        echo "Linked .claude.json to appdata."
-    fi
-}
-
-# Main
-
-# Set up persistence first so the native installer writes into appdata
-# (the installer writes to ~/.claude/local/ which follows our symlink)
-setup_persistence
-setup_claude_json
-
-if ! install_claude_code; then
-    echo "WARNING: Failed to install Claude Code"
-    echo "You can retry manually: /usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh"
-    echo "Or install manually: curl -fsSL https://claude.ai/install.sh | bash"
-fi
-
-echo ""
-if command -v claude &> /dev/null; then
-    echo "=== Installation Complete ==="
-    echo "Run 'claude' to start using Claude Code."
-    echo "Your authentication will persist in: $APPDATA_PATH"
-else
-    echo "=== Installation Incomplete ==="
-    echo "Claude Code is not yet available."
-    echo "Check /var/log/claude-code-install.log for details."
-    echo ""
-    echo "Troubleshooting:"
-    echo "  1. Make sure you have network connectivity"
-    echo "  2. Try running: /usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh"
-fi
-]]>
-</INLINE>
+<!-- Download and install the Slackware package -->
+<FILE Name="/boot/config/plugins/&name;/&pkg;" Min="6.12.0">
+<URL>https://github.com/&github;/releases/download/v&version;/&pkg;</URL>
+<SHA256>&sha256;</SHA256>
 </FILE>
 
-<!-- Web UI -->
-<FILE Name="/usr/local/emhttp/plugins/claude-code/claude-code.page">
-<INLINE>
-<![CDATA[
-Menu="Utilities"
-Title="Claude Code"
-Icon="icons/claude-code.png"
-Desc="AI-powered coding assistant CLI"
----
-<?php
-$plugin_dir = "/boot/config/plugins/claude-code";
-$cfg_file = "$plugin_dir/claude-code.cfg";
-
-$cfg = file_exists($cfg_file) ? parse_ini_file($cfg_file) : [];
-$appdata_path = $cfg['APPDATA_PATH'] ?? '';
-
-// Fallback if config not yet populated (install script saves the auto-detected path)
-if (empty($appdata_path)) {
-    $appdata_path = '/mnt/user/appdata/claude-code';
-}
-$auth_dir = "$appdata_path/.claude";
-$has_auth = is_dir($auth_dir);
-
-// Check if array is started (check for actual mount, not just directory)
-$array_started = trim(shell_exec("mountpoint -q /mnt/user 2>/dev/null && echo yes || echo no")) === "yes";
-
-// Check if claude is installed
-$claude_installed = trim(shell_exec("which claude 2>/dev/null")) !== "";
-$claude_version = $claude_installed ? htmlspecialchars(trim(shell_exec("claude --version 2>/dev/null")) ?: "Unknown") : "";
-
-// Check symlink status
-$symlink_target = is_link("/root/.claude") ? readlink("/root/.claude") : null;
-$symlink_ok = $symlink_target === "$appdata_path/.claude";
-?>
-
-<style>
-.status-ok { color: green; font-weight: bold; }
-.status-warn { color: orange; font-weight: bold; }
-.status-error { color: red; font-weight: bold; }
-.code-block {
-    background: #1e1e1e;
-    color: #d4d4d4;
-    padding: 15px;
-    border-radius: 5px;
-    font-family: monospace;
-    margin: 10px 0;
-}
-.section { margin-bottom: 20px; }
-</style>
-
-<div style="padding: 20px;">
-    <h2>Claude Code</h2>
-    <p>Claude Code CLI for Unraid - AI-powered coding assistant in your terminal.</p>
-
-    <div class="section">
-        <h3>Status</h3>
-        <table>
-            <tr>
-                <td><strong>Claude Code:</strong></td>
-                <td><?= $claude_installed
-                    ? "<span class='status-ok'>$claude_version</span>"
-                    : "<span class='status-error'>Not installed</span>" ?></td>
-            </tr>
-            <tr>
-                <td><strong>Array:</strong></td>
-                <td><?= $array_started
-                    ? "<span class='status-ok'>Started</span>"
-                    : "<span class='status-error'>Not started</span>" ?></td>
-            </tr>
-            <tr>
-                <td><strong>Authentication:</strong></td>
-                <td><?= $has_auth
-                    ? "<span class='status-ok'>Configured</span>"
-                    : "<span class='status-warn'>Not authenticated</span>" ?></td>
-            </tr>
-            <tr>
-                <td><strong>Symlink:</strong></td>
-                <td><?= $symlink_ok
-                    ? "<span class='status-ok'>OK</span>"
-                    : "<span class='status-warn'>Not configured</span>" ?></td>
-            </tr>
-        </table>
-    </div>
-
-    <div class="section">
-        <h3>Settings</h3>
-        <form method="POST" action="/update.php" target="progressFrame">
-            <input type="hidden" name="#file" value="<?= $cfg_file ?>">
-            <input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh">
-
-            <dl>
-                <dt>Appdata Path:</dt>
-                <dd>
-                    <input type="text" name="APPDATA_PATH" value="<?= htmlspecialchars($appdata_path) ?>" size="50">
-                </dd>
-            </dl>
-            <dl>
-                <dt>&nbsp;</dt>
-                <dd>
-                    <input type="submit" value="Apply">
-                    <input type="button" value="Done" onclick="done()">
-                </dd>
-            </dl>
-        </form>
-        <p><em>Store Claude config on your array to avoid flash wear.</em></p>
-    </div>
-
-    <div class="section">
-        <h3>Usage</h3>
-        <p>Open the Unraid terminal (top-right corner) and run:</p>
-        <div class="code-block">claude</div>
-    </div>
-
-    <?php if (!$has_auth): ?>
-    <div class="section">
-        <h3>First-Time Setup</h3>
-        <ol>
-            <li>Make sure the array is started</li>
-            <li>Open terminal and run <code>claude</code></li>
-            <li>Follow the authentication prompts</li>
-            <li>Your credentials are automatically saved to the appdata folder</li>
-        </ol>
-    </div>
-    <?php endif; ?>
-
-    <div class="section">
-        <h3>Reinstall Claude Code</h3>
-        <form method="POST" action="/update.php" target="progressFrame">
-            <input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh">
-            <input type="submit" value="Reinstall">
-        </form>
-    </div>
-</div>
-]]>
-</INLINE>
-</FILE>
-
-<!-- rc.d startup script (runs on boot via Unraid's init system) -->
-<FILE Name="/etc/rc.d/rc.claude-code" Mode="0755">
-<INLINE>
-<![CDATA[
-#!/bin/bash
-
-# Claude Code startup script for Unraid
-# Called by Unraid's init system on boot
-
-LOGFILE="/var/log/claude-code-install.log"
-INSTALL_SCRIPT="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh"
-
-wait_for_network() {
-    local max_wait=120
-    local waited=0
-    echo "Waiting for network..."
-    while [ $waited -lt $max_wait ]; do
-        # Check if we can reach a reliable host
-        if ping -c 1 -W 2 8.8.8.8 &>/dev/null || ping -c 1 -W 2 1.1.1.1 &>/dev/null; then
-            echo "Network is available."
-            return 0
-        fi
-        sleep 5
-        waited=$((waited + 5))
-        echo "Waiting for network... (${waited}s/${max_wait}s)"
-    done
-    echo "WARNING: Network not available after ${max_wait}s"
-    return 1
-}
-
-wait_for_array() {
-    local max_wait=300
-    local waited=0
-    echo "Waiting for array..."
-    while [ $waited -lt $max_wait ]; do
-        if mountpoint -q /mnt/user 2>/dev/null; then
-            echo "Array is available."
-            return 0
-        fi
-        sleep 5
-        waited=$((waited + 5))
-        echo "Waiting for array... (${waited}s/${max_wait}s)"
-    done
-    echo "WARNING: Array not available after ${max_wait}s"
-    return 1
-}
-
-do_install() {
-    echo "=== Claude Code Startup $(date) ===" > "$LOGFILE"
-
-    # Wait for dependencies
-    wait_for_network >> "$LOGFILE" 2>&1
-    wait_for_array >> "$LOGFILE" 2>&1
-
-    # Run the actual install
-    "$INSTALL_SCRIPT" >> "$LOGFILE" 2>&1
-}
-
-case "$1" in
-    start)
-        echo "Starting Claude Code..."
-        # Run in background to not block boot
-        nohup "$0" _run > /dev/null 2>&1 &
-        ;;
-    _run)
-        export PATH="/root/.local/bin:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin"
-        export HOME='/root'
-        do_install
-        ;;
-    stop)
-        echo "Stopping Claude Code..."
-        ;;
-    restart)
-        "$0" stop
-        "$0" start
-        ;;
-    *)
-        echo "Usage: $0 {start|stop|restart}"
-        exit 1
-        ;;
-esac
-]]>
-</INLINE>
-</FILE>
-
-<!-- Post-install -->
+<!-- Install package and handle migration -->
 <FILE Run="/bin/bash">
 <INLINE>
 <![CDATA[
-# Add startup entry to go file if not already present
-GO_FILE="/boot/config/go"
-STARTUP_CMD="/etc/rc.d/rc.claude-code start"
-
-if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
-    echo "" >> "$GO_FILE"
-    echo "# Start Claude Code" >> "$GO_FILE"
-    echo "$STARTUP_CMD" >> "$GO_FILE"
-
-    # Run install now (only on first-time plugin install, not on boot)
-    /usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh
-
-    echo ""
-    echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.03.06 has been installed!"
-    echo ""
-    echo " To use: Open terminal and run: claude"
-    echo " Web UI: Settings -> Utilities -> Claude Code"
-    echo "-----------------------------------------------------------"
-    echo ""
+# ---- Migration from pre-package version ----
+# Remove /boot/config/go entries for old rc.d script
+if grep -q "rc.claude-code" /boot/config/go 2>/dev/null; then
+    echo "Migrating: removing old /boot/config/go entries..."
+    sed -i '/# Start Claude Code/d' /boot/config/go
+    sed -i '/rc.claude-code/d' /boot/config/go
+    # Clean up any resulting blank lines at end of file
+    sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' /boot/config/go
 fi
+
+# Remove old rc.d script
+if [ -f /etc/rc.d/rc.claude-code ]; then
+    echo "Migrating: removing old rc.d script..."
+    rm -f /etc/rc.d/rc.claude-code
+fi
+
+# Remove old icons subdirectory (now icon is at plugin root)
+rm -rf /usr/local/emhttp/plugins/claude-code/icons 2>/dev/null || true
+
+# ---- Clean up old package versions from flash ----
+rm -f $(ls /boot/config/plugins/claude-code/claude-code-*.txz 2>/dev/null | grep -v '&pkg;') 2>/dev/null || true
+
+# ---- Install package ----
+upgradepkg --install-new /boot/config/plugins/claude-code/&pkg;
+
+# Run install script now (first-time install or plugin update)
+LOGFILE="/var/log/claude-code-install.log"
+echo "=== Claude Code plugin install $(date) ===" > "$LOGFILE"
+/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh >> "$LOGFILE" 2>&1
+
+echo ""
+echo "-----------------------------------------------------------"
+echo " Claude Code plugin v&version; has been installed!"
+echo ""
+echo " To use: Open terminal and run: claude"
+echo " Web UI: Settings -> Utilities -> Claude Code"
+echo "-----------------------------------------------------------"
+echo ""
 ]]>
 </INLINE>
 </FILE>
@@ -565,24 +107,23 @@ fi
 <![CDATA[
 echo "Removing Claude Code plugin..."
 
-# Remove startup entry from go file
-sed -i '/# Start Claude Code/d' /boot/config/go 2>/dev/null || true
-sed -i '/rc.claude-code/d' /boot/config/go 2>/dev/null || true
-
-# Remove rc.d script
-rm -f /etc/rc.d/rc.claude-code
-
 # Remove Claude Code binary (native install locations)
-rm -rf /root/.local/bin/claude 2>/dev/null || true
+rm -f /root/.local/bin/claude 2>/dev/null || true
+rm -f /usr/local/bin/claude 2>/dev/null || true
 CLAUDE_REAL_DIR=$(readlink -f /root/.claude 2>/dev/null || echo "/root/.claude")
 rm -rf "$CLAUDE_REAL_DIR/local" 2>/dev/null || true
 
 # Remove config symlink
 rm -f /root/.claude 2>/dev/null || true
 
-# Remove plugin runtime files
-rm -rf /usr/local/emhttp/plugins/claude-code
-rm -f /usr/local/bin/claude
+# Remove the Slackware package
+removepkg claude-code 2>/dev/null || true
+
+# Clean up any leftover plugin files
+rm -rf /usr/local/emhttp/plugins/claude-code 2>/dev/null || true
+
+# Remove cached package from flash
+rm -f /boot/config/plugins/claude-code/claude-code-*.txz 2>/dev/null || true
 
 # Note: We keep config and appdata for potential reinstall
 echo ""

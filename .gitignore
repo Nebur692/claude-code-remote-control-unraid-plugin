@@ -11,3 +11,6 @@ Thumbs.db
 
 # Local testing
 node_modules/
+
+# Build output
+build/

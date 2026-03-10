@@ -11,8 +11,8 @@ serialize = ["{year}.{month:0>2}.{day:0>2}"]
 
 [[tool.bumpversion.files]]
 filename = "claude-code.plg"
-search = 'version="{current_version}"'
-replace = 'version="{new_version}"'
+search = 'ENTITY version   "{current_version}"'
+replace = 'ENTITY version   "{new_version}"'
 
 [[tool.bumpversion.files]]
 filename = "claude-code.plg"

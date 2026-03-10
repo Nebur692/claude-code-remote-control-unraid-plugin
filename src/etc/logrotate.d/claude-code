@@ -1,0 +1,8 @@
+/var/log/claude-code-install.log {
+    compress
+    daily
+    rotate 4
+    notifempty
+    missingok
+    copytruncate
+}
