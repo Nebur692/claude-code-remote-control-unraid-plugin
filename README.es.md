@@ -32,6 +32,7 @@ La autenticación y la configuración persisten automáticamente entre reinicios
 
 ## Cambios
 
+- **v1.0.1** — La página de configuración (Settings > Utilities > Claude Code) ahora es bilingüe y detecta automáticamente español/inglés según el idioma del webGUI de Unraid (`locale=` en `dynamix.cfg`), con el mismo enfoque que el fork [unraid-zabbix_agent-6lts](https://github.com/Nebur692/unraid-zabbix_agent-6lts).
 - **v1.0.0** — Fork a partir del proyecto original. El icono del plugin ahora va embebido en base64 dentro del propio `.plg`, en lugar de descargarse por red durante el arranque. Antes, si esa única descarga fallaba (por ejemplo, porque la red aún no estaba lista justo después de reiniciar), Unraid abortaba la instalación completa y desterraba el plugin a `/boot/config/plugins-error`, dejándolo deshabilitado silenciosamente en todos los arranques futuros hasta reinstalarlo a mano.
 
 ## Solución de problemas
