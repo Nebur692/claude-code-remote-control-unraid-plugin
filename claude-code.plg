@@ -1,12 +1,16 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.07.24.3"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.07.24.4"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.07.24.4
+- v1.2.1: Fixed the "no log yet" help text on the Settings page: it claimed clicking
+  Reinstall would create the log, but Reinstall calls install-claude.sh directly, not
+  rc.claude-code (the only script that writes to the log) — only an actual reboot does.
 ###2026.07.24.3
 - v1.2.0: Plugins tab now shows "Claude Code Remote Control" with a real description
   (bilingual) instead of the bare word "claude-code". Unraid renders
@@ -610,7 +614,7 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 </dl>
 <blockquote class="inline_help"><?=t('Follows the install/startup log written by this plugin on every boot.', 'Sigue el log de instalación/arranque que escribe este plugin en cada arranque.')?></blockquote>
 <?php else: ?>
-<blockquote class="inline_help"><span class="dim-text"><?=t('No log yet — it is created the next time the plugin runs its startup script (on boot, install, or Reinstall below).', 'Todavía no hay log — se crea la próxima vez que el plugin ejecute su script de arranque (al reiniciar, instalar, o con Reinstalar más abajo).')?></span></blockquote>
+<blockquote class="inline_help"><span class="dim-text"><?=t('No log yet — it is written by the startup script that runs on every Unraid boot, so it appears after the next reboot.', 'Todavía no hay log — lo escribe el script de arranque que se ejecuta en cada inicio de Unraid, así que aparecerá tras el próximo reinicio.')?></span></blockquote>
 <?php endif; ?>
 </div>
 
@@ -740,7 +744,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.07.24.3 has been installed!"
+    echo " Claude Code plugin v2026.07.24.4 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
