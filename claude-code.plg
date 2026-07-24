@@ -1,12 +1,27 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="brianpugh (fork: Nebur692)" version="2026.07.24.1"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.07.24.2"
+        launch="Utilities/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
-        icon="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-icon.png"
         min="6.12.0">
 
 <CHANGES>
+###2026.07.24.2
+- v1.1.0: author is now just "Nebur692" (was "brianpugh (fork: Nebur692)").
+- v1.1.0: added launch="Utilities/claude-code" so clicking the plugin row on the
+  Plugins tab jumps straight to its Settings page, same as the Zabbix Agent fork.
+- v1.1.0: fixed the Plugins-tab icon. Unraid's Plugins tab does NOT use the icon=
+  attribute the way you'd expect for a remote URL: ShowPlugins.php treats a .png
+  icon= value as a local filename under plugins/NAME/images/ or plugins/NAME/,
+  never as a URL — so the old icon="https://...png" always fell through to a
+  generic fallback icon. Removed icon= entirely (matching the Zabbix Agent fork)
+  and moved the bundled icon from icons/claude-code.png to images/claude-code.png,
+  which is the exact path icon($name) in PluginHelpers.php looks for. Now picked
+  up automatically with no icon= attribute needed.
+- v1.1.0: Settings page restyled to match the Zabbix Agent fork's look (bordered
+  .claude-box sections, a compact status bar, blockquote.inline_help notes)
+  instead of the original ad-hoc table/div layout.
 ###2026.07.24.1
 - v1.0.2: Fix the base64 icon fix itself: Type="base64" must be an attribute of the
   outer FILE element (that's what Unraid's plugin script actually reads), not of the
@@ -38,7 +53,7 @@ Use Claude directly in your terminal for code generation, debugging, and more.
 <INLINE>
 mkdir -p /boot/config/plugins/claude-code
 mkdir -p /usr/local/emhttp/plugins/claude-code/scripts
-mkdir -p /usr/local/emhttp/plugins/claude-code/icons
+mkdir -p /usr/local/emhttp/plugins/claude-code/images
 </INLINE>
 </FILE>
 
@@ -47,7 +62,7 @@ mkdir -p /usr/local/emhttp/plugins/claude-code/icons
      and Unraid permanently banishes the .plg to /boot/config/plugins-error,
      skipping it on all future boots until manually reinstalled. Since this is
      just a decorative icon, embedding it removes that failure point entirely. -->
-<FILE Name="/usr/local/emhttp/plugins/claude-code/icons/claude-code.png" Mode="0644" Type="base64">
+<FILE Name="/usr/local/emhttp/plugins/claude-code/images/claude-code.png" Mode="0644" Type="base64">
 <INLINE>
 iVBORw0KGgoAAAANSUhEUgAAAgAAAAIABAMAAAAGVsnJAAAAAXNSR0IArs4c6QAAAARnQU1BAACx
 jwv8YQUAAAAwUExURdd2VUdwTNRyUdZ1U9Z1VNd1VNd2Vfzy7vrp4/fe1fPRxe/Ds+qzoOWjjOGT
@@ -442,7 +457,7 @@ fi
 <![CDATA[
 Menu="Utilities"
 Title="Claude Code"
-Icon="icons/claude-code.png"
+Icon="images/claude-code.png"
 Desc="AI-powered coding assistant CLI"
 ---
 <?php
@@ -482,102 +497,90 @@ $symlink_ok = $symlink_target === "$appdata_path/.claude";
 ?>
 
 <style>
-.status-ok { color: green; font-weight: bold; }
-.status-warn { color: orange; font-weight: bold; }
-.status-error { color: red; font-weight: bold; }
-.code-block {
-    background: #1e1e1e;
-    color: #d4d4d4;
-    padding: 15px;
-    border-radius: 5px;
-    font-family: monospace;
-    margin: 10px 0;
+.claude-status {
+  border: 1px solid rgba(255,255,255,0.15);
+  background: rgba(255,255,255,0.03);
+  border-radius: 4px;
+  padding: 8px 14px;
+  margin-bottom: 15px;
+  font-size: 0.95em;
 }
-.section { margin-bottom: 20px; }
+.claude-status b { margin-right: 3px; }
+.claude-status .sep { opacity: 0.4; margin: 0 8px; }
+.claude-status .ok { color: #4caf50; }
+.claude-status .warn { color: #ff9800; }
+.claude-status .error { color: #f44336; }
+.claude-box {
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 4px;
+  padding: 5px 15px 12px 15px;
+  margin-bottom: 15px;
+}
+.claude-box h4 {
+  margin-top: 8px;
+  margin-bottom: 4px;
+}
+.claude-code-block {
+  background: #1e1e1e;
+  color: #d4d4d4;
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-family: monospace;
+  display: inline-block;
+}
 </style>
 
-<div style="padding: 20px;">
-    <h2>Claude Code</h2>
-    <p><?=t('Claude Code CLI for Unraid - AI-powered coding assistant in your terminal.', 'Claude Code CLI para Unraid - asistente de programación con IA en tu terminal.')?></p>
+<p><?=t('Claude Code CLI for Unraid - AI-powered coding assistant in your terminal.', 'Claude Code CLI para Unraid - asistente de programación con IA en tu terminal.')?></p>
 
-    <div class="section">
-        <h3><?=t('Status', 'Estado')?></h3>
-        <table>
-            <tr>
-                <td><strong><?=t('Claude Code:', 'Claude Code:')?></strong></td>
-                <td><?= $claude_installed
-                    ? "<span class='status-ok'>$claude_version</span>"
-                    : "<span class='status-error'>".t('Not installed', 'No instalado')."</span>" ?></td>
-            </tr>
-            <tr>
-                <td><strong><?=t('Array:', 'Array:')?></strong></td>
-                <td><?= $array_started
-                    ? "<span class='status-ok'>".t('Started', 'Iniciado')."</span>"
-                    : "<span class='status-error'>".t('Not started', 'No iniciado')."</span>" ?></td>
-            </tr>
-            <tr>
-                <td><strong><?=t('Authentication:', 'Autenticación:')?></strong></td>
-                <td><?= $has_auth
-                    ? "<span class='status-ok'>".t('Configured', 'Configurada')."</span>"
-                    : "<span class='status-warn'>".t('Not authenticated', 'Sin autenticar')."</span>" ?></td>
-            </tr>
-            <tr>
-                <td><strong><?=t('Symlink:', 'Symlink:')?></strong></td>
-                <td><?= $symlink_ok
-                    ? "<span class='status-ok'>OK</span>"
-                    : "<span class='status-warn'>".t('Not configured', 'No configurado')."</span>" ?></td>
-            </tr>
-        </table>
-    </div>
+<div class="claude-status">
+<b><?=t('Status:', 'Estado:')?></b>
+Claude Code: <span class="<?=$claude_installed ? 'ok' : 'error'?>"><?=$claude_installed ? $claude_version : t('Not installed', 'No instalado')?></span>
+<span class="sep">&middot;</span>
+<?=t('Array', 'Array')?>: <span class="<?=$array_started ? 'ok' : 'error'?>"><?=$array_started ? t('Started', 'Iniciado') : t('Not started', 'No iniciado')?></span>
+<span class="sep">&middot;</span>
+<?=t('Auth', 'Auth')?>: <span class="<?=$has_auth ? 'ok' : 'warn'?>"><?=$has_auth ? t('Configured', 'Configurada') : t('Not authenticated', 'Sin autenticar')?></span>
+<span class="sep">&middot;</span>
+Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : t('Not configured', 'No configurado')?></span>
+</div>
 
-    <div class="section">
-        <h3><?=t('Settings', 'Configuración')?></h3>
-        <form method="POST" action="/update.php" target="progressFrame">
-            <input type="hidden" name="#file" value="<?= $cfg_file ?>">
-            <input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh">
+<div class="claude-box">
+<h4><?=t('Settings', 'Configuración')?></h4>
+<form method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#file" value="<?=$cfg_file?>">
+<input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh">
+<dl>
+<dt><?=t('Appdata Path:', 'Ruta de appdata:')?></dt>
+<dd><input type="text" name="APPDATA_PATH" value="<?=htmlspecialchars($appdata_path)?>" class="narrow"></dd>
+</dl>
+<blockquote class="inline_help"><?=t('Store Claude config on your array to avoid flash wear.', 'Guarda la configuración de Claude en tu array para no desgastar el flash drive.')?></blockquote>
+<input type="submit" value="<?=t('Apply', 'Aplicar')?>">
+</form>
+</div>
 
-            <dl>
-                <dt><?=t('Appdata Path:', 'Ruta de appdata:')?></dt>
-                <dd>
-                    <input type="text" name="APPDATA_PATH" value="<?= htmlspecialchars($appdata_path) ?>" size="50">
-                </dd>
-            </dl>
-            <dl>
-                <dt>&nbsp;</dt>
-                <dd>
-                    <input type="submit" value="<?=t('Apply', 'Aplicar')?>">
-                    <input type="button" value="<?=t('Done', 'Hecho')?>" onclick="done()">
-                </dd>
-            </dl>
-        </form>
-        <p><em><?=t('Store Claude config on your array to avoid flash wear.', 'Guarda la configuración de Claude en tu array para no desgastar el flash drive.')?></em></p>
-    </div>
+<div class="claude-box">
+<h4><?=t('Usage', 'Uso')?></h4>
+<p><?=t('Open the Unraid terminal (top-right corner) and run:', 'Abre la terminal de Unraid (esquina superior derecha) y ejecuta:')?></p>
+<code class="claude-code-block">claude</code>
+</div>
 
-    <div class="section">
-        <h3><?=t('Usage', 'Uso')?></h3>
-        <p><?=t('Open the Unraid terminal (top-right corner) and run:', 'Abre la terminal de Unraid (esquina superior derecha) y ejecuta:')?></p>
-        <div class="code-block">claude</div>
-    </div>
+<?php if (!$has_auth): ?>
+<div class="claude-box">
+<h4><?=t('First-Time Setup', 'Primera configuración')?></h4>
+<ol>
+<li><?=t('Make sure the array is started', 'Asegúrate de que el array esté iniciado')?></li>
+<li><?=t('Open terminal and run', 'Abre la terminal y ejecuta')?> <code>claude</code></li>
+<li><?=t('Follow the authentication prompts', 'Sigue las indicaciones de autenticación')?></li>
+<li><?=t('Your credentials are automatically saved to the appdata folder', 'Tus credenciales se guardan automáticamente en la carpeta de appdata')?></li>
+</ol>
+</div>
+<?php endif; ?>
 
-    <?php if (!$has_auth): ?>
-    <div class="section">
-        <h3><?=t('First-Time Setup', 'Primera configuración')?></h3>
-        <ol>
-            <li><?=t('Make sure the array is started', 'Asegúrate de que el array esté iniciado')?></li>
-            <li><?=t('Open terminal and run', 'Abre la terminal y ejecuta')?> <code>claude</code></li>
-            <li><?=t('Follow the authentication prompts', 'Sigue las indicaciones de autenticación')?></li>
-            <li><?=t('Your credentials are automatically saved to the appdata folder', 'Tus credenciales se guardan automáticamente en la carpeta de appdata')?></li>
-        </ol>
-    </div>
-    <?php endif; ?>
-
-    <div class="section">
-        <h3><?=t('Reinstall Claude Code', 'Reinstalar Claude Code')?></h3>
-        <form method="POST" action="/update.php" target="progressFrame">
-            <input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh">
-            <input type="submit" value="<?=t('Reinstall', 'Reinstalar')?>">
-        </form>
-    </div>
+<div class="claude-box">
+<h4><?=t('Reinstall Claude Code', 'Reinstalar Claude Code')?></h4>
+<form method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh">
+<input type="submit" value="<?=t('Reinstall', 'Reinstalar')?>">
+</form>
 </div>
 ]]>
 </INLINE>

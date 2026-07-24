@@ -29,6 +29,14 @@ claim of authorship over the base plugin.
   or Spanish automatically based on Unraid's webGUI language (any `es_*` locale shows Spanish,
   everything else falls back to English) — same approach as this author's
   [unraid-zabbix_agent-6lts](https://github.com/Nebur692/unraid-zabbix_agent-6lts) fork.
+- Fixed the icon shown on the Plugins tab: Unraid's `ShowPlugins.php` never treats `icon=` as a
+  URL — it only ever looks for a local file named `plugins/<name>/images/<name>.png`. Upstream's
+  remote `icon=` URL therefore always fell through to a generic fallback icon. Removed `icon=` and
+  moved the bundled PNG to that exact convention path, so it's now picked up automatically.
+- Clicking the plugin's row on the Plugins tab now jumps straight to its Settings page (added
+  `launch="Utilities/claude-code"`), same as the `unraid-zabbix_agent-6lts` fork.
+- Settings page restyled to match `unraid-zabbix_agent-6lts`'s look (bordered sections, a compact
+  status bar, inline help notes) instead of the original ad-hoc table/div layout.
 
 ### Compatibility
 
@@ -107,6 +115,16 @@ claro al autor original, sin reclamar autoría del plugin base.
   inglés o español automáticamente según el idioma del webGUI de Unraid (cualquier locale `es_*`
   muestra español, el resto cae a inglés) — mismo enfoque que el fork de este mismo autor
   [unraid-zabbix_agent-6lts](https://github.com/Nebur692/unraid-zabbix_agent-6lts).
+- Arreglado el icono que se veía en la pestaña Plugins: `ShowPlugins.php` de Unraid nunca trata
+  `icon=` como una URL — solo busca un fichero local llamado `plugins/<name>/images/<name>.png`.
+  Por eso la URL remota del `icon=` original siempre caía en un icono genérico. Se quitó `icon=` y
+  se movió el PNG a esa ruta exacta, así que ahora se detecta automáticamente.
+- Al hacer clic en la fila del plugin en la pestaña Plugins, ahora lleva directamente a su página
+  de Settings (añadido `launch="Utilities/claude-code"`), igual que el fork
+  `unraid-zabbix_agent-6lts`.
+- Rediseñada la página de Settings para seguir el estilo de `unraid-zabbix_agent-6lts` (secciones
+  con borde, una barra de estado compacta, notas de ayuda en línea) en vez del layout original de
+  tabla/div improvisado.
 
 ### Compatibilidad
 
