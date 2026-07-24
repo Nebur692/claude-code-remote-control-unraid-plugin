@@ -1,12 +1,21 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.07.25.1"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.07.25.2"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.07.25.2
+- v2.0.0: Added Remote Control. Runs "claude remote-control" as a supervised background
+  process (started/stopped only from the Settings page, never at boot) so you can drive
+  a Claude Code session on this NAS from claude.ai/code or the Claude mobile app --
+  outbound HTTPS only, no inbound ports. Always resumes the same ongoing session in its
+  configured directory (continue flag), falling back to a fresh session only the first
+  time. Requires a claude.ai OAuth login (Pro/Max/Team/Enterprise) -- API key auth does
+  not support it. Verified live end to end on the fork maintainer's own NAS: session
+  resumed correctly across a stop/start cycle, and the same session ID persisted.
 ###2026.07.25.1
 - v1.3.1: Fixed the Update action itself: `claude update` downloads the new version into
   ~/.local/share/claude/versions/ but only repoints ~/.local/bin/claude at it when that
@@ -86,7 +95,8 @@
 
 <DESCRIPTION>
 Claude Code Remote Control - AI-powered coding assistant CLI from Anthropic, installed on Unraid
-with persistent authentication across reboots.
+with persistent authentication across reboots. Optionally drive a Claude Code session on this
+NAS from claude.ai/code or the Claude mobile app via Anthropic's Remote Control feature.
 </DESCRIPTION>
 
 <!-- Create directories -->
@@ -226,14 +236,16 @@ UvoAevLz9r8oLdHO7/QE9Ce+s7W1u/t/qdjd3dq6k9Af0DifAfkfT+rKBNGKAAAAAElFTkSuQmCC
 **Claude Code Remote Control**
 
 AI-powered coding assistant CLI from Anthropic, installed on Unraid with persistent
-authentication across reboots. Run `claude` from the Unraid terminal, configure and view
-live logs from Settings > Utilities > Claude Code.
+authentication across reboots. Run `claude` from the Unraid terminal, or drive a session from
+claude.ai/code or the Claude mobile app using Remote Control. Configure and view live logs
+from Settings > Utilities > Claude Code.
 
 ---
 
 Asistente de programación con IA de Anthropic, instalado en Unraid con autenticación
-persistente entre reinicios. Ejecuta `claude` desde la terminal de Unraid, configúralo y
-mira los logs en vivo desde Settings > Utilities > Claude Code.
+persistente entre reinicios. Ejecuta `claude` desde la terminal de Unraid, o controla una sesión
+desde claude.ai/code o la app móvil de Claude con Control Remoto. Configúralo y mira los logs
+en vivo desde Settings > Utilities > Claude Code.
 ]]>
 </INLINE>
 </FILE>
@@ -588,6 +600,91 @@ fi
 </INLINE>
 </FILE>
 
+<!-- Remote Control: a supervised background "claude remote-control" process,
+     started/stopped only from the Settings page (never at boot, see
+     README). It always resumes the same session in its working directory
+     via the continue flag, falling back to a fresh session the first time
+     (before any session exists, continue errors with "No recent session
+     found"). Auto-respawns on transient exits (e.g. the ~10min
+     network-outage timeout documented by Anthropic) as long as it hasn't
+     been explicitly stopped. -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh" Mode="0755">
+<INLINE>
+<![CDATA[
+#!/bin/bash
+
+PLUGIN_CFG="/boot/config/plugins/claude-code/claude-code.cfg"
+LOGFILE="/var/log/claude-code-remote-control.log"
+PIDFILE="/var/run/claude-remote-control.pid"
+ENABLED_FLAG="/var/run/claude-remote-control.enabled"
+
+get_rc_dir() {
+    REMOTE_CONTROL_DIR=""
+    [ -f "$PLUGIN_CFG" ] && source "$PLUGIN_CFG"
+    echo "${REMOTE_CONTROL_DIR:-/root/claude-remote-control}"
+}
+
+do_run() {
+    local rc_dir
+    rc_dir=$(get_rc_dir)
+    mkdir -p "$rc_dir"
+    echo "=== Remote Control supervisor started $(date) (dir: $rc_dir) ===" >> "$LOGFILE"
+    while [ -f "$ENABLED_FLAG" ]; do
+        cd "$rc_dir" || break
+        output=$(claude remote-control --continue --remote-control-session-name-prefix "unraid" 2>&1 < /dev/null | tee -a "$LOGFILE")
+        if echo "$output" | grep -q "No recent session found"; then
+            echo "=== No previous session in $rc_dir yet, starting a fresh one: $(date) ===" >> "$LOGFILE"
+            claude remote-control --remote-control-session-name-prefix "unraid" >> "$LOGFILE" 2>&1 < /dev/null
+        fi
+        [ -f "$ENABLED_FLAG" ] || break
+        echo "=== Remote Control exited, restarting in 5s: $(date) ===" >> "$LOGFILE"
+        sleep 5
+    done
+    echo "=== Remote Control supervisor stopped $(date) ===" >> "$LOGFILE"
+    rm -f "$PIDFILE"
+}
+
+case "$1" in
+    start)
+        if [ -f "$PIDFILE" ] && [ -d "/proc/$(cat "$PIDFILE")" ]; then
+            echo "Remote Control is already running."
+            exit 0
+        fi
+        touch "$ENABLED_FLAG"
+        nohup "$0" _run > /dev/null 2>&1 &
+        echo $! > "$PIDFILE"
+        echo "Remote Control starting in directory: $(get_rc_dir)"
+        echo "Use 'View live logs' below for the session URL / QR code."
+        ;;
+    _run)
+        do_run
+        ;;
+    stop)
+        rm -f "$ENABLED_FLAG"
+        if [ -f "$PIDFILE" ]; then
+            kill "$(cat "$PIDFILE")" 2>/dev/null
+            rm -f "$PIDFILE"
+        fi
+        pkill -f "claude remote-control" 2>/dev/null
+        echo "=== Remote Control stopped by user $(date) ===" >> "$LOGFILE"
+        echo "Remote Control stopped."
+        ;;
+    status)
+        if [ -f "$PIDFILE" ] && [ -d "/proc/$(cat "$PIDFILE")" ]; then
+            echo "running"
+        else
+            echo "stopped"
+        fi
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|status}"
+        exit 1
+        ;;
+esac
+]]>
+</INLINE>
+</FILE>
+
 <!-- Web UI -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/claude-code.page">
 <INLINE>
@@ -635,6 +732,25 @@ $symlink_ok = $symlink_target === "$appdata_path/.claude";
 // Install/startup log (written by rc.claude-code on every boot)
 $log_name = "claude-code-install.log";
 $log_exists = file_exists("/var/log/$log_name");
+
+// Remote Control status/config
+$rc_dir_cfg = $cfg['REMOTE_CONTROL_DIR'] ?? '';
+$rc_dir = $rc_dir_cfg !== '' ? $rc_dir_cfg : '/root/claude-remote-control';
+$rc_pidfile = '/var/run/claude-remote-control.pid';
+$rc_running = false;
+if (file_exists($rc_pidfile)) {
+    $rc_pid = trim(@file_get_contents($rc_pidfile));
+    $rc_running = $rc_pid !== '' && file_exists("/proc/$rc_pid");
+}
+$rc_log_name = 'claude-code-remote-control.log';
+$rc_log_exists = file_exists("/var/log/$rc_log_name");
+$rc_session_url = '';
+if ($rc_log_exists) {
+    $rc_log_tail = shell_exec("tail -n 200 /var/log/$rc_log_name 2>/dev/null");
+    if ($rc_log_tail && preg_match_all('#https://claude\.ai/code[^\s]*#', $rc_log_tail, $rc_matches) && !empty($rc_matches[0])) {
+        $rc_session_url = end($rc_matches[0]);
+    }
+}
 ?>
 
 <style>
@@ -695,6 +811,52 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 </dl>
 <blockquote class="inline_help"><?=t('Store Claude config on your array to avoid flash wear.', 'Guarda la configuración de Claude en tu array para no desgastar el flash drive.')?></blockquote>
 <input type="submit" value="<?=t('Apply', 'Aplicar')?>">
+</form>
+</div>
+
+<div class="claude-box">
+<h4><?=t('Remote Control', 'Control Remoto')?></h4>
+<p><?=t(
+    'Runs "claude remote-control" in the background so you can drive a Claude Code session on this NAS from claude.ai/code or the Claude mobile app -- outbound HTTPS only, no inbound ports opened. Requires being signed in with a claude.ai account (Pro/Max/Team/Enterprise); API key auth does not support this.',
+    'Ejecuta "claude remote-control" en segundo plano para que puedas controlar una sesión de Claude Code en este NAS desde claude.ai/code o la app móvil de Claude -- solo conexiones HTTPS salientes, sin abrir puertos entrantes. Requiere haber iniciado sesión con una cuenta de claude.ai (Pro/Max/Team/Enterprise); la autenticación por API key no es compatible.'
+)?></p>
+<p><?=t(
+    'Always resumes the same ongoing session in the directory below (--continue), so context carries over between restarts instead of starting over. It only runs when started below -- never launched automatically at boot.',
+    'Siempre retoma la misma sesión en curso en el directorio de abajo (--continue), así que el contexto se mantiene entre reinicios en vez de empezar de cero. Solo corre cuando lo iniciás abajo -- nunca se lanza solo al arrancar Unraid.'
+)?></p>
+
+<dl>
+<dt><?=t('Status:', 'Estado:')?></dt>
+<dd><span class="<?=$rc_running ? 'ok' : 'warn'?>"><?=$rc_running ? t('Running', 'Corriendo') : t('Stopped', 'Detenido')?></span></dd>
+</dl>
+<?php if ($rc_session_url): ?>
+<dl>
+<dt><?=t('Session:', 'Sesión:')?></dt>
+<dd><a href="<?=htmlspecialchars($rc_session_url)?>" target="_blank"><?=htmlspecialchars($rc_session_url)?></a></dd>
+</dl>
+<?php endif; ?>
+<dl>
+<dt><?=t('Live log:', 'Log en vivo:')?></dt>
+<dd><a onclick="openTerminal('log','claude-code-rc','<?=$rc_log_name?>')" style="cursor:pointer;"><i class="fa fa-book"></i> <u><?=t('View live logs', 'Ver logs en vivo')?></u></a></dd>
+</dl>
+
+<form method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#file" value="<?=$cfg_file?>">
+<dl>
+<dt><?=t('Directory:', 'Directorio:')?></dt>
+<dd><input type="text" name="REMOTE_CONTROL_DIR" value="<?=htmlspecialchars($rc_dir_cfg)?>" placeholder="<?=htmlspecialchars($rc_dir)?>" class="narrow"></dd>
+</dl>
+<blockquote class="inline_help"><?=t(
+    'Claude gets filesystem and command access to this directory. Defaults to a dedicated folder rather than /root itself, since Unraid never persists workspace trust for a home directory. If Remote Control is running, Stop and Start it again after changing this.',
+    'Claude tendrá acceso a archivos y comandos en este directorio. Por defecto usa una carpeta dedicada en vez de /root directamente, porque Unraid nunca recuerda la confianza del workspace para un directorio home. Si Remote Control está corriendo, Detenelo e Inicialo de nuevo después de cambiar esto.'
+)?></blockquote>
+<input type="submit" value="<?=t('Save Directory', 'Guardar Directorio')?>">
+</form>
+
+<form method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh">
+<input type="hidden" name="#arg[0]" value="<?=$rc_running ? 'stop' : 'start'?>">
+<input type="submit" value="<?=$rc_running ? t('Stop', 'Detener') : t('Start', 'Iniciar')?>">
 </form>
 </div>
 
@@ -853,7 +1015,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.07.25.1 has been installed!"
+    echo " Claude Code plugin v2026.07.25.2 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"

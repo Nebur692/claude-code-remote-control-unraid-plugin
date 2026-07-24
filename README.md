@@ -51,6 +51,15 @@ claim of authorship over the base plugin.
   `APPDATA_PATH`, since the next boot would otherwise silently restore the old cached binary
   over any update. Reinstall and Update now both log to the file the "View live logs" link
   follows.
+- **Remote Control** (v2.0.0): a new Settings section runs [`claude remote-control`](https://code.claude.com/docs/en/remote-control)
+  as a supervised background process, so you can drive a Claude Code session on this NAS from
+  claude.ai/code or the Claude mobile app — outbound HTTPS only, nothing opened inbound. It
+  always resumes the same ongoing session in its configured directory (`--continue`), falling
+  back to a fresh one only the first time, and only ever starts when you click Start — never
+  automatically at boot. Requires a claude.ai OAuth login (Pro/Max/Team/Enterprise); API key
+  auth isn't supported by this Anthropic feature. Defaults to a dedicated
+  `/root/claude-remote-control` directory rather than `/root` itself, since Unraid never
+  persists workspace trust for a home directory.
 
 ### Compatibility
 
@@ -154,6 +163,16 @@ claro al autor original, sin reclamar autoría del plugin base.
   resultado en `APPDATA_PATH`, ya que el siguiente arranque, si no, restauraría en silencio el
   binario cacheado antiguo sobre cualquier actualización. Reinstalar y Actualizar ahora escriben
   ambos en el fichero que sigue el enlace "Ver logs en vivo".
+- **Control Remoto** (v2.0.0): una nueva sección en Settings ejecuta [`claude remote-control`](https://code.claude.com/docs/en/remote-control)
+  como un proceso en segundo plano supervisado, para que puedas controlar una sesión de Claude
+  Code en este NAS desde claude.ai/code o la app móvil de Claude — solo conexiones HTTPS
+  salientes, nada abierto hacia adentro. Siempre retoma la misma sesión en curso en su
+  directorio configurado (`--continue`), y solo arranca una sesión nueva la primera vez; nunca
+  se inicia solo al arrancar Unraid, solo cuando pulsás Iniciar. Requiere haber iniciado sesión
+  con OAuth de claude.ai (Pro/Max/Team/Enterprise); esta función de Anthropic no admite
+  autenticación por API key. Por defecto usa un directorio dedicado
+  `/root/claude-remote-control` en vez de `/root` directamente, porque Unraid nunca recuerda la
+  confianza del workspace para un directorio home.
 
 ### Compatibilidad
 
