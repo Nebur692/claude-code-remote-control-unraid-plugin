@@ -37,6 +37,12 @@ claim of authorship over the base plugin.
   `launch="Settings/claude-code"`), same as the `unraid-zabbix_agent-6lts` fork.
 - Settings page restyled to match `unraid-zabbix_agent-6lts`'s look (bordered sections, a compact
   status bar, inline help notes) instead of the original ad-hoc table/div layout.
+- The Plugins tab now shows "Claude Code Remote Control" with a real bilingual description
+  instead of the bare word `claude-code` — Unraid renders `plugins/claude-code/README.md` as that
+  description, so this fork ships one (separate from this top-level README).
+- Added a "Logs" section to the Settings page with a "View live logs" link that streams
+  `/var/log/claude-code-install.log` in real time via Unraid's native `openTerminal()` mechanism
+  (same one Docker/VMs/NUT use) — no extra scripts needed.
 
 ### Compatibility
 
@@ -125,6 +131,12 @@ claro al autor original, sin reclamar autoría del plugin base.
 - Rediseñada la página de Settings para seguir el estilo de `unraid-zabbix_agent-6lts` (secciones
   con borde, una barra de estado compacta, notas de ayuda en línea) en vez del layout original de
   tabla/div improvisado.
+- La pestaña Plugins ahora muestra "Claude Code Remote Control" con una descripción bilingüe real
+  en vez de la palabra pelada `claude-code` — Unraid renderiza `plugins/claude-code/README.md`
+  como esa descripción, así que este fork incluye uno (separado de este README principal).
+- Añadida una sección "Logs" en la página de Settings con un enlace "Ver logs en vivo" que sigue
+  en tiempo real `/var/log/claude-code-install.log` usando el mecanismo nativo `openTerminal()` de
+  Unraid (el mismo que usan Docker/VMs/NUT) — sin necesidad de scripts extra.
 
 ### Compatibilidad
 

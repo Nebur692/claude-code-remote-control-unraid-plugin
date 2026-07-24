@@ -1,12 +1,24 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.07.24.2"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.07.24.3"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.07.24.3
+- v1.2.0: Plugins tab now shows "Claude Code Remote Control" with a real description
+  (bilingual) instead of the bare word "claude-code". Unraid renders
+  plugins/claude-code/README.md as that description, so this fork now deploys a short
+  README.md into the plugin's own emhttp folder (separate from this repo's top-level
+  README.md, which stays as-is). Also updated the Settings page Title= and the plugin's
+  DESCRIPTION to match.
+- v1.2.0: Added a "Logs" section to the Settings page with a "View live logs" link that
+  streams /var/log/claude-code-install.log in real time, using Unraid's own native
+  openTerminal('log', ...) mechanism (same one Docker/VMs/NUT use) — no extra scripts
+  needed, unlike the Zabbix Agent fork's syslog viewer, since Claude Code already always
+  writes to a dedicated log file.
 ###2026.07.24.2
 - v1.1.0: author is now just "Nebur692" (was "brianpugh (fork: Nebur692)").
 - v1.1.0: added launch="Settings/claude-code" so clicking the plugin row on the
@@ -44,8 +56,8 @@
 </CHANGES>
 
 <DESCRIPTION>
-Claude Code CLI - AI-powered coding assistant from Anthropic.
-Use Claude directly in your terminal for code generation, debugging, and more.
+Claude Code Remote Control - AI-powered coding assistant CLI from Anthropic, installed on Unraid
+with persistent authentication across reboots.
 </DESCRIPTION>
 
 <!-- Create directories -->
@@ -172,6 +184,28 @@ fYGIggALpTAVBFjIg3sUBBgIgoiCAAtBkAoCLATBHgUBBoIgor+Adoba0ErpL4Ab9boL4C+Av6Im
 /E0nAbVtjBsUACUG9UqA/gLirDY9oCxAoRSoFAB/AWwPUWmilDIgZeJKG4gSUgbUNKB//AQ1Degf
 P0EH/kIl+Y8MJIC/ZKgcrT/pLKCOYRAlDCmA/AOV4h8ysADG26gMOwk9BOgp0D98EvShvZ2h5LR2
 UvoAevLz9r8oLdHO7/QE9Ce+s7W1u/t/qdjd3dq6k9Af0DifAfkfT+rKBNGKAAAAAElFTkSuQmCC
+</INLINE>
+</FILE>
+
+<!-- Short bilingual blurb shown on the Plugins tab (dynamix.plugin.manager's
+     ShowPlugins.php renders plugins/claude-code/README.md as the row's
+     description, falling back to a bare "**claude-code**" if this is
+     missing) — separate from this repo's own top-level README.md. -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/README.md" Mode="0644">
+<INLINE>
+<![CDATA[
+**Claude Code Remote Control**
+
+AI-powered coding assistant CLI from Anthropic, installed on Unraid with persistent
+authentication across reboots. Run `claude` from the Unraid terminal, configure and view
+live logs from Settings > Utilities > Claude Code.
+
+---
+
+Asistente de programación con IA de Anthropic, instalado en Unraid con autenticación
+persistente entre reinicios. Ejecuta `claude` desde la terminal de Unraid, configúralo y
+mira los logs en vivo desde Settings > Utilities > Claude Code.
+]]>
 </INLINE>
 </FILE>
 
@@ -456,7 +490,7 @@ fi
 <INLINE>
 <![CDATA[
 Menu="Utilities"
-Title="Claude Code"
+Title="Claude Code Remote Control"
 Icon="images/claude-code.png"
 Desc="AI-powered coding assistant CLI"
 ---
@@ -494,6 +528,10 @@ $claude_version = $claude_installed ? htmlspecialchars(trim(shell_exec("claude -
 // Check symlink status
 $symlink_target = is_link("/root/.claude") ? readlink("/root/.claude") : null;
 $symlink_ok = $symlink_target === "$appdata_path/.claude";
+
+// Install/startup log (written by rc.claude-code on every boot)
+$log_name = "claude-code-install.log";
+$log_exists = file_exists("/var/log/$log_name");
 ?>
 
 <style>
@@ -561,6 +599,19 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 <h4><?=t('Usage', 'Uso')?></h4>
 <p><?=t('Open the Unraid terminal (top-right corner) and run:', 'Abre la terminal de Unraid (esquina superior derecha) y ejecuta:')?></p>
 <code class="claude-code-block">claude</code>
+</div>
+
+<div class="claude-box">
+<h4><?=t('Logs', 'Logs')?></h4>
+<?php if ($log_exists): ?>
+<dl>
+<dt><?=t('Live log:', 'Log en vivo:')?></dt>
+<dd><a onclick="openTerminal('log','claude-code','<?=$log_name?>')" style="cursor:pointer;"><i class="fa fa-book"></i> <u><?=t('View live logs', 'Ver logs en vivo')?></u></a></dd>
+</dl>
+<blockquote class="inline_help"><?=t('Follows the install/startup log written by this plugin on every boot.', 'Sigue el log de instalación/arranque que escribe este plugin en cada arranque.')?></blockquote>
+<?php else: ?>
+<blockquote class="inline_help"><span class="dim-text"><?=t('No log yet — it is created the next time the plugin runs its startup script (on boot, install, or Reinstall below).', 'Todavía no hay log — se crea la próxima vez que el plugin ejecute su script de arranque (al reiniciar, instalar, o con Reinstalar más abajo).')?></span></blockquote>
+<?php endif; ?>
 </div>
 
 <?php if (!$has_auth): ?>
@@ -689,7 +740,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.07.24.2 has been installed!"
+    echo " Claude Code plugin v2026.07.24.3 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
