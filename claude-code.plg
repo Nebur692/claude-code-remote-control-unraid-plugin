@@ -1,12 +1,21 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.07.25"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.07.25.1"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.07.25.1
+- v1.3.1: Fixed the Update action itself: `claude update` downloads the new version into
+  ~/.local/share/claude/versions/ but only repoints ~/.local/bin/claude at it when that
+  file is a symlink the native installer manages -- on this plugin it's a plain copy
+  restored from the appdata cache on every boot, so the CLI left the live binary
+  untouched (confirmed live on the fork maintainer's own NAS: "claude update" reported
+  success but `claude --version` kept showing the old version). update-claude.sh now
+  finds the newest file under versions/ and applies it to ~/.local/bin/claude itself
+  before re-caching.
 ###2026.07.25
 - v1.3.0: Fixed the "View live logs" link never appearing (it was hidden until
   /var/log/claude-code-install.log existed, which was only ever created on an actual
@@ -537,6 +546,9 @@ echo "=== Manual Update $(date) ==="
 PLUGIN_CFG="/boot/config/plugins/claude-code/claude-code.cfg"
 [ -f "$PLUGIN_CFG" ] && source "$PLUGIN_CFG"
 
+RUNTIME_BIN="/root/.local/bin/claude"
+VERSIONS_DIR="/root/.local/share/claude/versions"
+
 if ! command -v claude &> /dev/null; then
     echo "Claude Code is not installed yet -- use Reinstall first."
     exit 1
@@ -545,13 +557,28 @@ fi
 echo "Current version: $(claude --version 2>/dev/null)"
 echo "Checking for updates..."
 claude update
-echo "Now at: $(claude --version 2>/dev/null)"
+
+# `claude update` downloads new versions into $VERSIONS_DIR, but only
+# repoints RUNTIME_BIN at the newest one if RUNTIME_BIN is a symlink it
+# manages itself. On this plugin RUNTIME_BIN is a plain copy (restored
+# from the appdata cache on every boot), so the CLI leaves it untouched
+# and prints a warning -- the newly downloaded version has to be applied
+# by hand below, or "Now running" would still show the old version.
+if [ -d "$VERSIONS_DIR" ]; then
+    latest=$(ls -1 "$VERSIONS_DIR" 2>/dev/null | sort -V | tail -1)
+    if [ -n "$latest" ] && [ -x "$VERSIONS_DIR/$latest" ]; then
+        cp "$VERSIONS_DIR/$latest" "$RUNTIME_BIN"
+        chmod +x "$RUNTIME_BIN"
+        echo "Applied version $latest to $RUNTIME_BIN."
+    fi
+fi
+
+echo "Now running: $(claude --version 2>/dev/null)"
 
 if [ -n "$APPDATA_PATH" ]; then
-    real_bin=$(readlink -f "$(command -v claude)")
-    if [ -x "$real_bin" ]; then
+    if [ -x "$RUNTIME_BIN" ]; then
         mkdir -p "$APPDATA_PATH/bin"
-        cp "$real_bin" "$APPDATA_PATH/bin/claude"
+        cp "$RUNTIME_BIN" "$APPDATA_PATH/bin/claude"
         echo "Cached the updated binary to $APPDATA_PATH/bin -- this version will survive the next reboot."
     fi
 else
@@ -826,7 +853,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.07.25 has been installed!"
+    echo " Claude Code plugin v2026.07.25.1 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
