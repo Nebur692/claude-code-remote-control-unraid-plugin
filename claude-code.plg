@@ -1,12 +1,28 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.07.24.4"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.07.25"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.07.25
+- v1.3.0: Fixed the "View live logs" link never appearing (it was hidden until
+  /var/log/claude-code-install.log existed, which was only ever created on an actual
+  Unraid boot). The link is now always shown -- Unraid's own openTerminal() already
+  handles a not-yet-existing file gracefully with a wait screen.
+- v1.3.0: Added a real "Update Claude Code" action. Previously, install_claude_code()
+  in install-claude.sh is a no-op once `claude` already works, so the "Reinstall"
+  button could never actually fetch a newer Claude Code release -- clicking it while
+  already installed just confirmed the current version and did nothing else. The new
+  Update button runs the CLI's own `claude update` and then re-caches the resulting
+  binary into APPDATA_PATH/bin, since restore_cached_binary() on every boot would
+  otherwise silently revert any update back to whatever was cached at first install.
+- v1.3.0: Reinstall and Update now both append their output to
+  /var/log/claude-code-install.log (via new scripts/reinstall-and-log.sh and
+  scripts/update-claude.sh) so the live log viewer has something to show right after
+  using either button, not just after a reboot.
 ###2026.07.24.4
 - v1.2.1: Fixed the "no log yet" help text on the Settings page: it claimed clicking
   Reinstall would create the log, but Reinstall calls install-claude.sh directly, not
@@ -489,6 +505,62 @@ fi
 </INLINE>
 </FILE>
 
+<!-- Thin wrapper so the Settings page's "Reinstall" button also writes to the
+     live log (install-claude.sh itself is untouched to keep it close to
+     upstream) -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/reinstall-and-log.sh" Mode="0755">
+<INLINE>
+<![CDATA[
+#!/bin/bash
+LOGFILE="/var/log/claude-code-install.log"
+echo "=== Manual Reinstall $(date) ===" >> "$LOGFILE"
+/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh 2>&1 | tee -a "$LOGFILE"
+]]>
+</INLINE>
+</FILE>
+
+<!-- Update: install-claude.sh's own install_claude_code() is a no-op once
+     `claude` already works (it just confirms the version and returns), so
+     it can never pick up a newer Claude Code release. `claude update` is
+     the CLI's own built-in updater, but it only rewrites the live binary at
+     ~/.local/bin/claude, it never touches the appdata cache that
+     restore_cached_binary() restores from on every boot, so without
+     re-caching here, any update would silently be reverted on next reboot. -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/update-claude.sh" Mode="0755">
+<INLINE>
+<![CDATA[
+#!/bin/bash
+LOGFILE="/var/log/claude-code-install.log"
+exec > >(tee -a "$LOGFILE") 2>&1
+echo "=== Manual Update $(date) ==="
+
+PLUGIN_CFG="/boot/config/plugins/claude-code/claude-code.cfg"
+[ -f "$PLUGIN_CFG" ] && source "$PLUGIN_CFG"
+
+if ! command -v claude &> /dev/null; then
+    echo "Claude Code is not installed yet -- use Reinstall first."
+    exit 1
+fi
+
+echo "Current version: $(claude --version 2>/dev/null)"
+echo "Checking for updates..."
+claude update
+echo "Now at: $(claude --version 2>/dev/null)"
+
+if [ -n "$APPDATA_PATH" ]; then
+    real_bin=$(readlink -f "$(command -v claude)")
+    if [ -x "$real_bin" ]; then
+        mkdir -p "$APPDATA_PATH/bin"
+        cp "$real_bin" "$APPDATA_PATH/bin/claude"
+        echo "Cached the updated binary to $APPDATA_PATH/bin -- this version will survive the next reboot."
+    fi
+else
+    echo "WARNING: APPDATA_PATH not set, could not cache the update -- it may be reverted on next reboot."
+fi
+]]>
+</INLINE>
+</FILE>
+
 <!-- Web UI -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/claude-code.page">
 <INLINE>
@@ -607,14 +679,14 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 
 <div class="claude-box">
 <h4><?=t('Logs', 'Logs')?></h4>
-<?php if ($log_exists): ?>
 <dl>
 <dt><?=t('Live log:', 'Log en vivo:')?></dt>
 <dd><a onclick="openTerminal('log','claude-code','<?=$log_name?>')" style="cursor:pointer;"><i class="fa fa-book"></i> <u><?=t('View live logs', 'Ver logs en vivo')?></u></a></dd>
 </dl>
-<blockquote class="inline_help"><?=t('Follows the install/startup log written by this plugin on every boot.', 'Sigue el log de instalación/arranque que escribe este plugin en cada arranque.')?></blockquote>
+<?php if ($log_exists): ?>
+<blockquote class="inline_help"><?=t('Follows the install/startup/update log written by this plugin.', 'Sigue el log de instalación/arranque/actualización que escribe este plugin.')?></blockquote>
 <?php else: ?>
-<blockquote class="inline_help"><span class="dim-text"><?=t('No log yet — it is written by the startup script that runs on every Unraid boot, so it appears after the next reboot.', 'Todavía no hay log — lo escribe el script de arranque que se ejecuta en cada inicio de Unraid, así que aparecerá tras el próximo reinicio.')?></span></blockquote>
+<blockquote class="inline_help"><span class="dim-text"><?=t('No log yet — the link will open an empty window until this plugin writes one, e.g. on the next Unraid boot or after using Update/Reinstall below.', 'Todavía no hay log — el enlace abrirá una ventana vacía hasta que este plugin escriba uno, por ejemplo en el próximo arranque de Unraid o tras usar Actualizar/Reinstalar más abajo.')?></span></blockquote>
 <?php endif; ?>
 </div>
 
@@ -631,9 +703,19 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 <?php endif; ?>
 
 <div class="claude-box">
-<h4><?=t('Reinstall Claude Code', 'Reinstalar Claude Code')?></h4>
+<h4><?=t('Update Claude Code', 'Actualizar Claude Code')?></h4>
+<p><?=t('Checks with Anthropic for a newer Claude Code release and installs it if available. Use this to get new versions -- once Claude Code is installed, Reinstall below will not fetch a newer one on its own.', 'Comprueba si hay una versión más reciente de Claude Code y la instala si la hay. Usa esto para obtener nuevas versiones -- una vez instalado, Reinstalar no busca una versión más nueva por sí solo.')?></p>
 <form method="POST" action="/update.php" target="progressFrame">
-<input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh">
+<input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/update-claude.sh">
+<input type="submit" value="<?=t('Check for Updates', 'Buscar actualizaciones')?>">
+</form>
+</div>
+
+<div class="claude-box">
+<h4><?=t('Reinstall Claude Code', 'Reinstalar Claude Code')?></h4>
+<p><?=t('Fixes a broken setup (missing symlink, stuck config) by re-running the installer. Does not check for a newer version -- use Update above for that.', 'Arregla una instalación rota (symlink perdido, configuración atascada) volviendo a ejecutar el instalador. No comprueba si hay una versión nueva -- usa Actualizar arriba para eso.')?></p>
+<form method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/reinstall-and-log.sh">
 <input type="submit" value="<?=t('Reinstall', 'Reinstalar')?>">
 </form>
 </div>
@@ -744,7 +826,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.07.24.4 has been installed!"
+    echo " Claude Code plugin v2026.07.25 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"

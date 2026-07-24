@@ -43,6 +43,14 @@ claim of authorship over the base plugin.
 - Added a "Logs" section to the Settings page with a "View live logs" link that streams
   `/var/log/claude-code-install.log` in real time via Unraid's native `openTerminal()` mechanism
   (same one Docker/VMs/NUT use) — no extra scripts needed.
+- Fixed that live-log link never showing up in practice: it was hidden until the log file
+  existed, which only ever happened on an actual Unraid reboot. Now always shown.
+- Added a real "Update Claude Code" action. The original "Reinstall" button is a no-op once
+  Claude Code already works, so there was no way to fetch a newer release from the plugin at
+  all. The new button runs the CLI's own `claude update` and re-caches the result into
+  `APPDATA_PATH`, since the next boot would otherwise silently restore the old cached binary
+  over any update. Reinstall and Update now both log to the file the "View live logs" link
+  follows.
 
 ### Compatibility
 
@@ -137,6 +145,15 @@ claro al autor original, sin reclamar autoría del plugin base.
 - Añadida una sección "Logs" en la página de Settings con un enlace "Ver logs en vivo" que sigue
   en tiempo real `/var/log/claude-code-install.log` usando el mecanismo nativo `openTerminal()` de
   Unraid (el mismo que usan Docker/VMs/NUT) — sin necesidad de scripts extra.
+- Arreglado que ese enlace de log en vivo nunca aparecía en la práctica: estaba oculto hasta que
+  existía el fichero de log, y eso solo pasaba tras un reinicio real de Unraid. Ahora siempre se
+  muestra.
+- Añadida una acción real de "Actualizar Claude Code". El botón original "Reinstalar" no hace nada
+  una vez que Claude Code ya funciona, así que no había forma de obtener una versión nueva desde el
+  plugin. El nuevo botón ejecuta el propio `claude update` de la CLI y vuelve a cachear el
+  resultado en `APPDATA_PATH`, ya que el siguiente arranque, si no, restauraría en silencio el
+  binario cacheado antiguo sobre cualquier actualización. Reinstalar y Actualizar ahora escriben
+  ambos en el fichero que sigue el enlace "Ver logs en vivo".
 
 ### Compatibilidad
 
