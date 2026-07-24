@@ -1,7 +1,7 @@
 <?xml version='1.0' standalone='yes'?>
 
 <PLUGIN name="claude-code" author="Nebur692" version="2026.07.24.2"
-        launch="Utilities/claude-code"
+        launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
@@ -9,7 +9,7 @@
 <CHANGES>
 ###2026.07.24.2
 - v1.1.0: author is now just "Nebur692" (was "brianpugh (fork: Nebur692)").
-- v1.1.0: added launch="Utilities/claude-code" so clicking the plugin row on the
+- v1.1.0: added launch="Settings/claude-code" so clicking the plugin row on the
   Plugins tab jumps straight to its Settings page, same as the Zabbix Agent fork.
 - v1.1.0: fixed the Plugins-tab icon. Unraid's Plugins tab does NOT use the icon=
   attribute the way you'd expect for a remote URL: ShowPlugins.php treats a .png
@@ -689,7 +689,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.07.24.1 has been installed!"
+    echo " Claude Code plugin v2026.07.24.2 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
