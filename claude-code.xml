@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Containers>
 <Plugin>True</Plugin>
-<PluginURL>https://raw.githubusercontent.com/brianpugh/unraid-claude-code/main/claude-code.plg</PluginURL>
-<PluginAuthor>brianpugh</PluginAuthor>
+<PluginURL>https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg</PluginURL>
+<PluginAuthor>Nebur692</PluginAuthor>
 <Beta>False</Beta>
 <Category>Tools:Utilities</Category>
-<Name>Claude Code</Name>
+<Name>Claude Code Remote Control</Name>
 <MinVer>6.12.0</MinVer>
-<Description>Claude Code CLI - AI-powered coding assistant from Anthropic. Use Claude directly in your Unraid terminal for code generation, debugging, and more. Authentication and settings persist across reboots automatically.</Description>
-<Support>https://forums.unraid.net/topic/197615-plugin-claude-code/</Support>
-<Icon>https://raw.githubusercontent.com/brianpugh/unraid-claude-code/main/claude-icon.png</Icon>
+<Description>Claude Code CLI - AI-powered coding assistant from Anthropic, installed on Unraid with persistent authentication across reboots. Optionally drive a Claude Code session on this NAS from claude.ai/code or the Claude mobile app via Remote Control. Fork of brianpugh/unraid-claude-code.</Description>
+<Support>https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues</Support>
+<Icon>https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-icon.png</Icon>
 </Containers>
