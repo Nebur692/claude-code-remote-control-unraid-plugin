@@ -1,12 +1,17 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="brianpugh (fork: Nebur692)" version="2026.07.24"
+<PLUGIN name="claude-code" author="brianpugh (fork: Nebur692)" version="2026.07.24.1"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         icon="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-icon.png"
         min="6.12.0">
 
 <CHANGES>
+###2026.07.24.1
+- v1.0.2: Fix the base64 icon fix itself: Type="base64" must be an attribute of the
+  outer FILE element (that's what Unraid's plugin script actually reads), not of the
+  inner INLINE element. In v1.0.0/v1.0.1 the icon was written verbatim as base64 text
+  instead of being decoded to a real PNG.
 ###2026.07.24
 - v1.0.1: Settings page (Settings > Utilities > Claude Code) is now bilingual,
   auto-detecting English/Spanish from Unraid's webGUI language setting
@@ -42,8 +47,8 @@ mkdir -p /usr/local/emhttp/plugins/claude-code/icons
      and Unraid permanently banishes the .plg to /boot/config/plugins-error,
      skipping it on all future boots until manually reinstalled. Since this is
      just a decorative icon, embedding it removes that failure point entirely. -->
-<FILE Name="/usr/local/emhttp/plugins/claude-code/icons/claude-code.png" Mode="0644">
-<INLINE Type="base64">
+<FILE Name="/usr/local/emhttp/plugins/claude-code/icons/claude-code.png" Mode="0644" Type="base64">
+<INLINE>
 iVBORw0KGgoAAAANSUhEUgAAAgAAAAIABAMAAAAGVsnJAAAAAXNSR0IArs4c6QAAAARnQU1BAACx
 jwv8YQUAAAAwUExURdd2VUdwTNRyUdZ1U9Z1VNd1VNd2Vfzy7vrp4/fe1fPRxe/Ds+qzoOWjjOGT
 edyEZiZ4TlcAAAAHdFJOU/8AIURpoNk5i0+AAAAXZ0lEQVR42uTaP2/TQBjH8R9NbQGlTW0nmWsB
@@ -681,7 +686,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.07.24 has been installed!"
+    echo " Claude Code plugin v2026.07.24.1 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
