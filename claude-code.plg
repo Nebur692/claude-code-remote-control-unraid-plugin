@@ -1,12 +1,29 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.07.25.4"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.07.25.5"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.07.25.5
+- v2.1.2: Replaced the v2.1.1 "wipe the plugin tree before every install" hack
+  with Unraid's actual intended mechanism: each deployed FILE now carries a
+  child SHA256 element with the hash of its real on-disk content. Unraid's
+  installer already supports this -- if a deployed file's hash doesn't match,
+  it deletes and redeploys it; if it matches, it's left alone untouched. Same
+  end result (Update now actually redeploys changed files, for every user, not
+  just this one install) but doesn't touch files that didn't change, and
+  doesn't briefly remove the whole plugin tree during every future update.
+  Verified by replicating the installer's own file_exists+SHA256+INLINE/base64
+  logic against a sandbox: stale files get unlinked and rewritten, unchanged
+  files get skipped, a fresh install writes everything.
+- v2.1.2: Fixed two identically-labeled "View live logs" links on the Settings
+  page (one for the install/update log, one buried inside the Remote Control
+  box for its own supervisor log) that made it impossible to tell which was
+  which. Both now live together under the "Logs" section, labeled "Install /
+  Update log" and "Remote Control log".
 ###2026.07.25.4
 - v2.1.1: Fixed "Update" on the Plugins page (and any repeat `plugin install`)
   silently deploying nothing new. Unraid's own installer only writes a FILE's
@@ -129,27 +146,6 @@ with persistent authentication across reboots. Optionally drive a Claude Code se
 NAS from claude.ai/code or the Claude mobile app via Anthropic's Remote Control feature.
 </DESCRIPTION>
 
-<!-- Force a clean redeploy on every install AND every update. Unraid's own plugin
-     installer (dynamix.plugin.manager/scripts/plugin) only writes a FILE's Name=
-     target if the path doesn't already exist: "if (file_exists($name)) { ...
-     skipping: $name already exists }", unless that FILE carries a SHA256/MD5,
-     which none of ours do. Clicking "Update" on the Plugins page re-downloads and
-     re-registers this .plg fine, but every previously-deployed script/page/icon
-     below is left completely untouched no matter how new the version is; this
-     bit exactly this fork during the v2.1.0 release (all files stayed dated from
-     the v2.0.0 install despite the .plg itself showing v2.1.0). A FILE element
-     with a Run= but no Name= isn't subject to that existence check at all, it's
-     just executed every time, so this cleanup step guarantees the FILE elements
-     below always find a clean slate. Deliberately does NOT touch
-     /boot/config/plugins/claude-code/ (settings, session history, auth data all
-     persist across every update). -->
-<FILE Run="/bin/bash">
-<INLINE>
-rm -rf /usr/local/emhttp/plugins/claude-code
-rm -f /etc/rc.d/rc.claude-code
-</INLINE>
-</FILE>
-
 <!-- Create directories -->
 <FILE Run="/bin/bash">
 <INLINE>
@@ -165,6 +161,7 @@ mkdir -p /usr/local/emhttp/plugins/claude-code/images
      skipping it on all future boots until manually reinstalled. Since this is
      just a decorative icon, embedding it removes that failure point entirely. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/images/claude-code.png" Mode="0644" Type="base64">
+<SHA256>3995378ba18f82d3e0cfca9f4c6dad09c9dd713a9a734d19584725c30fa37536</SHA256>
 <INLINE>
 iVBORw0KGgoAAAANSUhEUgAAAgAAAAIABAMAAAAGVsnJAAAAAXNSR0IArs4c6QAAAARnQU1BAACx
 jwv8YQUAAAAwUExURdd2VUdwTNRyUdZ1U9Z1VNd1VNd2Vfzy7vrp4/fe1fPRxe/Ds+qzoOWjjOGT
@@ -282,6 +279,7 @@ UvoAevLz9r8oLdHO7/QE9Ce+s7W1u/t/qdjd3dq6k9Af0DifAfkfT+rKBNGKAAAAAElFTkSuQmCC
      description, falling back to a bare "**claude-code**" if this is
      missing) — separate from this repo's own top-level README.md. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/README.md" Mode="0644">
+<SHA256>678bf46ace835698ab0137320129c7597d67cdf5c2752c0dcbe185faa0e95920</SHA256>
 <INLINE>
 <![CDATA[
 **Claude Code Remote Control**
@@ -314,6 +312,7 @@ fi
 
 <!-- Install/setup script -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh" Mode="0755">
+<SHA256>defa8ffc1222386116ebc54c9ead66fd56a285441f134549c542a7129b550ed3</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -581,6 +580,7 @@ fi
      live log (install-claude.sh itself is untouched to keep it close to
      upstream) -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/reinstall-and-log.sh" Mode="0755">
+<SHA256>bebae0b077321bc2f106e5f91aad56d1ba79975b4c0c717b27b2f3a1dff3a5e2</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -599,6 +599,7 @@ echo "=== Manual Reinstall $(date) ===" >> "$LOGFILE"
      restore_cached_binary() restores from on every boot, so without
      re-caching here, any update would silently be reverted on next reboot. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/update-claude.sh" Mode="0755">
+<SHA256>d16b0307c79bba29bf255593954b4ff05305215e32079da311123a24ac68ec9a</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -676,6 +677,7 @@ fi
      taken over as "most recent"; see the connect subcommand and the
      Settings page's Session ID field. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh" Mode="0755">
+<SHA256>90b0ff1612a91c41a7dbcd15c7376eb4b308439937db445e743d263bf4854e1d</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -824,6 +826,7 @@ esac
 
 <!-- Web UI -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/claude-code.page">
+<SHA256>c95425715f75e5df3ad1e85ea76547fb27c3f5af9fca3b150c8525a99d0d06b7</SHA256>
 <INLINE>
 <![CDATA[
 Menu="Utilities"
@@ -1027,10 +1030,7 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 <dd><a href="<?=htmlspecialchars($rc_session_url)?>" target="_blank"><?=htmlspecialchars($rc_session_url)?></a></dd>
 </dl>
 <?php endif; ?>
-<dl>
-<dt><?=t('Live log:', 'Log en vivo:')?></dt>
-<dd><a onclick="openTerminal('log','claude-code-rc','<?=$rc_log_name?>')" style="cursor:pointer;"><i class="fa fa-book"></i> <u><?=t('View live logs', 'Ver logs en vivo')?></u></a></dd>
-</dl>
+<p><?=t('See the Remote Control log in the Logs section below.', 'Consulta el log de Control Remoto en la sección Logs más abajo.')?></p>
 
 <form method="POST" action="/update.php" target="progressFrame">
 <input type="hidden" name="#file" value="<?=$cfg_file?>">
@@ -1099,14 +1099,25 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 
 <div class="claude-box">
 <h4><?=t('Logs', 'Logs')?></h4>
+
 <dl>
-<dt><?=t('Live log:', 'Log en vivo:')?></dt>
-<dd><a onclick="openTerminal('log','claude-code','<?=$log_name?>')" style="cursor:pointer;"><i class="fa fa-book"></i> <u><?=t('View live logs', 'Ver logs en vivo')?></u></a></dd>
+<dt><?=t('Install / Update log:', 'Log de instalación/actualización:')?></dt>
+<dd><a onclick="openTerminal('log','claude-code','<?=$log_name?>')" style="cursor:pointer;"><i class="fa fa-book"></i> <u><?=t('View live log', 'Ver log en vivo')?></u></a></dd>
 </dl>
 <?php if ($log_exists): ?>
 <blockquote class="inline_help"><?=t('Follows the install/startup/update log written by this plugin.', 'Sigue el log de instalación/arranque/actualización que escribe este plugin.')?></blockquote>
 <?php else: ?>
 <blockquote class="inline_help"><span class="dim-text"><?=t('No log yet — the link will open an empty window until this plugin writes one, e.g. on the next Unraid boot or after using Update/Reinstall below.', 'Todavía no hay log — el enlace abrirá una ventana vacía hasta que este plugin escriba uno, por ejemplo en el próximo arranque de Unraid o tras usar Actualizar/Reinstalar más abajo.')?></span></blockquote>
+<?php endif; ?>
+
+<dl>
+<dt><?=t('Remote Control log:', 'Log de Control Remoto:')?></dt>
+<dd><a onclick="openTerminal('log','claude-code-rc','<?=$rc_log_name?>')" style="cursor:pointer;"><i class="fa fa-book"></i> <u><?=t('View live log', 'Ver log en vivo')?></u></a></dd>
+</dl>
+<?php if ($rc_log_exists): ?>
+<blockquote class="inline_help"><?=t('Follows the Remote Control supervisor log: session connects/reconnects and archived-session fallbacks.', 'Sigue el log del supervisor de Control Remoto: conexiones/reconexiones de sesión y cambios automáticos por sesión archivada.')?></blockquote>
+<?php else: ?>
+<blockquote class="inline_help"><span class="dim-text"><?=t('No log yet — starts once you use Remote Control above.', 'Todavía no hay log — se genera en cuanto uses Control Remoto arriba.')?></span></blockquote>
 <?php endif; ?>
 </div>
 
@@ -1145,6 +1156,7 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 
 <!-- rc.d startup script (runs on boot via Unraid's init system) -->
 <FILE Name="/etc/rc.d/rc.claude-code" Mode="0755">
+<SHA256>7eec70b77833d052a834c5c241972955e63b255c0eaf302e13511b2d77c94bbd</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1246,7 +1258,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.07.25.4 has been installed!"
+    echo " Claude Code plugin v2026.07.25.5 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
