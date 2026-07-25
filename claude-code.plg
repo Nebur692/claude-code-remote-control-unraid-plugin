@@ -1,12 +1,26 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.07.25.3"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.07.25.4"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.07.25.4
+- v2.1.1: Fixed "Update" on the Plugins page (and any repeat `plugin install`)
+  silently deploying nothing new. Unraid's own installer only writes a FILE's
+  target path if it doesn't already exist, and none of this plugin's FILE
+  elements carry a checksum to force a refresh -- so every previous update only
+  ever re-registered the .plg definition itself while every actual
+  script/page/icon stayed frozen at whatever was first installed, no matter the
+  version shown. Added a cleanup step (a Run-only FILE with no Name=, which
+  isn't subject to that existence check) that removes the deployed plugin tree
+  before every install/update so the files below are always redeployed fresh.
+  Does not touch settings, session history, or auth data under
+  /boot/config/plugins/claude-code/. If you're reading this from an older
+  install, one more Update now fully applies -- this fix ships in the same
+  install run it fixes.
 ###2026.07.25.3
 - v2.1.0: Fixed Remote Control silently getting stuck on a session archived on the
   claude.ai side. Resuming an archived session doesn't fail the way "no session yet"
@@ -114,6 +128,27 @@ Claude Code Remote Control - AI-powered coding assistant CLI from Anthropic, ins
 with persistent authentication across reboots. Optionally drive a Claude Code session on this
 NAS from claude.ai/code or the Claude mobile app via Anthropic's Remote Control feature.
 </DESCRIPTION>
+
+<!-- Force a clean redeploy on every install AND every update. Unraid's own plugin
+     installer (dynamix.plugin.manager/scripts/plugin) only writes a FILE's Name=
+     target if the path doesn't already exist: "if (file_exists($name)) { ...
+     skipping: $name already exists }", unless that FILE carries a SHA256/MD5,
+     which none of ours do. Clicking "Update" on the Plugins page re-downloads and
+     re-registers this .plg fine, but every previously-deployed script/page/icon
+     below is left completely untouched no matter how new the version is; this
+     bit exactly this fork during the v2.1.0 release (all files stayed dated from
+     the v2.0.0 install despite the .plg itself showing v2.1.0). A FILE element
+     with a Run= but no Name= isn't subject to that existence check at all, it's
+     just executed every time, so this cleanup step guarantees the FILE elements
+     below always find a clean slate. Deliberately does NOT touch
+     /boot/config/plugins/claude-code/ (settings, session history, auth data all
+     persist across every update). -->
+<FILE Run="/bin/bash">
+<INLINE>
+rm -rf /usr/local/emhttp/plugins/claude-code
+rm -f /etc/rc.d/rc.claude-code
+</INLINE>
+</FILE>
 
 <!-- Create directories -->
 <FILE Run="/bin/bash">
@@ -1211,7 +1246,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.07.25.3 has been installed!"
+    echo " Claude Code plugin v2026.07.25.4 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
