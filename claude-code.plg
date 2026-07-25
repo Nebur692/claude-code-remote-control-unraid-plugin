@@ -1,12 +1,18 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.07.25.5"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.07.25.6"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.07.25.6
+- v2.1.3: The "Connect to session ID" field went blank again after every page
+  reload, so reconnecting to the same session meant re-typing or re-picking
+  it from the history list every time. The last id you connected with is now
+  saved to this plugin's own config on the flash share and pre-fills the
+  field automatically.
 ###2026.07.25.5
 - v2.1.2: Replaced the v2.1.1 "wipe the plugin tree before every install" hack
   with Unraid's actual intended mechanism: each deployed FILE now carries a
@@ -677,7 +683,7 @@ fi
      taken over as "most recent"; see the connect subcommand and the
      Settings page's Session ID field. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh" Mode="0755">
-<SHA256>90b0ff1612a91c41a7dbcd15c7376eb4b308439937db445e743d263bf4854e1d</SHA256>
+<SHA256>0d38a299e676850b43f09343d9ba928b61dae9698d4b26fba3e4b198f51670e6</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -694,6 +700,21 @@ get_rc_dir() {
     REMOTE_CONTROL_DIR=""
     [ -f "$PLUGIN_CFG" ] && source "$PLUGIN_CFG"
     echo "${REMOTE_CONTROL_DIR:-/root/claude-remote-control}"
+}
+
+# Upserts KEY="value" into PLUGIN_CFG without touching other keys -- same
+# shell-sourceable/parse_ini_file-compatible format install-claude.sh already
+# writes APPDATA_PATH in. Used to remember the last "connect"-ed session id
+# so the Settings page field isn't empty again after a page reload.
+save_cfg_var() {
+    local key="$1" value="$2"
+    mkdir -p "$(dirname "$PLUGIN_CFG")"
+    touch "$PLUGIN_CFG"
+    if grep -q "^${key}=" "$PLUGIN_CFG" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=\"${value}\"|" "$PLUGIN_CFG"
+    else
+        echo "${key}=\"${value}\"" >> "$PLUGIN_CFG"
+    fi
 }
 
 # Pulls the session id claude printed a "claude.ai/code/session_..." link
@@ -794,6 +815,7 @@ case "$1" in
             echo "Usage: $0 connect <session_id> (expected a session_... id)"
             exit 1
         fi
+        save_cfg_var "LAST_SESSION_ID" "$sid"
         stop_running
         echo "$sid" > "$PINFILE"
         touch "$ENABLED_FLAG"
@@ -826,7 +848,7 @@ esac
 
 <!-- Web UI -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/claude-code.page">
-<SHA256>c95425715f75e5df3ad1e85ea76547fb27c3f5af9fca3b150c8525a99d0d06b7</SHA256>
+<SHA256>e6dfdbad58b1f5b212d30247d3ce2f78c044431b299ff41a17642b29a88a3788</SHA256>
 <INLINE>
 <![CDATA[
 Menu="Utilities"
@@ -876,6 +898,10 @@ $log_exists = file_exists("/var/log/$log_name");
 // Remote Control status/config
 $rc_dir_cfg = $cfg['REMOTE_CONTROL_DIR'] ?? '';
 $rc_dir = $rc_dir_cfg !== '' ? $rc_dir_cfg : '/root/claude-remote-control';
+// Last session id passed to "connect" (saved by remote-control.sh itself, not
+// this form) -- pre-fills the field below so it doesn't go blank again after
+// a page reload and you don't have to dig it back out of the history table.
+$last_session_id = $cfg['LAST_SESSION_ID'] ?? '';
 $rc_pidfile = '/var/run/claude-remote-control.pid';
 $rc_running = false;
 if (file_exists($rc_pidfile)) {
@@ -1057,7 +1083,7 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 <dl>
 <dt><?=t('Session ID:', 'ID de sesión:')?></dt>
 <dd>
-<input type="text" name="#arg[1]" list="claude-session-history" placeholder="session_..." class="narrow">
+<input type="text" name="#arg[1]" list="claude-session-history" value="<?=htmlspecialchars($last_session_id)?>" placeholder="session_..." class="narrow">
 <datalist id="claude-session-history">
 <?php foreach ($rc_history as $rc_sid => $rc_info): ?>
 <option value="<?=htmlspecialchars($rc_sid)?>"><?=htmlspecialchars($rc_info['time'])?> -- <?=htmlspecialchars($rc_info['dir'])?></option>
@@ -1258,7 +1284,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.07.25.5 has been installed!"
+    echo " Claude Code plugin v2026.07.25.6 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
