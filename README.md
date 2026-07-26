@@ -1,6 +1,15 @@
+<div align="center">
+
 # claude-code-remote-control-unraid-plugin
 
-🇬🇧 [English](#english) | 🇪🇸 [Español](#español)
+*Claude Code CLI on Unraid, plus drive a session from your phone — no inbound ports, ever*
+
+![Release](https://img.shields.io/github/v/release/Nebur692/claude-code-remote-control-unraid-plugin?label=release&color=blue)
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/nebur69265723)
+
+🇬🇧 [English](#english) · 🇪🇸 [Español](#español)
+
+</div>
 
 ---
 
@@ -15,7 +24,7 @@ credit for the original plugin design goes to brianpugh. No license was declared
 repository, so this fork is published with clear credit to the original author rather than any
 claim of authorship over the base plugin.
 
-### What changed from upstream
+### ✨ What's new
 
 - Fixed a bug where the plugin could become permanently disabled after a reboot: the plugin icon
   was fetched over the network via a native `FILE`/`URL` directive processed synchronously during
@@ -51,7 +60,7 @@ claim of authorship over the base plugin.
   `APPDATA_PATH`, since the next boot would otherwise silently restore the old cached binary
   over any update. Reinstall and Update now both log to the file the "View live logs" link
   follows.
-- **Remote Control** (v2.0.0): a new Settings section runs [`claude remote-control`](https://code.claude.com/docs/en/remote-control)
+- **Remote Control**: a new Settings section runs [`claude remote-control`](https://code.claude.com/docs/en/remote-control)
   as a supervised background process, so you can drive a Claude Code session on this NAS from
   claude.ai/code or the Claude mobile app — outbound HTTPS only, nothing opened inbound. It
   always resumes the same ongoing session in its configured directory (`--continue`), falling
@@ -59,9 +68,10 @@ claim of authorship over the base plugin.
   automatically at boot. Requires a claude.ai OAuth login (Pro/Max/Team/Enterprise); API key
   auth isn't supported by this Anthropic feature. Defaults to a dedicated
   `/root/claude-remote-control` directory rather than `/root` itself, since Unraid never
-  persists workspace trust for a home directory.
+  persists workspace trust for a home directory. Includes session history, reconnect-to-any-past
+  session, and auto-recovery if a session gets archived on the claude.ai side.
 
-### Compatibility
+### ✅ Compatibility
 
 Requires Unraid **6.12.0+** (inherited from upstream). Verified on this fork's own NAS running
 **Unraid 7.3.2**. The plugin relies on standard Dynamix webGUI mechanisms (`.page` files,
@@ -69,7 +79,7 @@ Requires Unraid **6.12.0+** (inherited from upstream). Verified on this fork's o
 reasonably recent install. If you try it on an older or newer release, please open an issue with
 the result.
 
-### Installing
+### 📦 Installation
 
 Plugin URL (Unraid → Plugins → Install Plugin):
 
@@ -80,7 +90,7 @@ https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plu
 See the [releases](https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/releases)
 page for the full changelog.
 
-### Usage
+### 🧭 Usage
 
 Open the Unraid terminal and run:
 
@@ -91,7 +101,7 @@ claude
 Authentication and settings persist across reboots automatically. Configure the appdata path via
 **Settings → Utilities → Claude Code**.
 
-### Troubleshooting
+### 🩹 Troubleshooting
 
 Check the install log:
 
@@ -109,6 +119,11 @@ If the plugin ever stops loading after a reboot, check whether it landed in
 `/boot/config/plugins-error/claude-code.plg` — if so, reinstall it from **Plugins** in the Unraid
 web UI using the install URL above.
 
+### 💙 Support
+
+None of this would be possible without the community's support. If this project has been useful to you,
+consider [supporting it on Ko-fi](https://ko-fi.com/nebur69265723) — every bit helps keep it maintained.
+
 ---
 
 ## Español
@@ -123,7 +138,7 @@ página de configuración. Todo el crédito del diseño original del plugin es d
 repositorio original no declara ninguna licencia, así que este fork se publica dejando el crédito
 claro al autor original, sin reclamar autoría del plugin base.
 
-### Qué cambia respecto al original
+### ✨ Novedades
 
 - Arreglado un bug por el que el plugin podía quedar deshabilitado de forma permanente tras un
   reinicio: el icono del plugin se descargaba por red mediante una directiva nativa `FILE`/`URL`
@@ -163,7 +178,7 @@ claro al autor original, sin reclamar autoría del plugin base.
   resultado en `APPDATA_PATH`, ya que el siguiente arranque, si no, restauraría en silencio el
   binario cacheado antiguo sobre cualquier actualización. Reinstalar y Actualizar ahora escriben
   ambos en el fichero que sigue el enlace "Ver logs en vivo".
-- **Control Remoto** (v2.0.0): una nueva sección en Settings ejecuta [`claude remote-control`](https://code.claude.com/docs/en/remote-control)
+- **Control Remoto**: una nueva sección en Settings ejecuta [`claude remote-control`](https://code.claude.com/docs/en/remote-control)
   como un proceso en segundo plano supervisado, para que puedas controlar una sesión de Claude
   Code en este NAS desde claude.ai/code o la app móvil de Claude — solo conexiones HTTPS
   salientes, nada abierto hacia adentro. Siempre retoma la misma sesión en curso en su
@@ -172,9 +187,10 @@ claro al autor original, sin reclamar autoría del plugin base.
   con OAuth de claude.ai (Pro/Max/Team/Enterprise); esta función de Anthropic no admite
   autenticación por API key. Por defecto usa un directorio dedicado
   `/root/claude-remote-control` en vez de `/root` directamente, porque Unraid nunca recuerda la
-  confianza del workspace para un directorio home.
+  confianza del workspace para un directorio home. Incluye historial de sesiones, reconexión a
+  cualquier sesión pasada, y recuperación automática si una sesión queda archivada en claude.ai.
 
-### Compatibilidad
+### ✅ Compatibilidad
 
 Requiere Unraid **6.12.0 o superior** (heredado del original). Verificado en el propio NAS de este
 fork, con **Unraid 7.3.2**. El plugin depende de mecanismos estándar del webGUI Dynamix (ficheros
@@ -182,7 +198,7 @@ fork, con **Unraid 7.3.2**. El plugin depende de mecanismos estándar del webGUI
 en cualquier instalación razonablemente reciente. Si lo pruebas en una versión más antigua o más
 nueva, abre un issue contando el resultado.
 
-### Instalación
+### 📦 Instalación
 
 URL del plugin (Unraid → Plugins → Install Plugin):
 
@@ -194,7 +210,7 @@ Consulta la página de
 [releases](https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/releases) para el
 changelog completo.
 
-### Uso
+### 🧭 Uso
 
 Abre la terminal de Unraid y ejecuta:
 
@@ -205,7 +221,7 @@ claude
 La autenticación y la configuración persisten automáticamente entre reinicios. Puedes configurar
 la ruta de appdata desde **Settings → Utilities → Claude Code**.
 
-### Solución de problemas
+### 🩹 Solución de problemas
 
 Consulta el log de instalación:
 
@@ -222,3 +238,8 @@ Vuelve a ejecutar el instalador manualmente:
 Si el plugin deja de cargar tras un reinicio, comprueba si ha acabado en
 `/boot/config/plugins-error/claude-code.plg`. Si es así, reinstálalo desde **Plugins** en la
 interfaz web de Unraid usando la URL de instalación de arriba.
+
+### 💙 Apoya el proyecto
+
+Sin el apoyo de la comunidad estos proyectos no serían posibles. Si te ha resultado útil, puedes
+[apoyarlo en Ko-fi](https://ko-fi.com/nebur69265723) — cualquier aportación ayuda a seguir manteniéndolo.
