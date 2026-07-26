@@ -1,6 +1,6 @@
 <div align="center">
 
-# claude-code-remote-control-unraid-plugin
+# Claude Code Remote Control Unraid Plugin
 
 *Claude Code CLI on Unraid, plus drive a session from your phone — no inbound ports, ever*
 
