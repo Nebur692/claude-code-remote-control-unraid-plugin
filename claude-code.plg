@@ -1,13 +1,13 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.08.31.8"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.09.01.2"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
-###2026.08.31.8
+###2026.09.01.2
 - Several Claude accounts on one server. Turn on "Several accounts" under Claude accounts on the Settings page, add an account, and pick which one this server uses. The account you pick is used by Remote Control and by claude in the terminal.
 - You choose whether the accounts share the agent memory, settings and MCP servers, or whether each account keeps its own. Sharing is the default, so adding a second account does not leave you starting from nothing.
 - Nothing about the login you already have is moved or rewritten: it stays exactly where it is as the main account, extra accounts get their own folder beside it, and removing an account leaves its folder untouched unless you ask for it to be deleted.
@@ -837,24 +837,82 @@ fi
      taken over as "most recent"; see the connect subcommand and the
      Settings page's Session ID field. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh" Mode="0755">
-<SHA256>285facbdcada3b5d669271d89d98023c932b5f4a761dee7301b7e0f4968ef32d</SHA256>
+<SHA256>19c719ac3ecc3b8c707416024f003d0da992c75e2f8b933e0461e3c2b81ca5b3</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
 
 PLUGIN_CFG="/boot/config/plugins/claude-code/claude-code.cfg"
-LOGFILE="/var/log/claude-code-remote-control.log"
-PIDFILE="/var/run/claude-remote-control.pid"
-ENABLED_FLAG="/var/run/claude-remote-control.enabled"
-PINFILE="/var/run/claude-remote-control.pin"
 HISTORY_FILE="/boot/config/plugins/claude-code/session-history.log"
+PROFILES_SCRIPT="/usr/local/emhttp/plugins/claude-code/scripts/profiles.sh"
 ARCHIVED_FAIL_THRESHOLD=3
 SESSION_POLL_SECONDS=3
 
-get_rc_dir() {
+# Which account this invocation is for, and everything that follows from it.
+#
+# Each account gets its own supervisor, pid file, log and session history, so
+# two accounts can be connected at the same time. The main account deliberately
+# keeps the original unsuffixed paths: an upgrade must not orphan the
+# supervisor that is already running under the old names.
+set_profile() {
+    PROFILE="${1:-}"
+    MULTI_ACCOUNT="no"
+    ACTIVE_PROFILE="default"
     REMOTE_CONTROL_DIR=""
     [ -f "$PLUGIN_CFG" ] && source "$PLUGIN_CFG"
-    echo "${REMOTE_CONTROL_DIR:-/root/claude-remote-control}"
+    [ "$MULTI_ACCOUNT" = "yes" ] || PROFILE="default"
+    [ -z "$PROFILE" ] && PROFILE="${ACTIVE_PROFILE:-default}"
+
+    if [ "$PROFILE" = "default" ]; then
+        SUFFIX=""
+        NAME_PREFIX="unraid"
+    else
+        SUFFIX="-$PROFILE"
+        # The account ends up in the child's own command line, which is the only
+        # way to stop one account's bridge without stopping the others: every
+        # "claude remote-control" otherwise looks identical.
+        NAME_PREFIX="unraid-$PROFILE"
+    fi
+
+    LOGFILE="/var/log/claude-code-remote-control$SUFFIX.log"
+    PIDFILE="/var/run/claude-remote-control$SUFFIX.pid"
+    ENABLED_FLAG="/var/run/claude-remote-control$SUFFIX.enabled"
+    PINFILE="/var/run/claude-remote-control$SUFFIX.pin"
+
+    # The environment that selects this account, from the script that owns that
+    # decision. Empty for the main account.
+    PROFILE_ENV=""
+    if [ "$PROFILE" != "default" ] && [ -x "$PROFILES_SCRIPT" ]; then
+        PROFILE_ENV=$("$PROFILES_SCRIPT" env "$PROFILE" 2>/dev/null)
+    fi
+}
+
+# Every configured account, main one first.
+all_profiles() {
+    MULTI_ACCOUNT="no"; PROFILES=""
+    [ -f "$PLUGIN_CFG" ] && source "$PLUGIN_CFG"
+    if [ "$MULTI_ACCOUNT" = "yes" ]; then
+        echo "default $PROFILES"
+    else
+        echo "default"
+    fi
+}
+
+# Each account needs its own directory. "claude remote-control --continue"
+# resumes the most recent session *of the current directory*, and Claude keeps
+# one bridge pointer per directory, so two accounts pointed at the same folder
+# would resume each other's session and fight over that pointer.
+get_rc_dir() {
+    local var value
+    REMOTE_CONTROL_DIR=""
+    [ -f "$PLUGIN_CFG" ] && source "$PLUGIN_CFG"
+    if [ "$PROFILE" = "default" ]; then
+        echo "${REMOTE_CONTROL_DIR:-/root/claude-remote-control}"
+        return
+    fi
+    var="REMOTE_CONTROL_DIR_$PROFILE"
+    value="${!var}"
+    echo "${value:-/root/claude-remote-control-$PROFILE}"
 }
 
 # Upserts KEY="value" into PLUGIN_CFG without touching other keys -- same
@@ -879,8 +937,14 @@ record_sid() {
     local sid="$1" rc_dir="$2"
     [ -z "$sid" ] && return
     mkdir -p "$(dirname "$HISTORY_FILE")"
-    if [ ! -f "$HISTORY_FILE" ] || ! tail -1 "$HISTORY_FILE" | grep -q " $sid "; then
-        echo "$(date -Iseconds) $sid $rc_dir" >> "$HISTORY_FILE"
+    # Checked against the recent tail rather than only the last line: with an
+    # account per supervisor there are several writers, so this account's own
+    # last entry is not necessarily the final line any more.
+    if [ ! -f "$HISTORY_FILE" ] || ! tail -20 "$HISTORY_FILE" | grep -q " $sid "; then
+        # The account goes in brackets at the end: a directory can contain
+        # spaces, so appending it bare would make the line ambiguous. Lines
+        # written before accounts existed simply have no bracket.
+        echo "$(date -Iseconds) $sid $rc_dir [$PROFILE]" >> "$HISTORY_FILE"
     fi
 }
 
@@ -920,7 +984,11 @@ run_claude() {
     self=$BASHPID
     watch_for_sessions "$offset" "$rc_dir" "$self" > /dev/null 2>&1 &
     watcher=$!
-    output=$(claude remote-control "$@" --remote-control-session-name-prefix "unraid" 2>&1 < /dev/null | tee -a "$LOGFILE")
+    if [ -n "$PROFILE_ENV" ]; then
+        output=$(env "$PROFILE_ENV" claude remote-control "$@" --remote-control-session-name-prefix "$NAME_PREFIX" 2>&1 < /dev/null | tee -a "$LOGFILE")
+    else
+        output=$(claude remote-control "$@" --remote-control-session-name-prefix "$NAME_PREFIX" 2>&1 < /dev/null | tee -a "$LOGFILE")
+    fi
     kill "$watcher" 2>/dev/null
     wait "$watcher" 2>/dev/null
     # Also record on exit, in case the attempt was shorter than one poll.
@@ -987,45 +1055,84 @@ stop_running() {
         kill "$(cat "$PIDFILE")" 2>/dev/null
         rm -f "$PIDFILE"
     fi
-    pkill -f "claude remote-control" 2>/dev/null
+    # Scoped to this account. A bare "pkill -f 'claude remote-control'" would
+    # take every account's bridge down with it, because their command lines are
+    # identical apart from the session name prefix -- which is exactly why the
+    # prefix carries the account. Anchored at the end so "unraid" does not also
+    # match "unraid-work".
+    pkill -f "remote-control.sh _run $PROFILE\$" 2>/dev/null
+    pkill -f "remote-control-session-name-prefix $NAME_PREFIX\$" 2>/dev/null
 }
 
-case "$1" in
+# Subcommands take the account as their first argument. Without one they act on
+# the account in use, except "stop", which with no account stops every one of
+# them: the uninstall path calls it that way and must leave nothing running.
+CMD="${1:-}"
+SLUG=""
+case "${2:-}" in
+    session_*) ;;              # "connect <sid>": a session id, not an account
+    "")        ;;
+    *) SLUG="$2" ;;
+esac
+if [ -n "$SLUG" ]; then SID="${3:-}"; else SID="${2:-}"; fi
+
+set_profile "$SLUG"
+
+# Where the last id connected to is remembered, so the Settings field can be
+# pre-filled per account rather than sharing one value between them.
+if [ "$PROFILE" = "default" ]; then
+    SESSION_ID_KEY="LAST_SESSION_ID"
+else
+    SESSION_ID_KEY="LAST_SESSION_ID_$PROFILE"
+fi
+
+case "$CMD" in
     start)
         if [ -f "$PIDFILE" ] && [ -d "/proc/$(cat "$PIDFILE")" ]; then
-            echo "Remote Control is already running."
+            echo "Remote Control is already running for account '$PROFILE'."
             exit 0
         fi
         rm -f "$PINFILE"
         touch "$ENABLED_FLAG"
-        nohup "$0" _run > /dev/null 2>&1 &
+        nohup "$0" _run "$PROFILE" > /dev/null 2>&1 &
         echo $! > "$PIDFILE"
-        echo "Remote Control starting in directory: $(get_rc_dir)"
+        echo "Remote Control starting for account '$PROFILE' in directory: $(get_rc_dir)"
         echo "Use 'View live logs' below for the session URL / QR code."
         ;;
     _run)
         do_run
         ;;
     connect)
-        sid="$2"
-        if ! echo "$sid" | grep -qE '^session_[A-Za-z0-9]+$'; then
-            echo "Usage: $0 connect <session_id> (expected a session_... id)"
+        if ! echo "$SID" | grep -qE '^session_[A-Za-z0-9]+$'; then
+            echo "Usage: $0 connect [account] <session_id> (expected a session_... id)"
             exit 1
         fi
-        save_cfg_var "LAST_SESSION_ID" "$sid"
+        save_cfg_var "$SESSION_ID_KEY" "$SID"
         stop_running
-        echo "$sid" > "$PINFILE"
+        echo "$SID" > "$PINFILE"
         touch "$ENABLED_FLAG"
-        nohup "$0" _run > /dev/null 2>&1 &
+        nohup "$0" _run "$PROFILE" > /dev/null 2>&1 &
         echo $! > "$PIDFILE"
-        echo "Remote Control connecting to session: $sid"
+        echo "Remote Control connecting account '$PROFILE' to session: $SID"
         echo "Use 'View live logs' below for status."
         ;;
     stop)
-        stop_running
-        rm -f "$PINFILE"
-        echo "=== Remote Control stopped by user $(date) ===" >> "$LOGFILE"
-        echo "Remote Control stopped."
+        if [ -n "$SLUG" ]; then
+            stop_running
+            rm -f "$PINFILE"
+            echo "=== Remote Control stopped by user $(date) ===" >> "$LOGFILE"
+            echo "Remote Control stopped for account '$PROFILE'."
+        else
+            # No account named: stop all of them, so an uninstall or a blanket
+            # "stop" cannot leave another account's supervisor respawning.
+            for p in $(all_profiles); do
+                set_profile "$p"
+                stop_running
+                rm -f "$PINFILE"
+                [ -f "$LOGFILE" ] && echo "=== Remote Control stopped by user $(date) ===" >> "$LOGFILE"
+            done
+            echo "Remote Control stopped."
+        fi
         ;;
     status)
         if [ -f "$PIDFILE" ] && [ -d "/proc/$(cat "$PIDFILE")" ]; then
@@ -1035,7 +1142,7 @@ case "$1" in
         fi
         ;;
     *)
-        echo "Usage: $0 {start|stop|status|connect <session_id>}"
+        echo "Usage: $0 {start [account]|stop [account]|status [account]|connect [account] <session_id>}"
         exit 1
         ;;
 esac
@@ -1046,7 +1153,7 @@ esac
 <!-- Claude account profiles: several logins on one server, either sharing
      the agent memory and settings or fully isolated. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/profiles.sh" Mode="0755">
-<SHA256>0bf1a1f4af7b8242bcede7391459229d439fcc6f12f2b4ba3e4e0e7344bebb1e</SHA256>
+<SHA256>b3581e8a72c16c502d36ccabf238ddf7f11bc35de640ef419efe096296b4d5c0</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1207,11 +1314,50 @@ cmd_list() {
     done
 }
 
+# Turns whatever the user typed into a usable directory name. Asking people to
+# invent a lowercase identifier is friction for no benefit: the name they type
+# is kept verbatim as the label, and this derives the slug behind it.
+slugify() {
+    local s="$1" out
+    # Fold accented letters explicitly rather than relying on iconv's
+    # //TRANSLIT: on Unraid it is a no-op, so "Cuenta de Rubén" came out as
+    # cuenta_de_rub_n. These are byte-exact UTF-8 sequences, so the
+    # substitution does not depend on the locale being set.
+    # Fold accented letters one full sequence at a time. Not a bracket
+    # expression and not iconv's //TRANSLIT: iconv is a no-op here, and in a
+    # non-UTF-8 locale sed matches brackets byte by byte, so [áàä] also
+    # matches the lead byte every accented letter shares and "Rubén" came
+    # out as "Rubaen". Uppercase is handled by the lowercasing below.
+    out=$(printf '%s' "$s" | sed -e 's/á/a/g' -e 's/à/a/g' -e 's/ä/a/g' -e 's/â/a/g' -e 's/ã/a/g' -e 's/å/a/g' -e 's/é/e/g' -e 's/è/e/g' -e 's/ë/e/g' -e 's/ê/e/g' -e 's/í/i/g' -e 's/ì/i/g' -e 's/ï/i/g' -e 's/î/i/g' -e 's/ó/o/g' -e 's/ò/o/g' -e 's/ö/o/g' -e 's/ô/o/g' -e 's/õ/o/g' -e 's/ú/u/g' -e 's/ù/u/g' -e 's/ü/u/g' -e 's/û/u/g' -e 's/ñ/n/g' -e 's/ç/c/g')
+    [ -z "$out" ] && out="$s"
+    out=$(printf '%s' "$out" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9]\+/_/g' -e 's/^_*//' -e 's/_*$//')
+    out=$(printf '%s' "$out" | cut -c1-24)
+    # Must start with a letter: the slug becomes part of a shell variable name.
+    case "$out" in
+        [a-z]*) ;;
+        *) out="cuenta${out:+_$out}" ;;
+    esac
+    printf '%s' "$out"
+}
+
 cmd_add() {
-    local slug="$1" label="$2" dir
-    if ! echo "$slug" | grep -qE "$SLUG_RE"; then
-        echo "Invalid name: use 1-24 characters, lowercase letters, digits and _ , starting with a letter."
+    local label="$1" slug="$2" dir base n
+    if [ -z "$label" ]; then
+        echo "Give the account a name."
         return 1
+    fi
+    # An explicit slug is only for scripting; the web UI passes the name alone.
+    [ -z "$slug" ] && slug=$(slugify "$label")
+    if ! echo "$slug" | grep -qE "$SLUG_RE"; then
+        echo "Could not turn '$label' into a folder name. Try a name with some letters or digits in it."
+        return 1
+    fi
+    # Two accounts called "Trabajo" and "trabajo!" would collide; number them.
+    if profile_exists "$slug"; then
+        base=$(printf '%s' "$slug" | cut -c1-21)
+        n=2
+        while profile_exists "${base}_$n" && [ "$n" -lt 50 ]; do n=$((n + 1)); done
+        slug="${base}_$n"
     fi
     if profile_exists "$slug"; then
         echo "An account named '$slug' already exists."
@@ -1226,8 +1372,8 @@ cmd_add() {
     # that is otherwise readable.
     chmod 700 "$dir"
     save_cfg_var "PROFILES" "$(echo $PROFILES $slug | xargs)"
-    [ -n "$label" ] && save_cfg_var "PROFILE_LABEL_$slug" "$label"
-    echo "Account '$slug' created. Use Sign in to authenticate it."
+    save_cfg_var "PROFILE_LABEL_$slug" "$label"
+    echo "Account '$label' created. Use Sign in to authenticate it."
 }
 
 cmd_remove() {
@@ -1304,7 +1450,7 @@ load_cfg
 
 case "$1" in
     list)     cmd_list ;;
-    add)      cmd_add "$2" "$3" ;;
+    add)      cmd_add "$2" "$3" ;;   # name [slug]
     remove)   cmd_remove "$2" "$3" ;;
     activate) cmd_activate "$2" ;;
     refresh)
@@ -1321,7 +1467,7 @@ case "$1" in
         ;;
     status)   cmd_status ;;
     *)
-        echo "Usage: $0 {list|add <name> [label]|remove <name> [purge]|activate <name>|refresh [name]|env [name]|status}"
+        echo "Usage: $0 {list|add <name> [slug]|remove <slug> [purge]|activate <slug>|refresh [slug]|env [slug]|status}"
         exit 1
         ;;
 esac
@@ -1768,7 +1914,7 @@ respond([
 <!-- Shared preamble and styling for the tabs. Every tab requires this once,
      so the state it computes is worked out a single time per request. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/common.php" Mode="0644">
-<SHA256>3485363627066958f3f3915a8204937b89d564649cf8b6f24118628074c36a42</SHA256>
+<SHA256>3b8db1ee49d7f93a310c6fa551d3f273731073dc03b358012bb0a48042c99588</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -1866,6 +2012,23 @@ foreach ($profiles as $i => $prow) {
     }
 }
 
+// The accounts the usage panel reports on. Always at least one entry: the plan
+// figures belong to an account even when there is only one of them, and saying
+// which is the point of the panel.
+$usage_accounts = [];
+foreach ($profiles as $prow) {
+    $usage_accounts[] = [
+        'slug'  => $prow['slug'],
+        'label' => $prow['email'] !== '' ? $prow['email'] : $prow['label'],
+    ];
+}
+if (!$usage_accounts) {
+    $usage_accounts[] = [
+        'slug'  => 'default',
+        'label' => $account_email !== '' ? $account_email : t('Main account', 'Cuenta principal'),
+    ];
+}
+
 // Which row is the account in use, if any. Computed here rather than inside the
 // status bar below because $has_auth depends on it: with several accounts the
 // signed-in one need not be the original config directory.
@@ -1890,31 +2053,69 @@ $log_name = "claude-code-install.log";
 $log_exists = file_exists("/var/log/$log_name");
 
 // Remote Control status/config
-$rc_dir_cfg = $cfg['REMOTE_CONTROL_DIR'] ?? '';
-$rc_dir = $rc_dir_cfg !== '' ? $rc_dir_cfg : '/root/claude-remote-control';
-// Last session id passed to "connect" (saved by remote-control.sh itself, not
-// this form) -- pre-fills the field below so it doesn't go blank again after
-// a page reload and you don't have to dig it back out of the history table.
-$last_session_id = $cfg['LAST_SESSION_ID'] ?? '';
-$rc_pidfile = '/var/run/claude-remote-control.pid';
-$rc_running = false;
-if (file_exists($rc_pidfile)) {
-    $rc_pid = trim(@file_get_contents($rc_pidfile));
-    $rc_running = $rc_pid !== '' && file_exists("/proc/$rc_pid");
-}
-$rc_log_name = 'claude-code-remote-control.log';
-$rc_log_exists = file_exists("/var/log/$rc_log_name");
-$rc_session_url = '';
-$rc_archived_notice = '';
-if ($rc_log_exists) {
-    $rc_log_tail = shell_exec("tail -n 300 /var/log/$rc_log_name 2>/dev/null");
-    if ($rc_log_tail && preg_match_all('#https://claude\.ai/code[^\s]*#', $rc_log_tail, $rc_matches) && !empty($rc_matches[0])) {
-        $rc_session_url = end($rc_matches[0]);
+// Remote Control state, per account. Each account runs its own supervisor with
+// its own pid file, log and session, so every one of these is read per account
+// rather than once for the server.
+//
+// The main account keeps the original unsuffixed paths on purpose: an upgrade
+// must not orphan a supervisor that is already running under the old names.
+$rc_accounts = [];
+foreach (($profiles ?: [['slug' => 'default', 'label' => t('Main account', 'Cuenta principal'), 'email' => '']]) as $prow) {
+    $slug = $prow['slug'];
+    $suffix = $slug === 'default' ? '' : "-$slug";
+
+    // Each account needs its own working directory: "--continue" resumes the
+    // most recent session of a directory and Claude keeps one bridge pointer
+    // per directory, so two accounts sharing a folder would resume each
+    // other's session.
+    $dir_key = $slug === 'default' ? 'REMOTE_CONTROL_DIR' : "REMOTE_CONTROL_DIR_$slug";
+    $dir_cfg = $cfg[$dir_key] ?? '';
+    $dir_default = $slug === 'default' ? '/root/claude-remote-control' : "/root/claude-remote-control-$slug";
+
+    $pidfile = "/var/run/claude-remote-control$suffix.pid";
+    $running = false;
+    if (file_exists($pidfile)) {
+        $pid = trim((string)@file_get_contents($pidfile));
+        $running = $pid !== '' && file_exists("/proc/$pid");
     }
-    if ($rc_log_tail && preg_match_all('/^=== ARCHIVED_SESSION_FALLBACK:.*$/m', $rc_log_tail, $rc_afb)) {
-        $rc_archived_notice = end($rc_afb[0]);
+
+    $log_name = "claude-code-remote-control$suffix.log";
+    $log_exists = file_exists("/var/log/$log_name");
+    $session_url = '';
+    $archived = '';
+    if ($log_exists) {
+        $tail = shell_exec("tail -n 300 /var/log/" . escapeshellarg($log_name) . " 2>/dev/null");
+        if ($tail && preg_match_all('#https://claude\.ai/code[^\s]*#', $tail, $m) && !empty($m[0])) {
+            $session_url = end($m[0]);
+        }
+        if ($tail && preg_match_all('/^=== ARCHIVED_SESSION_FALLBACK:.*$/m', $tail, $a)) {
+            $archived = end($a[0]);
+        }
     }
+
+    $rc_accounts[] = [
+        'slug'        => $slug,
+        'label'       => $prow['label'],
+        'email'       => $prow['email'] ?? '',
+        'dir_cfg'     => $dir_cfg,
+        'dir'         => $dir_cfg !== '' ? $dir_cfg : $dir_default,
+        'dir_key'     => $dir_key,
+        'dir_default' => $dir_default,
+        'running'     => $running,
+        'log_name'    => $log_name,
+        'log_exists'  => $log_exists,
+        'session_url' => $session_url,
+        'archived'    => $archived,
+        'last_sid'    => $cfg[$slug === 'default' ? 'LAST_SESSION_ID' : "LAST_SESSION_ID_$slug"] ?? '',
+    ];
 }
+
+// The main account's values stay available under their old names: the status
+// bar and the Logs section still speak about the server as a whole.
+$rc_main = $rc_accounts[0];
+$rc_running = $rc_main['running'];
+$rc_log_name = $rc_main['log_name'];
+$rc_log_exists = $rc_main['log_exists'];
 
 // Claude names each project folder after its directory with "/" replaced by
 // "-", which is ambiguous: a literal "-" inside a folder name encodes exactly
@@ -1954,7 +2155,10 @@ $rc_history = [];
 
 if (file_exists($rc_history_file)) {
     foreach (array_filter(array_map('trim', file($rc_history_file))) as $rc_line) {
-        if (preg_match('/^(\S+)\s+(session_\S+)\s+(.*)$/', $rc_line, $rc_m)) {
+        // The account is written in brackets at the end, because a directory can
+        // contain spaces. Lines written before accounts existed have none, and
+        // still parse: they belong to the main account.
+        if (preg_match('/^(\S+)\s+(session_\S+)\s+(.*?)(?:\s+\[([a-z0-9_]+)\])?$/', $rc_line, $rc_m)) {
             // Later lines are newer, so a repeated id keeps its latest entry.
             $rc_history[$rc_m[2]] = [
                 'time'      => $rc_m[1],
@@ -1962,6 +2166,7 @@ if (file_exists($rc_history_file)) {
                 'dir'       => $rc_m[3],
                 'dir_known' => true, // logged verbatim, no decoding needed
                 'live'      => false,
+                'profile'   => $rc_m[4] ?? 'default',
             ];
         }
     }
@@ -1993,6 +2198,9 @@ foreach (glob("$appdata_path/.claude/projects/*/bridge-pointer.json") ?: [] as $
             // as if it were a real path.
             'dir_known' => $bp_dir !== $bp_key,
             'live'      => $bp_live,
+            // Claude's own pointer files say nothing about which account owns a
+            // session, so an entry only seen there is left unattributed.
+            'profile'   => $rc_history[$bp_sid]['profile'] ?? '',
         ];
     } elseif ($bp_live) {
         $rc_history[$bp_sid]['live'] = true;
@@ -2000,7 +2208,6 @@ foreach (glob("$appdata_path/.claude/projects/*/bridge-pointer.json") ?: [] as $
 }
 
 uasort($rc_history, function($a, $b) { return $b['ts'] <=> $a['ts']; });
-?>
 ?>
 
 <style>
@@ -2263,6 +2470,90 @@ out(['state' => 'starting']);
 </INLINE>
 </FILE>
 
+<!-- Account actions from the Accounts tab. They report back on the page
+     instead of into the progress strip, where a real error went unseen. -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-accounts.php" Mode="0644">
+<SHA256>30b835ce1351b82123c2cba0bad1aeb60180c219129381ca3c89d5a2648ab0ff</SHA256>
+<INLINE>
+<![CDATA[
+<?php
+// Account actions from the Accounts tab: add, remove, switch.
+//
+// These used to be posted straight at profiles.sh through Unraid's #command
+// form, which streams the script's output into a one-line strip at the bottom
+// of the window. That strip is where a real error went to die: adding an
+// account with a name the script rejected simply looked like nothing had
+// happened. Going through here instead means every message the script writes
+// gets shown next to the button that caused it.
+//
+// The script stays the single source of truth for what an account is; this only
+// carries its words back to the page.
+
+header('Content-Type: application/json');
+header('Cache-Control: no-store');
+
+putenv('PATH=/usr/local/bin:/root/.local/bin:/bin:/sbin:/usr/bin:/usr/sbin');
+
+$script = '/usr/local/emhttp/plugins/claude-code/scripts/profiles.sh';
+$action = (string)($_POST['action'] ?? '');
+$name   = trim((string)($_POST['name'] ?? ''));
+$slug   = trim((string)($_POST['slug'] ?? ''));
+
+function done($ok, $message) {
+    echo json_encode(['ok' => $ok, 'message' => trim($message)]);
+    exit;
+}
+
+if (!is_executable($script)) { done(false, 'profiles.sh is missing'); }
+
+// Anything that names an existing account is checked against the real list
+// rather than pattern-matched: these values reach a shell command.
+function known($slug, $script) {
+    if ($slug === '') return false;
+    foreach (explode("\n", trim((string)shell_exec(escapeshellarg($script) . ' list 2>/dev/null'))) as $line) {
+        if ($line !== '' && strtok($line, "\t") === $slug) return true;
+    }
+    return false;
+}
+
+// exec() rather than shell_exec(): the exit status is what says whether the
+// action worked, and the output is the message to show either way.
+function run($cmd) {
+    $lines = [];
+    $rc = 0;
+    exec($cmd . ' 2>&1', $lines, $rc);
+    return [$rc === 0, implode("\n", $lines)];
+}
+
+switch ($action) {
+    case 'add':
+        // The name is free text; profiles.sh derives the folder name from it.
+        if ($name === '') { done(false, ''); }
+        [$ok, $out] = run(escapeshellarg($script) . ' add ' . escapeshellarg($name));
+        done($ok, $out);
+
+    case 'remove':
+        if (!known($slug, $script)) { done(false, 'unknown account'); }
+        $purge = ((string)($_POST['purge'] ?? '')) === 'yes' ? ' purge' : '';
+        [$ok, $out] = run(escapeshellarg($script) . ' remove ' . escapeshellarg($slug) . $purge);
+        done($ok, $out);
+
+    case 'activate':
+        if (!known($slug, $script)) { done(false, 'unknown account'); }
+        [$ok, $out] = run(escapeshellarg($script) . ' activate ' . escapeshellarg($slug));
+        done($ok, $out);
+
+    case 'refresh':
+        [$ok, $out] = run(escapeshellarg($script) . ' refresh');
+        done($ok, $out);
+
+    default:
+        done(false, 'unknown action');
+}
+]]>
+</INLINE>
+</FILE>
+
 <!-- Web UI. The page itself is only the tab container: it carries no body,
      so it does not become a tab of its own. The four pages below fill it. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/claude-code.page">
@@ -2281,7 +2572,7 @@ Tabs="true"
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeDashboard.page">
-<SHA256>811d075a1bb689f4fed1deb12eb009e164f2bd0c05ab00e9229a93c9de81f1fa</SHA256>
+<SHA256>402a4a94d5ecbe6fb6312293845872263daa3dc809ed37e46f7fe840d26b369f</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:1"
@@ -2297,30 +2588,6 @@ Claude Code: <span class="<?=$claude_installed ? 'ok' : 'error'?>"><?=$claude_in
 <span class="sep">&middot;</span>
 <?=t('Array', 'Array')?>: <span class="<?=$array_started ? 'ok' : 'error'?>"><?=$array_started ? t('Started', 'Iniciado') : t('Not started', 'No iniciado')?></span>
 <span class="sep">&middot;</span>
-<?=t('Account', 'Cuenta')?>: <span class="<?=($has_auth || $active_row !== null) ? 'ok' : 'warn'?>"><?php
-// With several accounts configured, the cached oauthAccount in .claude.json
-// belongs to whichever account wrote it last, so it cannot name the one in
-// use. The profile list knows, and already carries the label.
-if (!$has_auth && $active_row === null) {
-    echo t('Not authenticated', 'Sin autenticar');
-} elseif ($active_row !== null) {
-    if (count($profiles) > 1) {
-        echo htmlspecialchars($active_row['label']);
-        if ($active_row['email'] !== '') echo ' &middot; ';
-    }
-    if ($active_row['email'] !== '') {
-        echo htmlspecialchars($active_row['email']);
-        if ($active_row['plan'] !== '') echo ' (' . htmlspecialchars(ucfirst($active_row['plan'])) . ')';
-    } elseif (count($profiles) <= 1) {
-        echo t('Not signed in', 'Sin iniciar sesión');
-    }
-} elseif ($account_email !== '') {
-    echo htmlspecialchars($account_email) . ($account_plan !== '' ? ' (' . htmlspecialchars($account_plan) . ')' : '');
-} else {
-    echo t('Configured', 'Configurada');
-}
-?></span>
-<span class="sep">&middot;</span>
 Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : t('Not configured', 'No configurado')?></span>
 <span class="sep">&middot;</span>
 <!-- Filled in by the poller defined with the Resource usage box further down.
@@ -2334,12 +2601,9 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
      plan reports. Hidden entirely unless the lookup succeeds, so a box logged
      in with an API key -- which has no plan windows -- shows nothing rather
      than an error nobody can act on. -->
-<div class="claude-status" id="claude-usage-bar" style="display:none;">
-<b><?=t('Plan usage:', 'Uso del plan:')?></b>
-<span id="claude-usage-body"></span>
-</div>
-<!-- One line per account once there is more than one: each account has its own
-     limits, so a single combined figure would be meaningless. -->
+<!-- One line per account. Plan limits belong to an account, so even with a
+     single account the figures are labelled with whose they are; with several
+     there is no meaningful combined number to show. -->
 <div id="claude-usage-accounts"></div>
 
 <script>
@@ -2356,10 +2620,8 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
       'hour'      => t('h', 'h'),
       'min'       => t('min', 'min'),
       'nodata'    => t('not signed in', 'sin iniciar sesión'),
+      'plan'      => t('Plan usage', 'Uso del plan'),
   ])?>;
-  var wrap = document.getElementById('claude-usage-bar');
-  var body = document.getElementById('claude-usage-body');
-
   // Model display names come from the API, so escape before injecting them.
   function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
@@ -2402,27 +2664,9 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
     return parts.join('<span class="sep">&middot;</span>');
   }
 
-  function render(d) {
-    if (!d || d.state === 'no-auth' || d.state === 'error') { wrap.style.display = 'none'; return; }
-    if (d.state === 'expired') {
-      body.innerHTML = '<span class="dim-text">' + esc(L.expired) + '</span>';
-      wrap.style.display = '';
-      return;
-    }
-    var html = usageParts(d);
-    if (!html) { wrap.style.display = 'none'; return; }
-    body.innerHTML = html;
-    wrap.style.display = '';
-  }
-
-  // Once a minute, matching the endpoint's own cache: these windows move over
-  // hours, and the lookup is a network round trip, unlike the local /proc read
-  // the resource poller does every 3s.
   // The accounts to report on. With one account this is empty and everything
   // below behaves exactly as it did before the feature existed.
-  var ACCOUNTS = <?=json_encode($multi_account && count($profiles) > 1 ? array_map(function ($p) {
-      return ['slug' => $p['slug'], 'label' => $p['label']];
-  }, $profiles) : [])?>;
+  var ACCOUNTS = <?=json_encode($usage_accounts)?>;
 
   var wrapAccounts = document.getElementById('claude-usage-accounts');
 
@@ -2440,14 +2684,16 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 
   function renderAccount(acct, d) {
     var row = rowFor(acct.slug);
+    var who = '<b>' + esc(L.plan) + '</b> <span class="dim-text">&middot;</span> <b>' + esc(acct.label) + ':</b> ';
     if (!d || d.state !== 'ok') {
-      // An account that is not signed in has no windows to report; say so
-      // rather than leaving a gap the reader has to interpret.
-      row.innerHTML = '<b>' + esc(acct.label) + ':</b> <span class="dim-text">' +
-                      esc(d && d.state === 'expired' ? L.expired : L.nodata) + '</span>';
+      // An account with no usable token has no windows to report; say so rather
+      // than leaving a gap the reader has to interpret.
+      var why = d && d.state === 'expired' ? L.expired : L.nodata;
+      row.innerHTML = who + '<span class="dim-text">' + esc(why) + '</span>';
       return;
     }
-    row.innerHTML = '<b>' + esc(acct.label) + ':</b> ' + usageParts(d);
+    var figures = usageParts(d);
+    row.innerHTML = who + (figures || '<span class="dim-text">' + esc(L.nodata) + '</span>');
   }
 
   function pollAccounts() {
@@ -2460,13 +2706,7 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
   }
 
   var timer = null;
-  function poll() {
-    if (ACCOUNTS.length) { wrap.style.display = 'none'; pollAccounts(); return; }
-    fetch('/plugins/claude-code/include/claude-usage.php', { cache: 'no-store' })
-      .then(function (r) { return r.json(); })
-      .then(render)
-      .catch(function () { wrap.style.display = 'none'; });
-  }
+  function poll() { pollAccounts(); }
   function start() { if (!timer) { poll(); timer = setInterval(poll, 60000); } }
   function stop() { if (timer) { clearInterval(timer); timer = null; } }
   start();
@@ -2579,7 +2819,7 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeAccounts.page">
-<SHA256>194a1042971ecd79a9f878fa15828247b58947ca359ae504d4977997cf2f1eba</SHA256>
+<SHA256>9d27eb62ad1ff7635bc84f0e93632e4f0eac19abd23e9af32a8e0ead22a9e648</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:2"
@@ -2650,20 +2890,12 @@ Tag="users"
 <input type="button" value="<?=$p['logged'] ? t('Sign in again', 'Volver a iniciar sesión') : t('Sign in', 'Iniciar sesión')?>"
        onclick="claudeLoginStart('<?=htmlspecialchars($p['slug'], ENT_QUOTES)?>','<?=htmlspecialchars($p['label'], ENT_QUOTES)?>');">
 <?php if (!$p['active']): ?>
-<form method="POST" action="/update.php" target="progressFrame" style="display:inline;">
-<input type="hidden" name="#command" value="<?=$profiles_script?>">
-<input type="hidden" name="#arg[0]" value="activate">
-<input type="hidden" name="#arg[1]" value="<?=htmlspecialchars($p['slug'])?>">
-<input type="submit" value="<?=t('Use this one', 'Usar esta')?>">
-</form>
+<input type="button" value="<?=t('Use this one', 'Usar esta')?>"
+       onclick="claudeAccount('activate','<?=htmlspecialchars($p['slug'], ENT_QUOTES)?>');">
 <?php endif; ?>
 <?php if ($p['slug'] !== 'default' && !$p['active']): ?>
-<form method="POST" action="/update.php" target="progressFrame" style="display:inline;">
-<input type="hidden" name="#command" value="<?=$profiles_script?>">
-<input type="hidden" name="#arg[0]" value="remove">
-<input type="hidden" name="#arg[1]" value="<?=htmlspecialchars($p['slug'])?>">
-<input type="submit" value="<?=t('Remove', 'Eliminar')?>">
-</form>
+<input type="button" value="<?=t('Remove', 'Eliminar')?>"
+       onclick="claudeAccount('remove','<?=htmlspecialchars($p['slug'], ENT_QUOTES)?>');">
 <?php endif; ?>
 </td>
 </tr>
@@ -2676,28 +2908,57 @@ Tag="users"
     'Eliminar una cuenta solo la quita de esta lista; su carpeta dentro de appdata se deja intacta, así que no se pierde nada por accidente. Cambiar de cuenta reinicia el Control Remoto si está corriendo, y las terminales que ya tengas abiertas siguen con la cuenta anterior hasta que abras una nueva.'
 )?></blockquote>
 
-<form method="POST" action="/update.php" target="progressFrame">
-<input type="hidden" name="#command" value="<?=$profiles_script?>">
-<input type="hidden" name="#arg[0]" value="add">
 <dl>
 <dt><?=t('Add an account:', 'Añadir una cuenta:')?></dt>
 <dd>
-<input type="text" name="#arg[1]" placeholder="<?=t('short name', 'nombre corto')?>" class="narrow">
-<input type="text" name="#arg[2]" placeholder="<?=t('label shown here', 'etiqueta que se ve aquí')?>" class="narrow">
+<input type="text" id="claude-account-name" class="narrow" placeholder="<?=t('for example: Work', 'por ejemplo: Trabajo')?>" autocomplete="off">
+<input type="button" value="<?=t('Add', 'Añadir')?>" onclick="claudeAccountAdd();">
 </dd>
 </dl>
 <blockquote class="inline_help"><?=t(
-    'The short name is used for the folder that holds this account, so it takes lowercase letters, digits and underscores only. The label is free text and is what you see in the table above. Creating an account does not sign it in yet.',
-    'El nombre corto se usa para la carpeta que guarda esta cuenta, así que admite solo minúsculas, dígitos y guiones bajos. La etiqueta es texto libre y es lo que se ve en la tabla de arriba. Crear una cuenta todavía no inicia sesión en ella.'
+    'Call it whatever makes sense to you; the folder that holds it is named automatically. Adding an account does not sign it in yet: use Sign in next to it once it appears in the table.',
+    'Llámala como te resulte útil; la carpeta que la guarda se nombra sola. Añadir una cuenta todavía no inicia sesión en ella: usa Iniciar sesión a su lado en cuanto aparezca en la tabla.'
 )?></blockquote>
-<input type="submit" value="<?=t('Add', 'Añadir')?>">
-</form>
 
-<form method="POST" action="/update.php" target="progressFrame">
-<input type="hidden" name="#command" value="<?=$profiles_script?>">
-<input type="hidden" name="#arg[0]" value="refresh">
-<input type="submit" value="<?=t('Refresh account details', 'Actualizar datos de las cuentas')?>">
-</form>
+<input type="button" value="<?=t('Refresh account details', 'Actualizar datos de las cuentas')?>" onclick="claudeAccount('refresh','');">
+<p id="claude-account-msg"></p>
+
+<script>
+(function () {
+  var L = <?=json_encode([
+      'working' => t('Working...', 'Trabajando...'),
+      'network' => t('Could not reach the server.', 'No se pudo contactar con el servidor.'),
+      'noname'  => t('Type a name for the account first.', 'Escribe antes un nombre para la cuenta.'),
+  ])?>;
+  var msg = document.getElementById('claude-account-msg');
+
+  // Every account action reports here, next to the button that caused it.
+  // Posting these to Unraid's progress frame instead put the answer in a
+  // one-line strip nobody reads, which turned a plain "that name will not do"
+  // into a button that looked broken.
+  function send(params, onOk) {
+    msg.textContent = L.working;
+    msg.className = '';
+    var body = new URLSearchParams(params);
+    fetch('/plugins/claude-code/include/claude-accounts.php', { method: 'POST', cache: 'no-store', body: body })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        msg.textContent = d.message || '';
+        msg.className = d.ok ? 'ok' : 'error';
+        if (d.ok) setTimeout(function () { location.reload(); }, 900);
+      })
+      .catch(function () { msg.textContent = L.network; msg.className = 'error'; });
+  }
+
+  window.claudeAccount = function (action, slug) { send({ action: action, slug: slug }); };
+
+  window.claudeAccountAdd = function () {
+    var name = document.getElementById('claude-account-name').value.trim();
+    if (!name) { msg.textContent = L.noname; msg.className = 'error'; return; }
+    send({ action: 'add', name: name });
+  };
+})();
+</script>
 <?php endif; ?>
 </div>
 
@@ -2832,7 +3093,7 @@ Tag="users"
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeRemote.page">
-<SHA256>c1a74f2fcbf694586c52454c63bcc087477f67ab3ec7e170076e363229e1b6d2</SHA256>
+<SHA256>2206d52d5018c95a868dbd955e49310140aaeae8765f7834f4ca218655b44aec</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:3"
@@ -2848,91 +3109,123 @@ Tag="desktop"
 )?></p>
 <p><?=t(
     'Always resumes the same ongoing session in the directory below (--continue), so context carries over between restarts instead of starting over. It only runs when started below -- never launched automatically at boot.',
-    'Siempre retoma la misma sesión en curso en el directorio de abajo (--continue), así que el contexto se mantiene entre reinicios en vez de empezar de cero. Solo corre cuando lo iniciás abajo -- nunca se lanza solo al arrancar Unraid.'
+    'Siempre retoma la misma sesión en curso en el directorio de abajo (--continue), así que el contexto se mantiene entre reinicios en vez de empezar de cero. Solo corre cuando lo inicias abajo -- nunca se lanza solo al arrancar Unraid.'
 )?></p>
 <p><?=t(
     'If a session was archived on claude.ai (an action you take there, not something Claude does by itself) or otherwise can no longer be resumed, this is detected automatically after a few failed attempts and a new session starts in its place -- see the notice below when that happens.',
     'Si una sesión fue archivada en claude.ai (una acción que haces tú allí, no algo que hace Claude por su cuenta) o ya no se puede retomar por otro motivo, esto se detecta automáticamente tras varios intentos fallidos y arranca una sesión nueva en su lugar -- verás un aviso abajo cuando ocurra.'
 )?></p>
+<?php if ($multi_account && count($rc_accounts) > 1): ?>
+<p><?=t(
+    'Each account runs its own session, in its own directory, and they can be connected at the same time. The directories have to stay different: a session is resumed by directory, so two accounts pointed at the same folder would take over each other.',
+    'Cada cuenta ejecuta su propia sesión, en su propio directorio, y pueden estar conectadas a la vez. Los directorios tienen que ser distintos: una sesión se retoma por directorio, así que dos cuentas apuntando a la misma carpeta se robarían la sesión.'
+)?></p>
+<?php endif; ?>
+</div>
 
-<?php if ($rc_archived_notice): ?>
+<?php foreach ($rc_accounts as $rc): ?>
+<div class="claude-box">
+<?php if ($multi_account && count($rc_accounts) > 1): ?>
+<h4><?=htmlspecialchars($rc['label'])?><?php if ($rc['email'] !== ''): ?> <span class="dim-text"><?=htmlspecialchars($rc['email'])?></span><?php endif; ?></h4>
+<?php endif; ?>
+
+<?php if ($rc['archived']): ?>
 <div class="claude-notice">
 <b><?=t('Notice:', 'Aviso:')?></b>
 <?=t('The previous session could no longer be resumed (likely archived) -- a new session was started automatically.', 'La sesión anterior ya no se pudo retomar (probablemente archivada) -- se inició una nueva automáticamente.')?>
-<br><code style="font-size:0.85em;"><?=htmlspecialchars($rc_archived_notice)?></code>
+<br><code style="font-size:0.85em;"><?=htmlspecialchars($rc['archived'])?></code>
 </div>
 <?php endif; ?>
 
 <dl>
 <dt><?=t('Status:', 'Estado:')?></dt>
-<dd><span class="<?=$rc_running ? 'ok' : 'warn'?>"><?=$rc_running ? t('Running', 'Corriendo') : t('Stopped', 'Detenido')?></span></dd>
+<dd><span class="<?=$rc['running'] ? 'ok' : 'warn'?>"><?=$rc['running'] ? t('Running', 'Corriendo') : t('Stopped', 'Detenido')?></span></dd>
 </dl>
-<?php if ($rc_session_url): ?>
+<?php if ($rc['session_url']): ?>
 <dl>
 <dt><?=t('Session:', 'Sesión:')?></dt>
-<dd><a href="<?=htmlspecialchars($rc_session_url)?>" target="_blank"><?=htmlspecialchars($rc_session_url)?></a></dd>
+<dd><a href="<?=htmlspecialchars($rc['session_url'])?>" target="_blank"><?=htmlspecialchars($rc['session_url'])?></a></dd>
 </dl>
 <?php endif; ?>
-<p><?=t('See the Remote Control log in the Logs section below.', 'Consulta el log de Control Remoto en la sección Logs más abajo.')?></p>
+<dl>
+<dt><?=t('Log:', 'Log:')?></dt>
+<dd><a onclick="openTerminal('log','claude-code-rc-<?=htmlspecialchars($rc['slug'])?>','<?=htmlspecialchars($rc['log_name'])?>')" style="cursor:pointer;"><i class="fa fa-book"></i> <u><?=t('View live log', 'Ver log en vivo')?></u></a>
+<?php if (!$rc['log_exists']): ?> <span class="dim-text">(<?=t('empty until this account is started', 'vacío hasta que se inicie esta cuenta')?>)</span><?php endif; ?></dd>
+</dl>
 
 <form method="POST" action="/update.php" target="progressFrame">
 <input type="hidden" name="#file" value="<?=$cfg_file?>">
 <dl>
 <dt><?=t('Directory:', 'Directorio:')?></dt>
-<dd><input type="text" name="REMOTE_CONTROL_DIR" value="<?=htmlspecialchars($rc_dir_cfg)?>" placeholder="<?=htmlspecialchars($rc_dir)?>" class="narrow"></dd>
+<dd><input type="text" name="<?=htmlspecialchars($rc['dir_key'])?>" value="<?=htmlspecialchars($rc['dir_cfg'])?>" placeholder="<?=htmlspecialchars($rc['dir_default'])?>" class="narrow"></dd>
 </dl>
 <blockquote class="inline_help"><?=t(
     'Claude gets filesystem and command access to this directory. Defaults to a dedicated folder rather than /root itself, since Unraid never persists workspace trust for a home directory. If Remote Control is running, Stop and Start it again after changing this.',
-    'Claude tendrá acceso a archivos y comandos en este directorio. Por defecto usa una carpeta dedicada en vez de /root directamente, porque Unraid nunca recuerda la confianza del workspace para un directorio home. Si Remote Control está corriendo, Detenelo e Inicialo de nuevo después de cambiar esto.'
+    'Claude tendrá acceso a archivos y comandos en este directorio. Por defecto usa una carpeta dedicada en vez de /root directamente, porque Unraid nunca recuerda la confianza del workspace para un directorio home. Si Control Remoto está corriendo, Detenlo e Inícialo de nuevo después de cambiar esto.'
 )?></blockquote>
 <input type="submit" value="<?=t('Save Directory', 'Guardar Directorio')?>">
 </form>
 
 <form method="POST" action="/update.php" target="progressFrame">
 <input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh">
-<input type="hidden" name="#arg[0]" value="<?=$rc_running ? 'stop' : 'start'?>">
-<input type="submit" value="<?=$rc_running ? t('Stop', 'Detener') : t('Start', 'Iniciar')?>">
+<input type="hidden" name="#arg[0]" value="<?=$rc['running'] ? 'stop' : 'start'?>">
+<input type="hidden" name="#arg[1]" value="<?=htmlspecialchars($rc['slug'])?>">
+<input type="submit" value="<?=$rc['running'] ? t('Stop', 'Detener') : t('Start', 'Iniciar')?>">
 </form>
 
 <form method="POST" action="/update.php" target="progressFrame">
 <input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh">
 <input type="hidden" name="#arg[0]" value="connect">
+<input type="hidden" name="#arg[1]" value="<?=htmlspecialchars($rc['slug'])?>">
 <dl>
 <dt><?=t('Session ID:', 'ID de sesión:')?></dt>
 <dd>
-<input type="text" name="#arg[1]" list="claude-session-history" value="<?=htmlspecialchars($last_session_id)?>" placeholder="session_..." class="narrow">
+<input type="text" name="#arg[2]" list="claude-session-history" value="<?=htmlspecialchars($rc['last_sid'])?>" placeholder="session_..." class="narrow">
+</dd>
+</dl>
+<blockquote class="inline_help"><?=t(
+    'Stops this account\'s current session (if any) and connects to a specific session id instead of the most recent one -- pick one from the history below, or paste an id from claude.ai/code. If that session can no longer be resumed either, it falls back to a fresh one automatically, same as above.',
+    'Detiene la sesión actual de esta cuenta (si hay alguna) y conecta a un id de sesión concreto en vez de al más reciente -- elige uno del histórico de abajo, o pega un id de claude.ai/code. Si esa sesión tampoco se puede retomar, cae a una sesión nueva automáticamente, igual que arriba.'
+)?></blockquote>
+<input type="submit" value="<?=t('Connect to session ID', 'Conectar a ese ID de sesión')?>">
+</form>
+</div>
+<?php endforeach; ?>
+
 <datalist id="claude-session-history">
 <?php foreach ($rc_history as $rc_sid => $rc_info): ?>
 <option value="<?=htmlspecialchars($rc_sid)?>"><?=htmlspecialchars($rc_info['time'])?> -- <?=htmlspecialchars($rc_info['dir'])?></option>
 <?php endforeach; ?>
 </datalist>
-</dd>
-</dl>
-<blockquote class="inline_help"><?=t(
-    'Stops the current session (if any) and connects to a specific session id instead of the most recent one -- pick one from the history below, or paste an id from claude.ai/code. If that session can no longer be resumed either, it falls back to a fresh one automatically, same as above.',
-    'Detiene la sesión actual (si hay alguna) y conecta a un id de sesión concreto en vez de al más reciente -- elige uno del histórico de abajo, o pega un id de claude.ai/code. Si esa sesión tampoco se puede retomar, cae a una sesión nueva automáticamente, igual que arriba.'
-)?></blockquote>
-<input type="submit" value="<?=t('Connect to session ID', 'Conectar a ese ID de sesión')?>">
-</form>
 
 <?php if (!empty($rc_history)): ?>
-<dl>
-<dt><?=t('Session history:', 'Histórico de sesiones:')?></dt>
-<dd>
+<div class="claude-box">
+<h4><?=t('Session history', 'Histórico de sesiones')?></h4>
 <table class="claude-history">
-<tr><th><?=t('When', 'Cuándo')?></th><th><?=t('Session ID', 'ID de sesión')?></th><th><?=t('Directory', 'Directorio')?></th><th><?=t('State', 'Estado')?></th></tr>
+<tr><th><?=t('When', 'Cuándo')?></th><th><?=t('Session ID', 'ID de sesión')?></th><?php if ($multi_account): ?><th><?=t('Account', 'Cuenta')?></th><?php endif; ?><th><?=t('Directory', 'Directorio')?></th><th><?=t('State', 'Estado')?></th></tr>
 <?php foreach ($rc_history as $rc_sid => $rc_info): ?>
-<tr><td><?=htmlspecialchars($rc_info['time'])?></td><td><code><?=htmlspecialchars($rc_sid)?></code></td><td><?php if ($rc_info['dir_known'] ?? true): ?><?=htmlspecialchars($rc_info['dir'])?><?php else: ?><span class="dim-text" title="<?=t('This directory no longer exists; showing the folder name Claude stored it under.', 'Este directorio ya no existe; se muestra el nombre de carpeta con el que Claude lo guardó.')?>"><?=htmlspecialchars($rc_info['dir'])?></span><?php endif; ?></td><td><?php if ($rc_info['live']): ?><span class="ok"><?=t('Connected', 'Conectada')?></span><?php else: ?><span class="dim-text"><?=t('Past', 'Anterior')?></span><?php endif; ?></td></tr>
+<tr><td><?=htmlspecialchars($rc_info['time'])?></td><td><code><?=htmlspecialchars($rc_sid)?></code></td>
+<?php if ($multi_account): ?><td><?php
+$rc_owner = $rc_info['profile'] ?? '';
+if ($rc_owner === '') {
+    // Sessions found only through Claude's own pointer files carry no account.
+    echo '<span class="dim-text" title="' . t('Started outside this plugin', 'Iniciada fuera de este plugin') . '">&mdash;</span>';
+} else {
+    $rc_name = $rc_owner;
+    foreach ($rc_accounts as $rc_a) { if ($rc_a['slug'] === $rc_owner) { $rc_name = $rc_a['label']; break; } }
+    echo htmlspecialchars($rc_name);
+}
+?></td><?php endif; ?>
+<td><?php if ($rc_info['dir_known'] ?? true): ?><?=htmlspecialchars($rc_info['dir'])?><?php else: ?><span class="dim-text" title="<?=t('This directory no longer exists; showing the folder name Claude stored it under.', 'Este directorio ya no existe; se muestra el nombre de carpeta con el que Claude lo guardó.')?>"><?=htmlspecialchars($rc_info['dir'])?></span><?php endif; ?></td>
+<td><?php if ($rc_info['live']): ?><span class="ok"><?=t('Connected', 'Conectada')?></span><?php else: ?><span class="dim-text"><?=t('Past', 'Anterior')?></span><?php endif; ?></td></tr>
 <?php endforeach; ?>
 </table>
-</dd>
-</dl>
 <blockquote class="inline_help"><?=t(
     'Every session id this NAS knows about, most recent first: the ones this plugin connected to (kept on the flash share, so they survive reboots) plus the current session of every directory Claude has been used in, including sessions you started by hand from a terminal.',
     'Todos los IDs de sesión que conoce este NAS, más reciente primero: los que ha usado este plugin (guardados en el flash drive, así que sobreviven a reinicios) más la sesión actual de cada directorio donde se haya usado Claude, incluidas las que hayas iniciado a mano desde una terminal.'
 )?></blockquote>
-<?php endif; ?>
 </div>
+<?php endif; ?>
 ]]>
 </INLINE>
 </FILE>
@@ -3127,7 +3420,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.08.31.8 has been installed!"
+    echo " Claude Code plugin v2026.09.01.2 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
