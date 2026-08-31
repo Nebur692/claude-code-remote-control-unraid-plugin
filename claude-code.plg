@@ -1,13 +1,13 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.09.01.2"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.09.01.4"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
-###2026.09.01.2
+###2026.09.01.4
 - Several Claude accounts on one server. Turn on "Several accounts" under Claude accounts on the Settings page, add an account, and pick which one this server uses. The account you pick is used by Remote Control and by claude in the terminal.
 - You choose whether the accounts share the agent memory, settings and MCP servers, or whether each account keeps its own. Sharing is the default, so adding a second account does not leave you starting from nothing.
 - Nothing about the login you already have is moved or rewritten: it stays exactly where it is as the main account, extra accounts get their own folder beside it, and removing an account leaves its folder untouched unless you ask for it to be deleted.
@@ -837,7 +837,7 @@ fi
      taken over as "most recent"; see the connect subcommand and the
      Settings page's Session ID field. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh" Mode="0755">
-<SHA256>19c719ac3ecc3b8c707416024f003d0da992c75e2f8b933e0461e3c2b81ca5b3</SHA256>
+<SHA256>dc47fb6bf24e8564390364aa3218a5cb93f3ba4d7d56e9fdbea6322124c5889a</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -898,10 +898,16 @@ all_profiles() {
     fi
 }
 
-# Each account needs its own directory. "claude remote-control --continue"
-# resumes the most recent session *of the current directory*, and Claude keeps
-# one bridge pointer per directory, so two accounts pointed at the same folder
-# would resume each other's session and fight over that pointer.
+# The working directory an account runs in. An account can have its own, and
+# otherwise inherits the one configured for the server: a directory the user
+# set is a directory the user meant, including when every account shares it.
+#
+# Sharing one is allowed and supported. What it costs, in the shared-memory
+# mode, is that "--continue" resumes the most recent session *of a directory*
+# regardless of which account started it: an account may find the other's
+# session there, fail to resume it because it is not theirs, and fall through
+# to a fresh session after the usual retries. Accounts with separate
+# directories never go through that.
 get_rc_dir() {
     local var value
     REMOTE_CONTROL_DIR=""
@@ -912,7 +918,7 @@ get_rc_dir() {
     fi
     var="REMOTE_CONTROL_DIR_$PROFILE"
     value="${!var}"
-    echo "${value:-/root/claude-remote-control-$PROFILE}"
+    echo "${value:-${REMOTE_CONTROL_DIR:-/root/claude-remote-control-$PROFILE}}"
 }
 
 # Upserts KEY="value" into PLUGIN_CFG without touching other keys -- same
@@ -1153,7 +1159,7 @@ esac
 <!-- Claude account profiles: several logins on one server, either sharing
      the agent memory and settings or fully isolated. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/profiles.sh" Mode="0755">
-<SHA256>b3581e8a72c16c502d36ccabf238ddf7f11bc35de640ef419efe096296b4d5c0</SHA256>
+<SHA256>cace0e5630e7ac8c6841b0e483e625792d6e5b406f059aec03abff77bc055ba3</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1398,10 +1404,25 @@ cmd_remove() {
     del_cfg_var "PROFILE_PLAN_$slug"
     dir=$(profile_dir "$slug")
     if [ "$purge" = "purge" ]; then
-        # Only ever inside the profiles directory, and only a path we just
-        # built from a validated slug.
+        # Only ever inside the profiles directory, and only a path just built
+        # from a validated slug.
         case "$dir" in
-            "$PROFILES_DIR"/*) rm -rf "$dir"; echo "Account '$slug' removed and its data deleted." ;;
+            "$PROFILES_DIR"/*)
+                # In isolated mode this directory is the account's entire config
+                # home, and that includes projects/<dir>/memory -- the agent's
+                # persistent memory, plus every session transcript. Removing an
+                # account deletes its credentials and settings and NOTHING else:
+                # memory is never destroyed by a delete on this page. Whoever
+                # touches this next: keep it that way.
+                find "$dir" -mindepth 1 -maxdepth 1 ! -name projects -exec rm -rf {} + 2>/dev/null
+                if [ -d "$dir/projects" ]; then
+                    echo "Account '$slug' removed. Its credentials and settings were deleted."
+                    echo "Its memory and session history were kept, untouched, at $dir/projects."
+                else
+                    rmdir "$dir" 2>/dev/null
+                    echo "Account '$slug' removed and its data deleted."
+                fi
+                ;;
             *) echo "Refusing to delete an unexpected path: $dir"; return 1 ;;
         esac
     else
@@ -1914,7 +1935,7 @@ respond([
 <!-- Shared preamble and styling for the tabs. Every tab requires this once,
      so the state it computes is worked out a single time per request. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/common.php" Mode="0644">
-<SHA256>3b8db1ee49d7f93a310c6fa551d3f273731073dc03b358012bb0a48042c99588</SHA256>
+<SHA256>bb20f00b308cfe8a2fbb3a733c5b547ac1d45966fda73e84ceb888c65f62fcde</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -2064,13 +2085,15 @@ foreach (($profiles ?: [['slug' => 'default', 'label' => t('Main account', 'Cuen
     $slug = $prow['slug'];
     $suffix = $slug === 'default' ? '' : "-$slug";
 
-    // Each account needs its own working directory: "--continue" resumes the
-    // most recent session of a directory and Claude keeps one bridge pointer
-    // per directory, so two accounts sharing a folder would resume each
-    // other's session.
+    // An account can have its own working directory and otherwise inherits the
+    // one configured for the server, so a directory the user set is honoured
+    // for every account rather than quietly replaced by a per-account default.
     $dir_key = $slug === 'default' ? 'REMOTE_CONTROL_DIR' : "REMOTE_CONTROL_DIR_$slug";
     $dir_cfg = $cfg[$dir_key] ?? '';
-    $dir_default = $slug === 'default' ? '/root/claude-remote-control' : "/root/claude-remote-control-$slug";
+    $dir_main = $cfg['REMOTE_CONTROL_DIR'] ?? '';
+    $dir_default = $slug === 'default'
+        ? '/root/claude-remote-control'
+        : ($dir_main !== '' ? $dir_main : "/root/claude-remote-control-$slug");
 
     $pidfile = "/var/run/claude-remote-control$suffix.pid";
     $running = false;
@@ -2572,7 +2595,7 @@ Tabs="true"
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeDashboard.page">
-<SHA256>402a4a94d5ecbe6fb6312293845872263daa3dc809ed37e46f7fe840d26b369f</SHA256>
+<SHA256>939b54949c4820c2124258999defb9c652bbe6917f6801f9d50a94390a27c385</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:1"
@@ -2684,7 +2707,7 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 
   function renderAccount(acct, d) {
     var row = rowFor(acct.slug);
-    var who = '<b>' + esc(L.plan) + '</b> <span class="dim-text">&middot;</span> <b>' + esc(acct.label) + ':</b> ';
+    var who = '<b>' + esc(L.plan) + '</b> <span class="sep">&middot;</span> <span class="ok">' + esc(acct.label) + '</span>: ';
     if (!d || d.state !== 'ok') {
       // An account with no usable token has no windows to report; say so rather
       // than leaving a gap the reader has to interpret.
@@ -2773,11 +2796,11 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
     // no CPU figure to show yet -- only from the second poll onwards.
     var cpu = d.have_delta ? d.cpu_pct.toFixed(1) + '%' : L.measuring;
     bar.innerHTML =
-      '<b>' + esc(L.cpu) + ':</b> ' + esc(cpu) +
-      '<span class="sep">&middot;</span><b>' + esc(L.ram) + ':</b> ' + mem(d.rss_kb) +
-      (d.rss_pct !== null ? ' (' + d.rss_pct + '%)' : '') +
-      '<span class="sep">&middot;</span><b>' + esc(L.procs) + ':</b> ' + d.count +
-      '<span class="sep">&middot;</span>' + d.cores + ' ' + esc(L.cores);
+      '<b>' + esc(L.cpu) + ':</b> <span class="ok">' + esc(cpu) + '</span>' +
+      '<span class="sep">&middot;</span><b>' + esc(L.ram) + ':</b> <span class="ok">' + mem(d.rss_kb) +
+      (d.rss_pct !== null ? ' (' + d.rss_pct + '%)' : '') + '</span>' +
+      '<span class="sep">&middot;</span><b>' + esc(L.procs) + ':</b> <span class="ok">' + d.count + '</span>' +
+      '<span class="sep">&middot;</span><span class="dim-text">' + d.cores + ' ' + esc(L.cores) + '</span>';
 
     var rows = '';
     for (var i = 0; i < d.procs.length; i++) {
@@ -2819,7 +2842,7 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeAccounts.page">
-<SHA256>9d27eb62ad1ff7635bc84f0e93632e4f0eac19abd23e9af32a8e0ead22a9e648</SHA256>
+<SHA256>1f7c736dc438879d66857177c533f23428f92e80f2a3993eaf0c969f0cb01fcf</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:2"
@@ -2931,6 +2954,11 @@ Tag="users"
       'noname'  => t('Type a name for the account first.', 'Escribe antes un nombre para la cuenta.'),
   ])?>;
   var msg = document.getElementById('claude-account-msg');
+  // Unraid rejects every POST to a webGUI PHP file that carries no CSRF token,
+  // and terminates the request with an empty body -- which arrives here looking
+  // exactly like the server being unreachable. It travels as a form field; the
+  // X-CSRF-TOKEN header is equally accepted.
+  var CSRF = <?=json_encode($var['csrf_token'] ?? '')?>;
 
   // Every account action reports here, next to the button that caused it.
   // Posting these to Unraid's progress frame instead put the answer in a
@@ -2940,7 +2968,9 @@ Tag="users"
     msg.textContent = L.working;
     msg.className = '';
     var body = new URLSearchParams(params);
-    fetch('/plugins/claude-code/include/claude-accounts.php', { method: 'POST', cache: 'no-store', body: body })
+    body.set('csrf_token', CSRF);
+    fetch('/plugins/claude-code/include/claude-accounts.php',
+          { method: 'POST', cache: 'no-store', headers: { 'X-CSRF-TOKEN': CSRF }, body: body })
       .then(function (r) { return r.json(); })
       .then(function (d) {
         msg.textContent = d.message || '';
@@ -3015,6 +3045,7 @@ Tag="users"
       'signing'   => t('for', 'para'),
   ])?>;
   var ENDPOINT = '/plugins/claude-code/include/claude-login.php';
+  var CSRF = <?=json_encode($var['csrf_token'] ?? '')?>;
   var slug = null, timer = null;
 
   function el(id) { return document.getElementById(id); }
@@ -3080,8 +3111,9 @@ Tag="users"
     body.set('action', 'code');
     body.set('profile', slug);
     body.set('code', code);
+    body.set('csrf_token', CSRF);
     el('claude-login-code').value = '';
-    fetch(ENDPOINT, { method: 'POST', cache: 'no-store', body: body })
+    fetch(ENDPOINT, { method: 'POST', cache: 'no-store', headers: { 'X-CSRF-TOKEN': CSRF }, body: body })
       .then(function (r) { return r.json(); })
       .then(function () { poll(); })
       .catch(function () { msg(L.network); });
@@ -3093,7 +3125,7 @@ Tag="users"
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeRemote.page">
-<SHA256>2206d52d5018c95a868dbd955e49310140aaeae8765f7834f4ca218655b44aec</SHA256>
+<SHA256>2dc7669153639d55a52e0e3a8f1976d610038936b5c8999fc57851de624929a9</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:3"
@@ -3117,8 +3149,8 @@ Tag="desktop"
 )?></p>
 <?php if ($multi_account && count($rc_accounts) > 1): ?>
 <p><?=t(
-    'Each account runs its own session, in its own directory, and they can be connected at the same time. The directories have to stay different: a session is resumed by directory, so two accounts pointed at the same folder would take over each other.',
-    'Cada cuenta ejecuta su propia sesión, en su propio directorio, y pueden estar conectadas a la vez. Los directorios tienen que ser distintos: una sesión se retoma por directorio, así que dos cuentas apuntando a la misma carpeta se robarían la sesión.'
+    'Each account runs its own session and they can be connected at the same time. An account uses the directory set for it, or the one above if it has none, so pointing every account at the same directory is fine and is respected. The one thing worth knowing: a session is resumed by directory, so accounts sharing one may find each other\'s session there, fail to resume what is not theirs, and start a fresh session instead. Separate directories avoid that entirely.',
+    'Cada cuenta ejecuta su propia sesión y pueden estar conectadas a la vez. Una cuenta usa el directorio que le pongas, o el de arriba si no le pones ninguno, así que apuntar todas las cuentas al mismo directorio es válido y se respeta. Lo único que conviene saber: una sesión se retoma por directorio, así que las cuentas que compartan uno pueden encontrarse la sesión de otra, no poder retomar lo que no es suyo, y arrancar una sesión nueva en su lugar. Con directorios distintos eso no pasa.'
 )?></p>
 <?php endif; ?>
 </div>
@@ -3420,7 +3452,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.09.01.2 has been installed!"
+    echo " Claude Code plugin v2026.09.01.4 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
