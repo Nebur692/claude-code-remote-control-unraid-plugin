@@ -1,12 +1,35 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.07.25.6"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.08.31"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.08.31
+- v2.2.0: The Settings page now shows live CPU and memory usage for Claude Code
+  on this server: the Remote Control bridge, the session worker it starts, and
+  any interactive claude running in a terminal, with a per-process breakdown.
+  It refreshes every few seconds while the page is open and pauses while the
+  browser tab is in the background. CPU is measured between refreshes rather
+  than taken from ps, whose figure is a lifetime average and barely moves for a
+  session that has been connected for weeks.
+- v2.2.0: The session list now covers every session id this NAS knows about,
+  not just the ones this plugin happened to log. It also reads Claude's own
+  per-directory state, so sessions you started by hand from a terminal show up
+  too, and the session you are currently connected to is marked as such.
+- v2.2.0: Fixed the session history never being written for a healthy session.
+  Recording only happened after a connection ended, so a session that stayed
+  connected for weeks was never added to the list at all, and the history table
+  looked empty precisely when there was something worth showing. Session ids
+  are now recorded as soon as they appear, while the session is still running.
+- v2.2.0: Fixed the archived-session fallback never triggering. It looked for
+  "Session failed" with a capital S, but Claude reports this as "Bridge session
+  failed", so the check never matched once. The effect was the exact failure
+  this fallback was added to prevent: when a session could no longer be
+  resumed, Remote Control retried it every 5 seconds forever instead of
+  starting a new one. The check is now case-insensitive.
 ###2026.07.25.6
 - v2.1.3: The "Connect to session ID" field went blank again after every page
   reload, so reconnecting to the same session meant re-typing or re-picking
@@ -318,7 +341,7 @@ fi
 
 <!-- Install/setup script -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh" Mode="0755">
-<SHA256>defa8ffc1222386116ebc54c9ead66fd56a285441f134549c542a7129b550ed3</SHA256>
+<SHA256>aee5ce9870e97eda8cb856ee2440bdee799b1b72fafb6cb55baa059b4ea87600</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -524,9 +547,18 @@ setup_persistence() {
     # Create symlink (ln -sf handles removing existing symlink)
     ln -sf "$APPDATA_PATH/.claude" "$CLAUDE_CONFIG_RUNTIME"
 
-    # Save auto-detected path to config so it's consistent on future boots
+    # Save auto-detected path to config so it's consistent on future boots.
+    # Upsert rather than rewrite: this file also holds REMOTE_CONTROL_DIR and
+    # LAST_SESSION_ID, and truncating it here would silently throw away
+    # settings the user configured on the Settings page.
     if [ "$AUTO_DETECTED" = true ]; then
-        echo "APPDATA_PATH=\"$APPDATA_PATH\"" > "$PLUGIN_CFG"
+        mkdir -p "$(dirname "$PLUGIN_CFG")"
+        touch "$PLUGIN_CFG"
+        if grep -q '^APPDATA_PATH=' "$PLUGIN_CFG" 2>/dev/null; then
+            sed -i "s|^APPDATA_PATH=.*|APPDATA_PATH=\"$APPDATA_PATH\"|" "$PLUGIN_CFG"
+        else
+            echo "APPDATA_PATH=\"$APPDATA_PATH\"" >> "$PLUGIN_CFG"
+        fi
         echo "Saved appdata path to config."
     fi
 
@@ -683,7 +715,7 @@ fi
      taken over as "most recent"; see the connect subcommand and the
      Settings page's Session ID field. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh" Mode="0755">
-<SHA256>0d38a299e676850b43f09343d9ba928b61dae9698d4b26fba3e4b198f51670e6</SHA256>
+<SHA256>285facbdcada3b5d669271d89d98023c932b5f4a761dee7301b7e0f4968ef32d</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -695,6 +727,7 @@ ENABLED_FLAG="/var/run/claude-remote-control.enabled"
 PINFILE="/var/run/claude-remote-control.pin"
 HISTORY_FILE="/boot/config/plugins/claude-code/session-history.log"
 ARCHIVED_FAIL_THRESHOLD=3
+SESSION_POLL_SECONDS=3
 
 get_rc_dir() {
     REMOTE_CONTROL_DIR=""
@@ -717,13 +750,11 @@ save_cfg_var() {
     fi
 }
 
-# Pulls the session id claude printed a "claude.ai/code/session_..." link
-# for out of this attempt's output and appends it to the history file,
-# skipping if it's the same id already at the top (the same session shows
-# up in output repeatedly while its connection status updates in place).
-record_session() {
-    local output="$1" rc_dir="$2" sid
-    sid=$(echo "$output" | grep -oE 'session_[A-Za-z0-9]+' | tail -1)
+# Appends one session id to the history file, skipping if it's already the
+# newest entry (the same id shows up over and over while claude redraws its
+# connection status line in place).
+record_sid() {
+    local sid="$1" rc_dir="$2"
     [ -z "$sid" ] && return
     mkdir -p "$(dirname "$HISTORY_FILE")"
     if [ ! -f "$HISTORY_FILE" ] || ! tail -1 "$HISTORY_FILE" | grep -q " $sid "; then
@@ -731,12 +762,54 @@ record_session() {
     fi
 }
 
+# Watches the log while claude is still running and records the session id as
+# soon as it gets printed, rather than waiting for the process to exit.
+# Without this a healthy long-lived session never reached the history file at
+# all: recording only happened after the command substitution around claude
+# returned, which for a session that stays connected for weeks means never.
+# Reads from $1 (the log size when this attempt started) so it only ever sees
+# this attempt's output, not ids from previous connections.
+#
+# Tied to the lifetime of the process that started it ($3): "Stop" kills the
+# supervisor outright, and without this check the watcher would survive as an
+# orphan, polling forever and stacking up another one on every Start.
+watch_for_sessions() {
+    local offset="$1" rc_dir="$2" parent="$3" sid
+    while kill -0 "$parent" 2>/dev/null; do
+        sleep "$SESSION_POLL_SECONDS"
+        sid=$(tail -c "+$((offset + 1))" "$LOGFILE" 2>/dev/null | grep -oE 'session_[A-Za-z0-9]+' | tail -1)
+        [ -n "$sid" ] && record_sid "$sid" "$rc_dir"
+    done
+}
+
+# Runs one "claude remote-control" attempt with the watcher above attached,
+# echoing claude's combined output so callers can still grep it for the
+# archived/no-session markers. The watcher is detached from stdout so it
+# can't hold the caller's command substitution open after claude exits.
+run_claude() {
+    local rc_dir="$1"; shift
+    local offset watcher output self
+    offset=$(stat -c %s "$LOGFILE" 2>/dev/null || echo 0)
+    # $BASHPID, not $$: run_claude may itself be running inside a subshell, and
+    # the watcher has to follow that subshell, not the top-level script. It has
+    # to be captured into a variable first, too: written inline as an argument
+    # to a backgrounded command, $BASHPID expands inside the new child, so the
+    # watcher would end up watching itself and never notice the parent dying.
+    self=$BASHPID
+    watch_for_sessions "$offset" "$rc_dir" "$self" > /dev/null 2>&1 &
+    watcher=$!
+    output=$(claude remote-control "$@" --remote-control-session-name-prefix "unraid" 2>&1 < /dev/null | tee -a "$LOGFILE")
+    kill "$watcher" 2>/dev/null
+    wait "$watcher" 2>/dev/null
+    # Also record on exit, in case the attempt was shorter than one poll.
+    record_sid "$(echo "$output" | grep -oE 'session_[A-Za-z0-9]+' | tail -1)" "$rc_dir"
+    printf '%s\n' "$output"
+}
+
 run_fresh() {
     local rc_dir="$1"
     echo "=== Starting a fresh session in $rc_dir: $(date) ===" >> "$LOGFILE"
-    local output
-    output=$(claude remote-control --remote-control-session-name-prefix "unraid" 2>&1 < /dev/null | tee -a "$LOGFILE")
-    record_session "$output" "$rc_dir"
+    run_claude "$rc_dir" > /dev/null
 }
 
 do_run() {
@@ -751,20 +824,22 @@ do_run() {
             pinned_id=$(cat "$PINFILE")
             rm -f "$PINFILE"
             echo "=== Connecting to requested session id $pinned_id: $(date) ===" >> "$LOGFILE"
-            output=$(claude remote-control --session-id "$pinned_id" --remote-control-session-name-prefix "unraid" 2>&1 < /dev/null | tee -a "$LOGFILE")
-            record_session "$output" "$rc_dir"
-            if echo "$output" | grep -q "Session failed: Process exited with error"; then
+            output=$(run_claude "$rc_dir" --session-id "$pinned_id")
+            if echo "$output" | grep -qi "session failed: Process exited with error"; then
                 echo "=== ARCHIVED_SESSION_FALLBACK: requested session $pinned_id could not be resumed (likely archived or ended) -- starting a new session instead: $(date) ===" >> "$LOGFILE"
                 run_fresh "$rc_dir"
             fi
             fail_count=0
         else
-            output=$(claude remote-control --continue --remote-control-session-name-prefix "unraid" 2>&1 < /dev/null | tee -a "$LOGFILE")
-            record_session "$output" "$rc_dir"
+            output=$(run_claude "$rc_dir" --continue)
             if echo "$output" | grep -q "No recent session found"; then
                 fail_count=0
                 run_fresh "$rc_dir"
-            elif echo "$output" | grep -q "Session failed: Process exited with error"; then
+            # Matched case-insensitively on purpose: claude emits this as
+            # "Bridge session failed: Process exited with error", so the
+            # capitalised "Session failed" this used to look for never once
+            # matched, and the archived-session fallback never fired at all.
+            elif echo "$output" | grep -qi "session failed: Process exited with error"; then
                 fail_count=$((fail_count + 1))
                 if [ "$fail_count" -ge "$ARCHIVED_FAIL_THRESHOLD" ]; then
                     echo "=== ARCHIVED_SESSION_FALLBACK: previous session in $rc_dir failed to resume $fail_count times in a row (likely archived or ended) -- starting a new session instead: $(date) ===" >> "$LOGFILE"
@@ -846,9 +921,117 @@ esac
 </INLINE>
 </FILE>
 
+<!-- Live CPU/RAM stats endpoint, polled by the Settings page -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-stats.php" Mode="0644">
+<SHA256>00d4769cfa4cf75917950f63c60a230c27db8894161b9f847d79fac20dcc6d2b</SHA256>
+<INLINE>
+<![CDATA[
+<?php
+// Live CPU and RAM usage of the Claude Code processes running on this server,
+// as JSON, for the Settings page to poll.
+//
+// CPU is a real between-polls delta computed from /proc/<pid>/stat, not ps's
+// pcpu: pcpu is an average over the whole process lifetime, so for a session
+// that has been connected for weeks it barely moves and is useless as a live
+// reading. The previous sample is cached in /var/tmp so each request can diff
+// against it. Takes no input at all, so there is no parameter to sanitise.
+
+header('Content-Type: application/json');
+header('Cache-Control: no-store');
+
+$sample_file = '/var/tmp/claude-code-stats-sample.json';
+$clk = (int)(trim(shell_exec('getconf CLK_TCK')) ?: 100);
+if ($clk <= 0) $clk = 100;
+$page_kb = (int)(trim(shell_exec('getconf PAGESIZE')) ?: 4096) / 1024;
+
+// Every live process whose executable really is "claude" -- the remote-control
+// bridge, the worker it spawns, and any interactive CLI in a terminal. Matching
+// on the binary name rather than the whole command line keeps unrelated
+// commands that merely mention claude (greps, this plugin's own scripts) out.
+$procs = [];
+foreach (glob('/proc/[0-9]*') as $dir) {
+    $pid = basename($dir);
+    $cmdline = @file_get_contents("$dir/cmdline");
+    if ($cmdline === false || $cmdline === '') continue;
+    $args = explode("\0", trim($cmdline, "\0"));
+    if (basename($args[0] ?? '') !== 'claude') continue;
+    $stat = @file_get_contents("$dir/stat");
+    if ($stat === false) continue;
+    // comm (field 2) can contain spaces and parens, so parse after the last ')'
+    $pos = strrpos($stat, ')');
+    if ($pos === false) continue;
+    $f = explode(' ', substr($stat, $pos + 2));
+    // $f[0] is field 3 (state), so field N lives at index N-3
+    $procs[$pid] = [
+        'ticks'  => (float)($f[11] ?? 0) + (float)($f[12] ?? 0), // utime + stime
+        'rss_kb' => (float)($f[21] ?? 0) * $page_kb,
+        'cmd'    => implode(' ', $args),
+    ];
+}
+
+$now = microtime(true);
+$prev = @json_decode(@file_get_contents($sample_file), true);
+$have_delta = false;
+$cpu_total = 0.0;
+
+if (is_array($prev) && isset($prev['t'], $prev['procs'])) {
+    $dt = $now - (float)$prev['t'];
+    // Ignore a stale sample: a tab left open for hours would otherwise average
+    // the CPU over that whole gap instead of reporting current usage.
+    if ($dt > 0.05 && $dt < 120) {
+        $have_delta = true;
+        foreach ($procs as $pid => $info) {
+            if (!isset($prev['procs'][$pid])) continue;
+            $d = $info['ticks'] - (float)$prev['procs'][$pid];
+            if ($d <= 0) continue; // pid reuse, or no CPU burned since last poll
+            $pct = ($d / $clk) / $dt * 100.0;
+            $procs[$pid]['cpu_pct'] = round($pct, 1);
+            $cpu_total += $pct;
+        }
+    }
+}
+
+$sample = ['t' => $now, 'procs' => []];
+foreach ($procs as $pid => $info) $sample['procs'][$pid] = $info['ticks'];
+@file_put_contents($sample_file, json_encode($sample));
+
+$mem_total_kb = 0;
+foreach (@file('/proc/meminfo') ?: [] as $line) {
+    if (preg_match('/^MemTotal:\s+(\d+)/', $line, $m)) { $mem_total_kb = (int)$m[1]; break; }
+}
+$cores = (int)(trim(shell_exec('nproc')) ?: 1);
+
+$rss_kb = 0.0;
+$list = [];
+foreach ($procs as $pid => $info) {
+    $rss_kb += $info['rss_kb'];
+    $list[] = [
+        'pid'     => (int)$pid,
+        'cpu_pct' => $info['cpu_pct'] ?? null,
+        'rss_kb'  => (int)$info['rss_kb'],
+        'cmd'     => $info['cmd'],
+    ];
+}
+usort($list, function($a, $b) { return ($b['cpu_pct'] ?? -1) <=> ($a['cpu_pct'] ?? -1); });
+
+echo json_encode([
+    'count'      => count($procs),
+    'have_delta' => $have_delta,
+    'cpu_pct'    => round($cpu_total, 1),
+    'cores'      => $cores,
+    'rss_kb'     => (int)$rss_kb,
+    // RSS is summed across processes, so shared pages are counted more than
+    // once -- a slight overestimate, not an exact resident-set total.
+    'rss_pct'    => $mem_total_kb > 0 ? round($rss_kb / $mem_total_kb * 100, 1) : null,
+    'procs'      => $list,
+]);
+]]>
+</INLINE>
+</FILE>
+
 <!-- Web UI -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/claude-code.page">
-<SHA256>e6dfdbad58b1f5b212d30247d3ce2f78c044431b299ff41a17642b29a88a3788</SHA256>
+<SHA256>0bab75aefb5fca86e1b3f986b927388a5a3604abe956a404046e123612b2798a</SHA256>
 <INLINE>
 <![CDATA[
 Menu="Utilities"
@@ -922,22 +1105,90 @@ if ($rc_log_exists) {
     }
 }
 
-// Session ID history (persisted on the flash share so it survives reboots),
-// written by remote-control.sh's record_session() every time it connects.
-// Format per line: "<ISO8601 timestamp> <session_id> <directory>".
+// Claude names each project folder after its directory with "/" replaced by
+// "-", which is ambiguous: a literal "-" inside a folder name encodes exactly
+// the same way. Resolve it by testing candidate splits against the real
+// filesystem, falling back to the raw key when nothing matches (the directory
+// may simply not exist any more).
+function claude_decode_project_dir($key) {
+    $tokens = explode('-', $key);
+    array_shift($tokens); // leading "" produced by the root slash
+    if (!$tokens) return '/';
+    $walk = function($prefix, $i) use (&$walk, $tokens) {
+        if ($i >= count($tokens)) return $prefix;
+        $seg = '';
+        for ($j = $i; $j < count($tokens); $j++) {
+            $seg = ($seg === '') ? $tokens[$j] : $seg . '-' . $tokens[$j];
+            $cand = ($prefix === '/' ? '/' : "$prefix/") . $seg;
+            if (!is_dir($cand)) continue;
+            $found = $walk($cand, $j + 1);
+            if ($found !== null) return $found;
+        }
+        return null;
+    };
+    $resolved = $walk('/', 0);
+    return $resolved !== null ? $resolved : $key;
+}
+
+// Session IDs listed in the panel are merged from two sources:
+//
+//  1. session-history.log on the flash share, appended by remote-control.sh
+//     every time it connects. Format: "<ISO8601 timestamp> <session_id> <dir>".
+//  2. Claude's own bridge-pointer.json, one per project directory. This is
+//     authoritative for the current session of each directory and also covers
+//     sessions started by hand outside this plugin, which never touched the
+//     plugin's own log and so would otherwise be invisible here.
 $rc_history_file = '/boot/config/plugins/claude-code/session-history.log';
 $rc_history = [];
+
 if (file_exists($rc_history_file)) {
-    $rc_lines = array_filter(array_map('trim', file($rc_history_file)));
-    foreach (array_reverse($rc_lines) as $rc_line) {
+    foreach (array_filter(array_map('trim', file($rc_history_file))) as $rc_line) {
         if (preg_match('/^(\S+)\s+(session_\S+)\s+(.*)$/', $rc_line, $rc_m)) {
-            $rc_sid = $rc_m[2];
-            if (!isset($rc_history[$rc_sid])) {
-                $rc_history[$rc_sid] = ['time' => $rc_m[1], 'dir' => $rc_m[3]];
-            }
+            // Later lines are newer, so a repeated id keeps its latest entry.
+            $rc_history[$rc_m[2]] = [
+                'time'      => $rc_m[1],
+                'ts'        => strtotime($rc_m[1]) ?: 0,
+                'dir'       => $rc_m[3],
+                'dir_known' => true, // logged verbatim, no decoding needed
+                'live'      => false,
+            ];
         }
     }
 }
+
+foreach (glob("$appdata_path/.claude/projects/*/bridge-pointer.json") ?: [] as $bp_file) {
+    $bp = @json_decode(@file_get_contents($bp_file), true);
+    if (!is_array($bp) || empty($bp['sessionId'])) continue;
+    $bp_sid = $bp['sessionId'];
+    $bp_ts = @filemtime($bp_file) ?: 0;
+    // The pid recorded here only still belongs to this session if it is alive
+    // *and* is actually a claude process; pids get reused, especially across
+    // a reboot, so an existing /proc entry alone proves nothing.
+    $bp_pid = isset($bp['pid']) ? (int)$bp['pid'] : 0;
+    $bp_live = false;
+    if ($bp_pid > 0 && is_dir("/proc/$bp_pid")) {
+        $bp_cmd = @file_get_contents("/proc/$bp_pid/cmdline");
+        $bp_live = $bp_cmd !== false && strpos($bp_cmd, 'claude') !== false;
+    }
+    $bp_key = basename(dirname($bp_file));
+    $bp_dir = claude_decode_project_dir($bp_key);
+    if (!isset($rc_history[$bp_sid]) || $bp_ts >= $rc_history[$bp_sid]['ts']) {
+        $rc_history[$bp_sid] = [
+            'time'      => date('c', $bp_ts),
+            'ts'        => $bp_ts,
+            'dir'       => $bp_dir,
+            // Unresolved means the directory no longer exists, so all that is
+            // left is Claude's encoded folder name. Shown dimmed rather than
+            // as if it were a real path.
+            'dir_known' => $bp_dir !== $bp_key,
+            'live'      => $bp_live,
+        ];
+    } elseif ($bp_live) {
+        $rc_history[$bp_sid]['live'] = true;
+    }
+}
+
+uasort($rc_history, function($a, $b) { return $b['ts'] <=> $a['ts']; });
 ?>
 
 <style>
@@ -964,6 +1215,11 @@ if (file_exists($rc_history_file)) {
   margin-top: 8px;
   margin-bottom: 4px;
 }
+/* Same state colours as the top status bar, for the boxes further down. */
+.claude-box .ok { color: #4caf50; }
+.claude-box .warn { color: #ff9800; }
+.claude-box .error { color: #f44336; }
+.claude-box .sep { opacity: 0.4; margin: 0 8px; }
 .claude-code-block {
   background: #1e1e1e;
   color: #d4d4d4;
@@ -1103,18 +1359,106 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 <dt><?=t('Session history:', 'Histórico de sesiones:')?></dt>
 <dd>
 <table class="claude-history">
-<tr><th><?=t('When', 'Cuándo')?></th><th><?=t('Session ID', 'ID de sesión')?></th><th><?=t('Directory', 'Directorio')?></th></tr>
+<tr><th><?=t('When', 'Cuándo')?></th><th><?=t('Session ID', 'ID de sesión')?></th><th><?=t('Directory', 'Directorio')?></th><th><?=t('State', 'Estado')?></th></tr>
 <?php foreach ($rc_history as $rc_sid => $rc_info): ?>
-<tr><td><?=htmlspecialchars($rc_info['time'])?></td><td><code><?=htmlspecialchars($rc_sid)?></code></td><td><?=htmlspecialchars($rc_info['dir'])?></td></tr>
+<tr><td><?=htmlspecialchars($rc_info['time'])?></td><td><code><?=htmlspecialchars($rc_sid)?></code></td><td><?php if ($rc_info['dir_known'] ?? true): ?><?=htmlspecialchars($rc_info['dir'])?><?php else: ?><span class="dim-text" title="<?=t('This directory no longer exists; showing the folder name Claude stored it under.', 'Este directorio ya no existe; se muestra el nombre de carpeta con el que Claude lo guardó.')?>"><?=htmlspecialchars($rc_info['dir'])?></span><?php endif; ?></td><td><?php if ($rc_info['live']): ?><span class="ok"><?=t('Connected', 'Conectada')?></span><?php else: ?><span class="dim-text"><?=t('Past', 'Anterior')?></span><?php endif; ?></td></tr>
 <?php endforeach; ?>
 </table>
 </dd>
 </dl>
 <blockquote class="inline_help"><?=t(
-    'Every session this NAS has connected to, most recent first. Kept on the flash share so it survives reboots.',
-    'Todas las sesiones a las que se ha conectado este NAS, más reciente primero. Se guarda en el flash drive, así que sobrevive a reinicios.'
+    'Every session id this NAS knows about, most recent first: the ones this plugin connected to (kept on the flash share, so they survive reboots) plus the current session of every directory Claude has been used in, including sessions you started by hand from a terminal.',
+    'Todos los IDs de sesión que conoce este NAS, más reciente primero: los que ha usado este plugin (guardados en el flash drive, así que sobreviven a reinicios) más la sesión actual de cada directorio donde se haya usado Claude, incluidas las que hayas iniciado a mano desde una terminal.'
 )?></blockquote>
 <?php endif; ?>
+</div>
+
+<div class="claude-box">
+<h4><?=t('Resource usage', 'Consumo de recursos')?></h4>
+<p><?=t(
+    'Live CPU and memory used by Claude Code on this server: the Remote Control bridge, the session worker it starts, and any interactive claude you are running in a terminal. Refreshes every few seconds while this page is open.',
+    'CPU y memoria que consume Claude Code en este servidor en tiempo real: el puente de Control Remoto, el proceso de sesión que lanza, y cualquier claude interactivo que tengas abierto en una terminal. Se actualiza cada pocos segundos mientras esta página esté abierta.'
+)?></p>
+
+<div class="claude-status" id="claude-stats-bar"><?=t('Measuring...', 'Midiendo...')?></div>
+
+<table class="claude-history" id="claude-stats-table" style="display:none;">
+<thead><tr><th>PID</th><th>CPU</th><th>RAM</th><th><?=t('Process', 'Proceso')?></th></tr></thead>
+<tbody></tbody>
+</table>
+
+<blockquote class="inline_help"><?=t(
+    'CPU is measured between refreshes and expressed as a percentage of a single core, so it can go above 100% on this multi-core server. Memory is the resident set added up across processes, which counts shared pages more than once and so reads slightly high.',
+    'La CPU se mide entre actualizaciones y se expresa como porcentaje de un solo núcleo, así que puede pasar del 100% en este servidor multinúcleo. La memoria es la suma del resident set de cada proceso, que cuenta más de una vez las páginas compartidas, así que queda algo por encima de la real.'
+)?></blockquote>
+
+<script>
+(function () {
+  var L = <?=json_encode([
+      'idle'      => t('Claude Code is not running', 'Claude Code no está corriendo'),
+      'measuring' => t('measuring...', 'midiendo...'),
+      'error'     => t('Could not read resource usage', 'No se pudo leer el consumo de recursos'),
+      'cpu'       => t('CPU', 'CPU'),
+      'ram'       => t('RAM', 'RAM'),
+      'procs'     => t('Processes', 'Procesos'),
+      'cores'     => t('cores', 'núcleos'),
+  ])?>;
+  var bar = document.getElementById('claude-stats-bar');
+  var table = document.getElementById('claude-stats-table');
+  var tbody = table.getElementsByTagName('tbody')[0];
+
+  function mem(kb) {
+    if (kb >= 1048576) return (kb / 1048576).toFixed(2) + ' GB';
+    if (kb >= 1024) return (kb / 1024).toFixed(0) + ' MB';
+    return kb + ' KB';
+  }
+  // Command lines come straight from /proc, so escape before injecting them.
+  function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+  function render(d) {
+    if (!d.count) {
+      bar.innerHTML = '<span class="warn">' + esc(L.idle) + '</span>';
+      table.style.display = 'none';
+      return;
+    }
+    // The very first poll has no earlier sample to diff against, so there is
+    // no CPU figure to show yet -- only from the second poll onwards.
+    var cpu = d.have_delta ? d.cpu_pct.toFixed(1) + '%' : L.measuring;
+    bar.innerHTML =
+      '<b>' + esc(L.cpu) + ':</b> ' + esc(cpu) +
+      '<span class="sep">&middot;</span><b>' + esc(L.ram) + ':</b> ' + mem(d.rss_kb) +
+      (d.rss_pct !== null ? ' (' + d.rss_pct + '%)' : '') +
+      '<span class="sep">&middot;</span><b>' + esc(L.procs) + ':</b> ' + d.count +
+      '<span class="sep">&middot;</span>' + d.cores + ' ' + esc(L.cores);
+
+    var rows = '';
+    for (var i = 0; i < d.procs.length; i++) {
+      var p = d.procs[i];
+      var c = (p.cpu_pct === null || p.cpu_pct === undefined) ? '-' : p.cpu_pct.toFixed(1) + '%';
+      var cmd = p.cmd.length > 90 ? p.cmd.slice(0, 90) + '...' : p.cmd;
+      rows += '<tr><td>' + p.pid + '</td><td>' + c + '</td><td>' + mem(p.rss_kb) +
+              '</td><td><code>' + esc(cmd) + '</code></td></tr>';
+    }
+    tbody.innerHTML = rows;
+    table.style.display = '';
+  }
+
+  var timer = null;
+  function poll() {
+    fetch('/plugins/claude-code/include/claude-stats.php', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(render)
+      .catch(function () { bar.innerHTML = '<span class="warn">' + esc(L.error) + '</span>'; });
+  }
+  function start() { if (!timer) { poll(); timer = setInterval(poll, 3000); } }
+  function stop() { if (timer) { clearInterval(timer); timer = null; } }
+  start();
+  // Don't keep polling every 3s forever in a background tab nobody is looking at.
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) stop(); else start();
+  });
+})();
+</script>
 </div>
 
 <div class="claude-box">
@@ -1284,7 +1628,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.07.25.6 has been installed!"
+    echo " Claude Code plugin v2026.08.31 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
@@ -1319,6 +1663,7 @@ rm -f /root/.claude 2>/dev/null || true
 # Remove plugin runtime files
 rm -rf /usr/local/emhttp/plugins/claude-code
 rm -f /usr/local/bin/claude
+rm -f /var/tmp/claude-code-stats-sample.json
 
 # Note: We keep config and appdata for potential reinstall
 echo ""
