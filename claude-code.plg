@@ -1,12 +1,32 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.08.31.2"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.08.31.5"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.08.31.5
+- v2.3.0: New "Plan usage" line under the status bar showing how much of your
+  Claude.ai plan you have used: the 5-hour window, the weekly window, and the
+  reset countdown for each. Plans that report per-model weekly limits get a
+  row per model, and accounts with extra usage enabled also get their credit
+  balance and spend. Reading this costs nothing: it queries the same metadata
+  endpoint the CLI uses for /usage, which runs no inference and is not billed.
+  The line hides itself on a server logged in with an API key, which has no
+  plan windows to report.
+- v2.3.0: The status bar now names the logged-in account and its plan, e.g.
+  "Account: you@example.com (Pro)", instead of only saying authentication was
+  configured. Read from Claude Code's local profile cache, so it costs nothing
+  and needs no network.
+- v2.3.0: Fixed warning and error values in the status bars rendering as a
+  full-width coloured band on their own line instead of as coloured text.
+  Unraid styles those spans as block-level alerts, and the plugin only
+  overrode their colour. This was visible on any server where a value was not
+  green - Claude Code not installed, not authenticated, or Remote Control not
+  running - and had gone unnoticed because a healthy server shows none of them.
+
 ###2026.08.31.2
 - v2.2.1: The live CPU/memory figures moved up into the status bar at the top
   of the page, next to the rest of the state, so the headline numbers are
@@ -1085,9 +1105,204 @@ echo json_encode([
 </INLINE>
 </FILE>
 
+<FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-usage.php" Mode="0644">
+<SHA256>49d46ba132349bc87e2b1a09bc877063c2bc49cd7ddff0e69ae532c2986b311d</SHA256>
+<INLINE>
+<![CDATA[
+<?php
+// Claude.ai plan usage (5-hour window, weekly window, per-model weekly windows,
+// and paid credit balance) as JSON, for the Settings page to poll.
+//
+// Source is https://api.anthropic.com/api/oauth/usage -- the same endpoint the
+// CLI calls to render /usage. It is a metadata endpoint: it runs no inference,
+// so polling it costs no tokens and is never billed.
+//
+// Two things this deliberately does NOT do:
+//   1. It never writes .credentials.json. The access token expires every few
+//      hours and the CLI refreshes it on its own; refreshing from here would
+//      rotate the refresh token and could lock the user out of an otherwise
+//      working login. On 401 we report "expired" and let the CLI fix it.
+//   2. It never puts the token in a command line. Using PHP's curl keeps it in
+//      this process's memory, where "ps" cannot read it.
+//
+// The endpoint is undocumented and may change without notice, so every field is
+// read defensively and any failure degrades to a state string the page can
+// quietly ignore. Takes no input, so there is no parameter to sanitise.
+
+header('Content-Type: application/json');
+header('Cache-Control: no-store');
+
+$cache_file = '/var/tmp/claude-code-usage-cache.json';
+$cache_ttl  = 60;   // successful lookups
+$fail_ttl   = 30;   // failures, so a broken token doesn't hammer the API
+
+function respond($payload, $cache_file, $ttl) {
+    $payload['fetched_at'] = time();
+    $json = json_encode($payload);
+    // Write via a temp file in the same directory so a concurrent poll never
+    // reads a half-written cache.
+    $tmp = $cache_file . '.' . getmypid();
+    if (@file_put_contents($tmp, $json) !== false) {
+        @chmod($tmp, 0600);
+        @rename($tmp, $cache_file);
+    } else {
+        @unlink($tmp);
+    }
+    echo $json;
+    exit;
+}
+
+// Serve from cache while it is fresh.
+if (is_readable($cache_file)) {
+    $cached = json_decode((string)@file_get_contents($cache_file), true);
+    if (is_array($cached) && isset($cached['fetched_at'])) {
+        $age = time() - (int)$cached['fetched_at'];
+        $ttl = (($cached['state'] ?? '') === 'ok') ? $cache_ttl : $fail_ttl;
+        if ($age >= 0 && $age < $ttl) {
+            $cached['age'] = $age;
+            echo json_encode($cached);
+            exit;
+        }
+    }
+}
+
+// Locate the credentials. /root/.claude is normally a symlink into appdata, but
+// read the configured path too in case the symlink has not been set up yet.
+$cred_paths = ['/root/.claude/.credentials.json'];
+$cfg_file = '/boot/config/plugins/claude-code/claude-code.cfg';
+if (is_readable($cfg_file)) {
+    $cfg = @parse_ini_file($cfg_file);
+    if (!empty($cfg['APPDATA_PATH'])) {
+        $cred_paths[] = rtrim($cfg['APPDATA_PATH'], '/') . '/.claude/.credentials.json';
+    }
+}
+
+$token = null;
+$expires_at = null;
+foreach ($cred_paths as $path) {
+    if (!is_readable($path)) continue;
+    $creds = json_decode((string)@file_get_contents($path), true);
+    $oauth = $creds['claudeAiOauth'] ?? null;
+    if (is_array($oauth) && !empty($oauth['accessToken'])) {
+        $token = $oauth['accessToken'];
+        // expiresAt is milliseconds since the epoch.
+        $expires_at = isset($oauth['expiresAt']) ? (int)($oauth['expiresAt'] / 1000) : null;
+        break;
+    }
+}
+
+if ($token === null) {
+    // Either not logged in, or logged in with an API key rather than a Claude
+    // subscription -- neither has plan windows to report.
+    respond(['state' => 'no-auth'], $cache_file, $fail_ttl);
+}
+
+if ($expires_at !== null && $expires_at <= time()) {
+    // Don't spend a request we know will 401.
+    respond(['state' => 'expired'], $cache_file, $fail_ttl);
+}
+
+$ch = curl_init('https://api.anthropic.com/api/oauth/usage');
+curl_setopt_array($ch, [
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_TIMEOUT        => 8,
+    CURLOPT_CONNECTTIMEOUT => 5,
+    CURLOPT_HTTPHEADER     => [
+        'Authorization: Bearer ' . $token,
+        'Content-Type: application/json',
+        'anthropic-beta: oauth-2025-04-20',
+    ],
+]);
+$body = curl_exec($ch);
+$http = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+curl_close($ch);
+unset($token);
+
+if ($http === 401 || $http === 403) {
+    respond(['state' => 'expired'], $cache_file, $fail_ttl);
+}
+if ($http !== 200 || !is_string($body)) {
+    respond(['state' => 'error', 'http' => $http], $cache_file, $fail_ttl);
+}
+
+$data = json_decode($body, true);
+if (!is_array($data)) {
+    respond(['state' => 'error', 'http' => $http], $cache_file, $fail_ttl);
+}
+
+// Turn an ISO-8601 reset timestamp into epoch seconds; null stays null.
+function reset_epoch($value) {
+    if (!is_string($value) || $value === '') return null;
+    $ts = strtotime($value);
+    return $ts === false ? null : $ts;
+}
+
+$windows = [];
+
+// The two windows every subscription has. Show them even at 0%, so the page
+// always states where you stand rather than going blank on a quiet day.
+foreach (['five_hour', 'seven_day'] as $key) {
+    $w = $data[$key] ?? null;
+    if (!is_array($w) || !isset($w['utilization']) || !is_numeric($w['utilization'])) continue;
+    $windows[] = [
+        'key'       => $key,
+        'label'     => null,
+        'percent'   => (float)$w['utilization'],
+        'resets_at' => reset_epoch($w['resets_at'] ?? null),
+    ];
+}
+
+// Per-model weekly windows. Read them from the normalised "limits" array rather
+// than the seven_day_<model> keys: that array carries the model's display name,
+// so a plan that gains a new per-model bucket shows up here with no code change.
+// On plans without per-model limits this loop simply adds nothing.
+foreach (($data['limits'] ?? []) as $limit) {
+    if (!is_array($limit)) continue;
+    if (($limit['kind'] ?? '') !== 'weekly_scoped') continue;
+    $name = $limit['scope']['model']['display_name'] ?? null;
+    if (!is_string($name) || $name === '') continue;
+    if (!isset($limit['percent']) || !is_numeric($limit['percent'])) continue;
+    $windows[] = [
+        'key'       => 'model',
+        'label'     => $name,
+        'percent'   => (float)$limit['percent'],
+        'resets_at' => reset_epoch($limit['resets_at'] ?? null),
+    ];
+}
+
+// Credit balance and spend, reported only when the account actually has extra
+// usage turned on. An account that has never enabled it returns zeros and nulls
+// here, and showing "0.00 $ spent" would just be noise.
+$spend = null;
+$s = $data['spend'] ?? null;
+$extra = $data['extra_usage'] ?? null;
+$extra_on = is_array($extra) && ($extra['is_enabled'] ?? false) === true;
+if (is_array($s) && (($s['enabled'] ?? false) === true || $extra_on)) {
+    $exponent = (int)($s['used']['exponent'] ?? 2);
+    $to_units = function ($minor) use ($exponent) {
+        return is_numeric($minor) ? ((float)$minor) / pow(10, $exponent) : null;
+    };
+    $spend = [
+        'used'     => $to_units($s['used']['amount_minor'] ?? null),
+        'limit'    => $to_units($s['limit']['amount_minor'] ?? null),
+        'balance'  => $to_units($s['balance']['amount_minor'] ?? null),
+        'currency' => $s['used']['currency'] ?? 'USD',
+        'percent'  => isset($s['percent']) && is_numeric($s['percent']) ? (float)$s['percent'] : null,
+    ];
+}
+
+respond([
+    'state'   => 'ok',
+    'windows' => $windows,
+    'spend'   => $spend,
+], $cache_file, $cache_ttl);
+]]>
+</INLINE>
+</FILE>
+
 <!-- Web UI -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/claude-code.page">
-<SHA256>954b180fb68bf5a165f9b7b7feac1fd3cd251e2c86b22b027cc230fad91124b8</SHA256>
+<SHA256>67efad846464f17d4b4fbea076075f353e951e1e2b3e6f73742654d7d65b2f91</SHA256>
 <INLINE>
 <![CDATA[
 Menu="Utilities"
@@ -1118,6 +1333,28 @@ if (empty($appdata_path)) {
 }
 $auth_dir = "$appdata_path/.claude";
 $has_auth = is_dir($auth_dir);
+
+// Which account is logged in. Claude Code caches the profile in .claude.json,
+// so this is a plain local read: no API call, nothing that can expire, and it
+// still works while the array is spun down. A server authenticated with an API
+// key instead of a Claude.ai login has no oauthAccount, and the bar falls back
+// to just saying the auth is configured.
+$account_email = '';
+$account_plan  = '';
+$claude_json = "$appdata_path/.claude.json";
+if (is_readable($claude_json)) {
+    $acct = json_decode((string)@file_get_contents($claude_json), true)['oauthAccount'] ?? null;
+    if (is_array($acct)) {
+        if (!empty($acct['emailAddress'])) {
+            $account_email = (string)$acct['emailAddress'];
+        }
+        // organizationType reads "claude_pro", "claude_max" and so on; show the
+        // tier on its own rather than the raw identifier.
+        if (!empty($acct['organizationType'])) {
+            $account_plan = ucwords(str_replace('_', ' ', preg_replace('/^claude_/', '', (string)$acct['organizationType'])));
+        }
+    }
+}
 
 // Check if array is started (check for actual mount, not just directory)
 $array_started = trim(shell_exec("mountpoint -q /mnt/user 2>/dev/null && echo yes || echo no")) === "yes";
@@ -1258,6 +1495,21 @@ uasort($rc_history, function($a, $b) { return $b['ts'] <=> $a['ts']; });
 }
 .claude-status b { margin-right: 3px; }
 .claude-status .sep { opacity: 0.4; margin: 0 8px; }
+/* Unraid's default-base.css styles span.warn and span.error as full-width
+   BLOCK alerts with a coloured background, not as inline text colours. Inside
+   these one-line bars that wrecks the layout: the value jumps onto its own
+   line as a pink band spanning the whole box. The colour rules below are more
+   specific so they won the `color` fight, which is why this looked fine until
+   a span actually took one of those classes -- on a healthy server every
+   value is `ok`, so the breakage stayed hidden. Neutralise the rest of the
+   global rule, not just the colour. */
+.claude-status .ok, .claude-status .warn, .claude-status .error,
+.claude-box .ok, .claude-box .warn, .claude-box .error {
+  display: inline;
+  width: auto;
+  background: none;
+  background-color: transparent;
+}
 .claude-status .ok { color: #4caf50; }
 .claude-status .warn { color: #ff9800; }
 .claude-status .error { color: #f44336; }
@@ -1316,7 +1568,15 @@ Claude Code: <span class="<?=$claude_installed ? 'ok' : 'error'?>"><?=$claude_in
 <span class="sep">&middot;</span>
 <?=t('Array', 'Array')?>: <span class="<?=$array_started ? 'ok' : 'error'?>"><?=$array_started ? t('Started', 'Iniciado') : t('Not started', 'No iniciado')?></span>
 <span class="sep">&middot;</span>
-<?=t('Auth', 'Auth')?>: <span class="<?=$has_auth ? 'ok' : 'warn'?>"><?=$has_auth ? t('Configured', 'Configurada') : t('Not authenticated', 'Sin autenticar')?></span>
+<?=t('Account', 'Cuenta')?>: <span class="<?=$has_auth ? 'ok' : 'warn'?>"><?php
+if (!$has_auth) {
+    echo t('Not authenticated', 'Sin autenticar');
+} elseif ($account_email !== '') {
+    echo htmlspecialchars($account_email) . ($account_plan !== '' ? ' (' . htmlspecialchars($account_plan) . ')' : '');
+} else {
+    echo t('Configured', 'Configurada');
+}
+?></span>
 <span class="sep">&middot;</span>
 Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : t('Not configured', 'No configurado')?></span>
 <span class="sep">&middot;</span>
@@ -1325,6 +1585,100 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
      the per-process breakdown stays in that box. -->
 <span id="claude-stats-bar"><span class="dim-text"><?=t('measuring...', 'midiendo...')?></span></span>
 </div>
+
+<!-- Claude.ai plan usage, on its own line under the status bar: the 5-hour and
+     weekly windows, plus any per-model weekly window and credit balance the
+     plan reports. Hidden entirely unless the lookup succeeds, so a box logged
+     in with an API key -- which has no plan windows -- shows nothing rather
+     than an error nobody can act on. -->
+<div class="claude-status" id="claude-usage-bar" style="display:none;">
+<b><?=t('Plan usage:', 'Uso del plan:')?></b>
+<span id="claude-usage-body"></span>
+</div>
+
+<script>
+(function () {
+  var L = <?=json_encode([
+      'five_hour' => t('5h limit', 'Límite 5 h'),
+      'seven_day' => t('Weekly', 'Semanal'),
+      'resets'    => t('resets in', 'reset en'),
+      'balance'   => t('Credit', 'Saldo'),
+      'spent'     => t('Spent', 'Gastado'),
+      'expired'   => t('usage data expired - refreshes next time Claude runs',
+                       'datos caducados - se actualizan la próxima vez que se use Claude'),
+      'day'       => t('d', 'd'),
+      'hour'      => t('h', 'h'),
+      'min'       => t('min', 'min'),
+  ])?>;
+  var wrap = document.getElementById('claude-usage-bar');
+  var body = document.getElementById('claude-usage-body');
+
+  // Model display names come from the API, so escape before injecting them.
+  function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+  // Same thresholds the status bar above uses for its own state colours.
+  function cls(pct) { return pct >= 90 ? 'error' : (pct >= 75 ? 'warn' : 'ok'); }
+
+  // "resets in 2 d 17 h" reads better than a timestamp you have to subtract
+  // from now. Windows with no reset time (an untouched 5-hour window has none)
+  // return '' and the caller leaves the parenthetical off.
+  function until(ts) {
+    if (!ts) return '';
+    var s = ts - Math.floor(Date.now() / 1000);
+    if (s <= 0) return '';
+    var d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+    if (d > 0) return d + ' ' + L.day + ' ' + h + ' ' + L.hour;
+    if (h > 0) return h + ' ' + L.hour + ' ' + m + ' ' + L.min;
+    return m + ' ' + L.min;
+  }
+
+  function money(v, cur) { return v.toFixed(2) + ' ' + esc(cur || 'USD'); }
+
+  function render(d) {
+    if (!d || d.state === 'no-auth' || d.state === 'error') { wrap.style.display = 'none'; return; }
+    if (d.state === 'expired') {
+      body.innerHTML = '<span class="dim-text">' + esc(L.expired) + '</span>';
+      wrap.style.display = '';
+      return;
+    }
+    var parts = [];
+    for (var i = 0; i < (d.windows || []).length; i++) {
+      var w = d.windows[i];
+      var name = w.key === 'five_hour' ? L.five_hour
+               : (w.key === 'model' ? L.seven_day + ' (' + w.label + ')' : L.seven_day);
+      var rel = until(w.resets_at);
+      parts.push('<b>' + esc(name) + ':</b> ' +
+                 '<span class="' + cls(w.percent) + '">' + Math.round(w.percent) + '%</span>' +
+                 (rel ? ' <span class="dim-text">(' + esc(L.resets) + ' ' + esc(rel) + ')</span>' : ''));
+    }
+    // Only present when the account actually has extra usage enabled.
+    if (d.spend) {
+      if (d.spend.balance !== null) parts.push('<b>' + esc(L.balance) + ':</b> ' + money(d.spend.balance, d.spend.currency));
+      if (d.spend.used !== null) parts.push('<b>' + esc(L.spent) + ':</b> ' + money(d.spend.used, d.spend.currency));
+    }
+    if (!parts.length) { wrap.style.display = 'none'; return; }
+    body.innerHTML = parts.join('<span class="sep">&middot;</span>');
+    wrap.style.display = '';
+  }
+
+  // Once a minute, matching the endpoint's own cache: these windows move over
+  // hours, and the lookup is a network round trip, unlike the local /proc read
+  // the resource poller does every 3s.
+  var timer = null;
+  function poll() {
+    fetch('/plugins/claude-code/include/claude-usage.php', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(render)
+      .catch(function () { wrap.style.display = 'none'; });
+  }
+  function start() { if (!timer) { poll(); timer = setInterval(poll, 60000); } }
+  function stop() { if (timer) { clearInterval(timer); timer = null; } }
+  start();
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) stop(); else start();
+  });
+})();
+</script>
 
 <div class="claude-box">
 <h4><?=t('Settings', 'Configuración')?></h4>
@@ -1696,7 +2050,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.08.31.2 has been installed!"
+    echo " Claude Code plugin v2026.08.31.5 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
