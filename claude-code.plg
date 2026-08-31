@@ -341,7 +341,7 @@ fi
 
 <!-- Install/setup script -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh" Mode="0755">
-<SHA256>defa8ffc1222386116ebc54c9ead66fd56a285441f134549c542a7129b550ed3</SHA256>
+<SHA256>aee5ce9870e97eda8cb856ee2440bdee799b1b72fafb6cb55baa059b4ea87600</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -547,9 +547,18 @@ setup_persistence() {
     # Create symlink (ln -sf handles removing existing symlink)
     ln -sf "$APPDATA_PATH/.claude" "$CLAUDE_CONFIG_RUNTIME"
 
-    # Save auto-detected path to config so it's consistent on future boots
+    # Save auto-detected path to config so it's consistent on future boots.
+    # Upsert rather than rewrite: this file also holds REMOTE_CONTROL_DIR and
+    # LAST_SESSION_ID, and truncating it here would silently throw away
+    # settings the user configured on the Settings page.
     if [ "$AUTO_DETECTED" = true ]; then
-        echo "APPDATA_PATH=\"$APPDATA_PATH\"" > "$PLUGIN_CFG"
+        mkdir -p "$(dirname "$PLUGIN_CFG")"
+        touch "$PLUGIN_CFG"
+        if grep -q '^APPDATA_PATH=' "$PLUGIN_CFG" 2>/dev/null; then
+            sed -i "s|^APPDATA_PATH=.*|APPDATA_PATH=\"$APPDATA_PATH\"|" "$PLUGIN_CFG"
+        else
+            echo "APPDATA_PATH=\"$APPDATA_PATH\"" >> "$PLUGIN_CFG"
+        fi
         echo "Saved appdata path to config."
     fi
 
