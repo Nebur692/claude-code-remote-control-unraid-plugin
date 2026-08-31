@@ -1,13 +1,13 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.09.01.4"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.09.01.6"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
-###2026.09.01.4
+###2026.09.01.6
 - Several Claude accounts on one server. Turn on "Several accounts" under Claude accounts on the Settings page, add an account, and pick which one this server uses. The account you pick is used by Remote Control and by claude in the terminal.
 - You choose whether the accounts share the agent memory, settings and MCP servers, or whether each account keeps its own. Sharing is the default, so adding a second account does not leave you starting from nothing.
 - Nothing about the login you already have is moved or rewritten: it stays exactly where it is as the main account, extra accounts get their own folder beside it, and removing an account leaves its folder untouched unless you ask for it to be deleted.
@@ -837,7 +837,7 @@ fi
      taken over as "most recent"; see the connect subcommand and the
      Settings page's Session ID field. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh" Mode="0755">
-<SHA256>dc47fb6bf24e8564390364aa3218a5cb93f3ba4d7d56e9fdbea6322124c5889a</SHA256>
+<SHA256>c405c4df1e952110e8d00b762b8073e6af17cdc483e734b9f981d745acac824e</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -872,6 +872,13 @@ set_profile() {
         # way to stop one account's bridge without stopping the others: every
         # "claude remote-control" otherwise looks identical.
         NAME_PREFIX="unraid-$PROFILE"
+    fi
+
+    # Where this account's own session id is remembered.
+    if [ "$PROFILE" = "default" ]; then
+        SESSION_ID_KEY="LAST_SESSION_ID"
+    else
+        SESSION_ID_KEY="LAST_SESSION_ID_$PROFILE"
     fi
 
     LOGFILE="/var/log/claude-code-remote-control$SUFFIX.log"
@@ -936,6 +943,13 @@ save_cfg_var() {
     fi
 }
 
+get_cfg_var() {
+    local key="$1" line
+    [ -f "$PLUGIN_CFG" ] || return 0
+    line=$(grep -m1 "^${key}=" "$PLUGIN_CFG" 2>/dev/null) || return 0
+    printf '%s' "${line#*=}" | sed -e 's/^"//' -e 's/"$//'
+}
+
 # Appends one session id to the history file, skipping if it's already the
 # newest entry (the same id shows up over and over while claude redraws its
 # connection status line in place).
@@ -951,6 +965,10 @@ record_sid() {
         # spaces, so appending it bare would make the line ambiguous. Lines
         # written before accounts existed simply have no bracket.
         echo "$(date -Iseconds) $sid $rc_dir [$PROFILE]" >> "$HISTORY_FILE"
+        # Remember it as this account's own session. That is what lets an
+        # account resume its session rather than whatever happens to be the
+        # most recent one in a directory it may be sharing.
+        [ -n "$SESSION_ID_KEY" ] && save_cfg_var "$SESSION_ID_KEY" "$sid"
     fi
 }
 
@@ -1009,7 +1027,7 @@ run_fresh() {
 }
 
 do_run() {
-    local rc_dir output pinned_id fail_count=0
+    local rc_dir output pinned_id own_id fail_count=0
     rc_dir=$(get_rc_dir)
     mkdir -p "$rc_dir"
     echo "=== Remote Control supervisor started $(date) (dir: $rc_dir) ===" >> "$LOGFILE"
@@ -1027,8 +1045,32 @@ do_run() {
             fi
             fail_count=0
         else
-            output=$(run_claude "$rc_dir" --continue)
-            if echo "$output" | grep -q "No recent session found"; then
+            # "--continue" resumes the most recent session *of this directory*,
+            # whichever account started it. With accounts sharing a directory
+            # that is the wrong session: the CLI refuses to serve one that
+            # another instance already holds. So an account that knows its own
+            # session id asks for that one by name, and only falls back to
+            # --continue when it has none yet. The main account keeps using
+            # --continue, exactly as it always has.
+            own_id=""
+            [ "$PROFILE" != "default" ] && own_id=$(get_cfg_var "$SESSION_ID_KEY")
+            if [ -n "$own_id" ]; then
+                output=$(run_claude "$rc_dir" --session-id "$own_id")
+            else
+                output=$(run_claude "$rc_dir" --continue)
+            fi
+
+            # Another instance is already serving that session. There is no
+            # ambiguity here and no point retrying: this account needs a session
+            # of its own, now. Without this the supervisor retried the same
+            # taken session every 5 seconds forever -- the same shape of
+            # infinite loop the archived-session check was added to prevent.
+            if echo "$output" | grep -q "already being served by another"; then
+                echo "=== The session in $rc_dir is already held by another instance${own_id:+ (}${own_id}${own_id:+)} -- starting a new session for account '$PROFILE': $(date) ===" >> "$LOGFILE"
+                fail_count=0
+                [ -n "$own_id" ] && save_cfg_var "$SESSION_ID_KEY" ""
+                run_fresh "$rc_dir"
+            elif echo "$output" | grep -q "No recent session found"; then
                 fail_count=0
                 run_fresh "$rc_dir"
             # Matched case-insensitively on purpose: claude emits this as
@@ -1040,6 +1082,9 @@ do_run() {
                 if [ "$fail_count" -ge "$ARCHIVED_FAIL_THRESHOLD" ]; then
                     echo "=== ARCHIVED_SESSION_FALLBACK: previous session in $rc_dir failed to resume $fail_count times in a row (likely archived or ended) -- starting a new session instead: $(date) ===" >> "$LOGFILE"
                     fail_count=0
+                    # Forget the dead id too, or the next start would ask for it
+                    # by name and fail its way here all over again.
+                    [ -n "$own_id" ] && save_cfg_var "$SESSION_ID_KEY" ""
                     run_fresh "$rc_dir"
                 fi
             else
@@ -1083,14 +1128,6 @@ esac
 if [ -n "$SLUG" ]; then SID="${3:-}"; else SID="${2:-}"; fi
 
 set_profile "$SLUG"
-
-# Where the last id connected to is remembered, so the Settings field can be
-# pre-filled per account rather than sharing one value between them.
-if [ "$PROFILE" = "default" ]; then
-    SESSION_ID_KEY="LAST_SESSION_ID"
-else
-    SESSION_ID_KEY="LAST_SESSION_ID_$PROFILE"
-fi
 
 case "$CMD" in
     start)
@@ -1935,7 +1972,7 @@ respond([
 <!-- Shared preamble and styling for the tabs. Every tab requires this once,
      so the state it computes is worked out a single time per request. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/common.php" Mode="0644">
-<SHA256>bb20f00b308cfe8a2fbb3a733c5b547ac1d45966fda73e84ceb888c65f62fcde</SHA256>
+<SHA256>bdae3b462efb3bc8b6d5065f1deea84fe42f80417d6e92d4e6c0fa34423786b3</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -2110,6 +2147,14 @@ foreach (($profiles ?: [['slug' => 'default', 'label' => t('Main account', 'Cuen
         $tail = shell_exec("tail -n 300 /var/log/" . escapeshellarg($log_name) . " 2>/dev/null");
         if ($tail && preg_match_all('#https://claude\.ai/code[^\s]*#', $tail, $m) && !empty($m[0])) {
             $session_url = end($m[0]);
+        }
+        // A freshly created session announces itself with an environment URL
+        // rather than a session one, which opens the right place but does not
+        // say which session it is. When the account's own id is known, link
+        // straight at it: same destination, and it matches what the row says.
+        $known_sid = $cfg[$slug === 'default' ? 'LAST_SESSION_ID' : "LAST_SESSION_ID_$slug"] ?? '';
+        if ($known_sid !== '' && strpos($session_url, $known_sid) === false) {
+            $session_url = "https://claude.ai/code/$known_sid";
         }
         if ($tail && preg_match_all('/^=== ARCHIVED_SESSION_FALLBACK:.*$/m', $tail, $a)) {
             $archived = end($a[0]);
@@ -3452,7 +3497,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.09.01.4 has been installed!"
+    echo " Claude Code plugin v2026.09.01.6 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
