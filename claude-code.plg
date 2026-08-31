@@ -1,12 +1,17 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.08.31.5"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.08.31.7"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.08.31.7
+- Several Claude accounts on one server. Turn on "Several accounts" under Claude accounts on the Settings page, add an account, and pick which one this server uses. The account you pick is used by Remote Control and by claude in the terminal.
+- You choose whether the accounts share the agent memory, settings and MCP servers, or whether each account keeps its own. Sharing is the default, so adding a second account does not leave you starting from nothing.
+- Nothing about the login you already have is moved or rewritten: it stays exactly where it is as the main account, extra accounts get their own folder beside it, and removing an account leaves its folder untouched unless you ask for it to be deleted.
+
 ###2026.08.31.5
 - v2.3.0: New "Plan usage" line under the status bar showing how much of your
   Claude.ai plan you have used: the 5-hour window, the weekly window, and the
@@ -387,7 +392,7 @@ fi
 
 <!-- Install/setup script -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh" Mode="0755">
-<SHA256>fa5e220e0bb3288e9b2f529259f74759093b8784409ced1adc569f8b1931a127</SHA256>
+<SHA256>f40dc68fa4a0513165454e0c5d1db526e2a9989bfaf59602c687b748cba1d116</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -448,19 +453,47 @@ CACHED_BINARY="$APPDATA_PATH/bin/claude"
 echo "=== Claude Code Installation ==="
 
 ensure_symlink() {
-    # Always ensure /usr/local/bin/claude symlink exists so claude is on
-    # PATH for interactive shells (which don't have ~/.local/bin in PATH)
-    if [ -x /usr/local/bin/claude ]; then
-        return 0
-    fi
+    # /usr/local/bin/claude is what interactive shells find on PATH, since they
+    # do not have ~/.local/bin in it. This used to be a plain symlink to the
+    # real binary; it is now a small wrapper that applies whichever account is
+    # selected on the Settings page. With multi-account off, or with the main
+    # account selected, the wrapper sets nothing and hands straight over, so
+    # the behaviour is identical to the symlink it replaces.
+    local launcher="/usr/local/emhttp/plugins/claude-code/scripts/claude-launcher.sh"
+    local target="/usr/local/bin/claude"
+    local candidate found=""
+
     for candidate in /root/.local/bin/claude /root/.claude/local/bin/claude; do
         if [ -x "$candidate" ]; then
-            ln -sf "$candidate" /usr/local/bin/claude
-            echo "Symlinked $candidate -> /usr/local/bin/claude"
-            return 0
+            found="$candidate"
+            break
         fi
     done
-    return 1
+    [ -z "$found" ] && return 1
+
+    if [ -f "$launcher" ]; then
+        # Replace whatever is there -- an older version's plain symlink, or an
+        # earlier generation of this wrapper. cmp against a symlink compares
+        # the binary it points at, so that case reinstalls correctly too.
+        if ! cmp -s "$launcher" "$target" 2>/dev/null; then
+            rm -f "$target"
+            if cp "$launcher" "$target" && chmod 755 "$target"; then
+                echo "Installed the account-aware claude launcher at $target"
+            else
+                # Never leave claude off PATH because the wrapper failed.
+                ln -sf "$found" "$target"
+                echo "WARNING: could not install the launcher; fell back to a symlink."
+            fi
+        fi
+        return 0
+    fi
+
+    # No launcher deployed (partial install): keep the original behaviour.
+    if [ ! -x "$target" ]; then
+        ln -sf "$found" "$target"
+        echo "Symlinked $found -> $target"
+    fi
+    return 0
 }
 
 restore_cached_binary() {
@@ -654,6 +687,19 @@ setup_claude_json() {
 }
 
 # Main
+
+# A plugin update deploys the new files but does not re-run this script: the
+# post-install block only calls it the first time, when it adds the go-file
+# entry. That left /usr/local/bin/claude stale until the next reboot. This
+# entry point exists so the post-install block can refresh the launcher on
+# every install and update; it is cheap and idempotent.
+if [ "$1" = "launcher" ]; then
+    if ensure_symlink; then
+        exit 0
+    fi
+    echo "WARNING: Claude Code binary not found yet; the launcher will be installed on the next boot."
+    exit 0
+fi
 
 # Set up persistence first so the native installer writes into appdata
 # (the installer writes to ~/.claude/local/ which follows our symlink)
@@ -997,6 +1043,351 @@ esac
 </INLINE>
 </FILE>
 
+<!-- Claude account profiles: several logins on one server, either sharing
+     the agent memory and settings or fully isolated. -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/profiles.sh" Mode="0755">
+<SHA256>0bf1a1f4af7b8242bcede7391459229d439fcc6f12f2b4ba3e4e0e7344bebb1e</SHA256>
+<INLINE>
+<![CDATA[
+#!/bin/bash
+
+# Claude account profiles.
+#
+# Lets this server hold several Claude logins at once. Which files a profile
+# owns depends on the mode the user picked:
+#
+#   shared   -- only the credentials move (CLAUDE_SECURESTORAGE_CONFIG_DIR).
+#               Agent memory, settings, MCP servers and session history stay in
+#               the one config home every account shares. This is the default,
+#               because losing the memory you already built up is the surprise
+#               nobody wants from "add a second account".
+#   isolated -- the whole config home moves (CLAUDE_CONFIG_DIR): every account
+#               gets its own memory, settings, MCPs and history.
+#
+# Both modes run several accounts at the same time; they differ only in what is
+# shared. Neither ever moves or rewrites the existing login: the "default"
+# profile is the config that was already there, addressed by setting no
+# variables at all, and extra profiles are new directories beside it.
+#
+# Deliberately NOT done here:
+#   * No symlink repointing. An earlier design switched /root/.claude between
+#     profiles; environment variables do the same job without ever putting the
+#     live login behind a link that could be left dangling.
+#   * No copying of .credentials.json between profiles. Each claude process
+#     refreshes its own file in place, so there is no moment where a freshly
+#     rotated refresh token can be lost.
+
+export PATH="/usr/local/bin:/root/.local/bin:$PATH"
+
+PLUGIN_CFG="/boot/config/plugins/claude-code/claude-code.cfg"
+RC_SCRIPT="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh"
+
+# Slugs become part of shell variable names (PROFILE_LABEL_<slug>) in a config
+# file that is both sourced by these scripts and read by parse_ini_file, so a
+# hyphen or a space would produce a file that breaks on the next source.
+SLUG_RE='^[a-z][a-z0-9_]{0,23}$'
+
+load_cfg() {
+    MULTI_ACCOUNT="no"
+    ACCOUNT_MODE="shared"
+    ACTIVE_PROFILE="default"
+    PROFILES=""
+    APPDATA_PATH=""
+    [ -f "$PLUGIN_CFG" ] && source "$PLUGIN_CFG"
+    [ -z "$APPDATA_PATH" ] && APPDATA_PATH="/mnt/user/appdata/claude-code"
+    [ -z "$ACTIVE_PROFILE" ] && ACTIVE_PROFILE="default"
+    [ -z "$ACCOUNT_MODE" ] && ACCOUNT_MODE="shared"
+    PROFILES_DIR="$APPDATA_PATH/profiles"
+}
+
+# Upsert KEY="value" without touching other keys -- the same format and the same
+# care as remote-control.sh's helper, because this file also holds APPDATA_PATH,
+# REMOTE_CONTROL_DIR and LAST_SESSION_ID.
+save_cfg_var() {
+    local key="$1" value="$2"
+    mkdir -p "$(dirname "$PLUGIN_CFG")"
+    touch "$PLUGIN_CFG"
+    if grep -q "^${key}=" "$PLUGIN_CFG" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=\"${value}\"|" "$PLUGIN_CFG"
+    else
+        echo "${key}=\"${value}\"" >> "$PLUGIN_CFG"
+    fi
+}
+
+del_cfg_var() {
+    [ -f "$PLUGIN_CFG" ] && sed -i "/^${1}=/d" "$PLUGIN_CFG"
+}
+
+# Every profile except "default" lives in its own directory. "default" is the
+# pre-existing config and is addressed by setting no variables at all, which is
+# what keeps this feature from touching a working login.
+profile_dir() {
+    [ "$1" = "default" ] && return 1
+    echo "$PROFILES_DIR/$1"
+}
+
+# The environment that selects a profile, as KEY=VALUE lines. Empty for the
+# default profile. Callers export these; the launcher wrapper only applies them
+# when the variable is not already set, so an explicit choice always wins.
+profile_env() {
+    local slug="$1" dir
+    dir=$(profile_dir "$slug") || return 0
+    case "$ACCOUNT_MODE" in
+        isolated) echo "CLAUDE_CONFIG_DIR=$dir" ;;
+        *)        echo "CLAUDE_SECURESTORAGE_CONFIG_DIR=$dir" ;;
+    esac
+}
+
+profile_exists() {
+    [ "$1" = "default" ] && return 0
+    local p
+    for p in $PROFILES; do [ "$p" = "$1" ] && return 0; done
+    return 1
+}
+
+profile_label() {
+    local var="PROFILE_LABEL_$1" label
+    label="${!var}"
+    [ -z "$label" ] && label="$1"
+    echo "$label"
+}
+
+# Ask the CLI who a profile is logged in as. This is the authoritative answer --
+# .claude.json's cached oauthAccount is shared between profiles in shared mode
+# and so cannot identify them -- but it costs a process spawn, so the result is
+# cached in the config and only refreshed on demand or after a login.
+refresh_profile() {
+    local slug="$1" envline status email plan logged
+    if ! command -v claude >/dev/null 2>&1; then
+        return 1
+    fi
+    # One quoted argument, not an unquoted expansion: an appdata path with a
+    # space in it would otherwise split into two broken arguments.
+    envline=$(profile_env "$slug")
+    if [ -n "$envline" ]; then
+        status=$(env "$envline" claude auth status --json 2>/dev/null)
+    else
+        status=$(claude auth status --json 2>/dev/null)
+    fi
+    [ -z "$status" ] && return 1
+    # Parsed with grep rather than a JSON tool: Unraid ships no jq, and this
+    # only ever reads three flat string fields.
+    logged=$(echo "$status" | grep -o '"loggedIn"[[:space:]]*:[[:space:]]*true')
+    email=$(echo "$status" | sed -n 's/.*"email"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    plan=$(echo "$status" | sed -n 's/.*"subscriptionType"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    if [ -n "$logged" ]; then
+        save_cfg_var "PROFILE_EMAIL_$slug" "$email"
+        save_cfg_var "PROFILE_PLAN_$slug" "$plan"
+    else
+        save_cfg_var "PROFILE_EMAIL_$slug" ""
+        save_cfg_var "PROFILE_PLAN_$slug" ""
+    fi
+    return 0
+}
+
+rc_running() {
+    local pidfile="/var/run/claude-remote-control.pid"
+    [ -f "$pidfile" ] || return 1
+    local pid
+    pid=$(cat "$pidfile" 2>/dev/null)
+    [ -n "$pid" ] && [ -d "/proc/$pid" ]
+}
+
+cmd_list() {
+    # TSV so the Settings page can render it without a JSON parser:
+    # slug <TAB> label <TAB> active <TAB> email <TAB> plan <TAB> logged_in
+    local slug email_var plan_var email plan active logged
+    for slug in default $PROFILES; do
+        email_var="PROFILE_EMAIL_$slug"; email="${!email_var}"
+        plan_var="PROFILE_PLAN_$slug";   plan="${!plan_var}"
+        active="no"; [ "$slug" = "$ACTIVE_PROFILE" ] && active="yes"
+        logged="no"; [ -n "$email" ] && logged="yes"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$slug" "$(profile_label "$slug")" "$active" "$email" "$plan" "$logged"
+    done
+}
+
+cmd_add() {
+    local slug="$1" label="$2" dir
+    if ! echo "$slug" | grep -qE "$SLUG_RE"; then
+        echo "Invalid name: use 1-24 characters, lowercase letters, digits and _ , starting with a letter."
+        return 1
+    fi
+    if profile_exists "$slug"; then
+        echo "An account named '$slug' already exists."
+        return 1
+    fi
+    dir=$(profile_dir "$slug")
+    if ! mkdir -p "$dir"; then
+        echo "Could not create $dir -- is the array started?"
+        return 1
+    fi
+    # Credentials live here; keep them off other users' eyes even on a share
+    # that is otherwise readable.
+    chmod 700 "$dir"
+    save_cfg_var "PROFILES" "$(echo $PROFILES $slug | xargs)"
+    [ -n "$label" ] && save_cfg_var "PROFILE_LABEL_$slug" "$label"
+    echo "Account '$slug' created. Use Sign in to authenticate it."
+}
+
+cmd_remove() {
+    local slug="$1" purge="$2" dir new p
+    if [ "$slug" = "default" ]; then
+        echo "The main account cannot be removed."
+        return 1
+    fi
+    if ! profile_exists "$slug"; then
+        echo "No such account: $slug"
+        return 1
+    fi
+    if [ "$slug" = "$ACTIVE_PROFILE" ]; then
+        echo "'$slug' is the account in use. Switch to another one first."
+        return 1
+    fi
+    new=""
+    for p in $PROFILES; do [ "$p" = "$slug" ] || new="$new $p"; done
+    save_cfg_var "PROFILES" "$(echo $new | xargs)"
+    del_cfg_var "PROFILE_LABEL_$slug"
+    del_cfg_var "PROFILE_EMAIL_$slug"
+    del_cfg_var "PROFILE_PLAN_$slug"
+    dir=$(profile_dir "$slug")
+    if [ "$purge" = "purge" ]; then
+        # Only ever inside the profiles directory, and only a path we just
+        # built from a validated slug.
+        case "$dir" in
+            "$PROFILES_DIR"/*) rm -rf "$dir"; echo "Account '$slug' removed and its data deleted." ;;
+            *) echo "Refusing to delete an unexpected path: $dir"; return 1 ;;
+        esac
+    else
+        echo "Account '$slug' removed from the list. Its data is still at $dir."
+    fi
+}
+
+cmd_activate() {
+    local slug="$1" was_running=no
+    if ! profile_exists "$slug"; then
+        echo "No such account: $slug"
+        return 1
+    fi
+    if [ "$slug" = "$ACTIVE_PROFILE" ]; then
+        echo "'$slug' is already the account in use."
+        return 0
+    fi
+    # A live bridge keeps its credentials open; let it finish on the account it
+    # started with rather than swapping underneath it.
+    if rc_running; then
+        was_running=yes
+        echo "Stopping Remote Control..."
+        [ -x "$RC_SCRIPT" ] && "$RC_SCRIPT" stop >/dev/null 2>&1
+    fi
+    save_cfg_var "ACTIVE_PROFILE" "$slug"
+    echo "Now using account: $(profile_label "$slug")"
+    if [ "$was_running" = yes ]; then
+        echo "Starting Remote Control again..."
+        [ -x "$RC_SCRIPT" ] && "$RC_SCRIPT" start >/dev/null 2>&1
+    fi
+    echo "Interactive terminals already open keep the previous account until you"
+    echo "start a new one."
+}
+
+cmd_status() {
+    echo "Multi-account: $MULTI_ACCOUNT"
+    echo "Mode: $ACCOUNT_MODE"
+    echo "Active account: $ACTIVE_PROFILE"
+    echo "Accounts: default $PROFILES"
+    local e
+    e=$(profile_env "$ACTIVE_PROFILE")
+    [ -n "$e" ] && echo "Environment: $e" || echo "Environment: (none -- the original config)"
+}
+
+load_cfg
+
+case "$1" in
+    list)     cmd_list ;;
+    add)      cmd_add "$2" "$3" ;;
+    remove)   cmd_remove "$2" "$3" ;;
+    activate) cmd_activate "$2" ;;
+    refresh)
+        if [ -n "$2" ]; then
+            refresh_profile "$2"
+        else
+            for p in default $PROFILES; do refresh_profile "$p"; done
+        fi
+        ;;
+    env)
+        # Used by the launcher wrapper and by remote-control.sh. Defaults to the
+        # active profile so callers do not have to read the config themselves.
+        profile_env "${2:-$ACTIVE_PROFILE}"
+        ;;
+    status)   cmd_status ;;
+    *)
+        echo "Usage: $0 {list|add <name> [label]|remove <name> [purge]|activate <name>|refresh [name]|env [name]|status}"
+        exit 1
+        ;;
+esac
+]]>
+</INLINE>
+</FILE>
+
+<!-- Installed as /usr/local/bin/claude so the account chosen in the web UI
+     also applies to "claude" typed in a terminal. -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/claude-launcher.sh" Mode="0755">
+<SHA256>df1436b7fbe51a12d1f9ae23875c702dbc7420078af3d2d5822e076cf85e08a8</SHA256>
+<INLINE>
+<![CDATA[
+#!/bin/bash
+
+# Claude Code launcher -- installed as /usr/local/bin/claude by the claude-code
+# plugin. LAUNCHER_GENERATION=1
+#
+# This used to be a plain symlink to the real binary. It became a wrapper so
+# that the account selected on the Settings page also applies to "claude" typed
+# in a terminal, without moving or relinking anybody's configuration.
+#
+# It fails open on purpose: if the config is missing, unreadable or nonsense,
+# it hands over to the real binary unchanged. A broken account selection is an
+# inconvenience; a "claude" that no longer starts is a broken server.
+#
+# Variables already present in the environment are never overwritten, so an
+# explicit "CLAUDE_CONFIG_DIR=... claude" (or a profile chosen by
+# remote-control.sh) always wins over the configured default.
+
+REAL="/root/.local/bin/claude"
+[ -x "$REAL" ] || REAL="/root/.claude/local/bin/claude"
+
+CFG="/boot/config/plugins/claude-code/claude-code.cfg"
+if [ -r "$CFG" ]; then
+    MULTI_ACCOUNT="no"
+    ACCOUNT_MODE="shared"
+    ACTIVE_PROFILE="default"
+    APPDATA_PATH=""
+    . "$CFG" 2>/dev/null
+
+    if [ "$MULTI_ACCOUNT" = "yes" ] && [ -n "$ACTIVE_PROFILE" ] && [ "$ACTIVE_PROFILE" != "default" ]; then
+        [ -z "$APPDATA_PATH" ] && APPDATA_PATH="/mnt/user/appdata/claude-code"
+        PROFILE_DIR="$APPDATA_PATH/profiles/$ACTIVE_PROFILE"
+        # A profile whose directory is gone (array not started yet, appdata
+        # moved) must not send claude looking for credentials that aren't
+        # there -- fall through to the original config instead.
+        if [ -d "$PROFILE_DIR" ]; then
+            if [ "$ACCOUNT_MODE" = "isolated" ]; then
+                # Tested for being *set*, not for being non-empty: the CLI
+                # treats an empty CLAUDE_CONFIG_DIR/SECURESTORAGE var as a
+                # deliberate "use the home directory", so an empty value is a
+                # caller's choice to respect, not a gap to fill.
+                [ -z "${CLAUDE_CONFIG_DIR+set}" ] && export CLAUDE_CONFIG_DIR="$PROFILE_DIR"
+            else
+                [ -z "${CLAUDE_SECURESTORAGE_CONFIG_DIR+set}" ] && export CLAUDE_SECURESTORAGE_CONFIG_DIR="$PROFILE_DIR"
+            fi
+        fi
+    fi
+fi
+
+exec "$REAL" "$@"
+]]>
+</INLINE>
+</FILE>
+
 <!-- Live CPU/RAM stats endpoint, polled by the Settings page -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-stats.php" Mode="0644">
 <SHA256>00d4769cfa4cf75917950f63c60a230c27db8894161b9f847d79fac20dcc6d2b</SHA256>
@@ -1302,7 +1693,7 @@ respond([
 
 <!-- Web UI -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/claude-code.page">
-<SHA256>67efad846464f17d4b4fbea076075f353e951e1e2b3e6f73742654d7d65b2f91</SHA256>
+<SHA256>7f8c4ca6d1106594e376c709a336862ea206186d1bb4fec388f98608f2a5399f</SHA256>
 <INLINE>
 <![CDATA[
 Menu="Utilities"
@@ -1354,6 +1745,54 @@ if (is_readable($claude_json)) {
             $account_plan = ucwords(str_replace('_', ' ', preg_replace('/^claude_/', '', (string)$acct['organizationType'])));
         }
     }
+}
+
+// Claude accounts. Off by default, in which case none of this is shown and
+// the plugin behaves exactly as it did before the feature existed.
+$multi_account = ($cfg['MULTI_ACCOUNT'] ?? 'no') === 'yes';
+$account_mode  = ($cfg['ACCOUNT_MODE'] ?? 'shared') === 'isolated' ? 'isolated' : 'shared';
+$active_profile = $cfg['ACTIVE_PROFILE'] ?? 'default';
+$extra_profiles = trim((string)($cfg['PROFILES'] ?? ''));
+$profiles_script = '/usr/local/emhttp/plugins/claude-code/scripts/profiles.sh';
+// The mode decides where each account's files live, so it can only be chosen
+// while there is nothing to move.
+$mode_locked = $extra_profiles !== '';
+
+$profiles = [];
+if ($multi_account && is_executable($profiles_script)) {
+    // Tab separated, one account per line: slug, label, active, email, plan,
+    // logged in. Parsed rather than recomputed here so the script stays the
+    // single source of truth for what an account is.
+    foreach (explode("\n", trim((string)shell_exec(escapeshellarg($profiles_script) . ' list 2>/dev/null'))) as $line) {
+        if ($line === '') continue;
+        $f = explode("\t", $line);
+        if (count($f) < 6) continue;
+        $profiles[] = [
+            'slug'   => $f[0],
+            'label'  => $f[1],
+            'active' => $f[2] === 'yes',
+            'email'  => $f[3],
+            'plan'   => $f[4],
+            'logged' => $f[5] === 'yes',
+        ];
+    }
+}
+
+// The main account has no label of its own -- it is the config that was
+// already there -- so give it a readable name rather than showing the internal
+// slug in the interface.
+foreach ($profiles as $i => $prow) {
+    if ($prow['slug'] === 'default' && $prow['label'] === 'default') {
+        $profiles[$i]['label'] = t('Main account', 'Cuenta principal');
+    }
+}
+
+// Which row is the account in use, if any. Computed here rather than inside the
+// status bar below because $has_auth depends on it: with several accounts the
+// signed-in one need not be the original config directory.
+$active_row = null;
+foreach ($profiles as $prow) {
+    if ($prow['active']) { $active_row = $prow; break; }
 }
 
 // Check if array is started (check for actual mount, not just directory)
@@ -1568,9 +2007,23 @@ Claude Code: <span class="<?=$claude_installed ? 'ok' : 'error'?>"><?=$claude_in
 <span class="sep">&middot;</span>
 <?=t('Array', 'Array')?>: <span class="<?=$array_started ? 'ok' : 'error'?>"><?=$array_started ? t('Started', 'Iniciado') : t('Not started', 'No iniciado')?></span>
 <span class="sep">&middot;</span>
-<?=t('Account', 'Cuenta')?>: <span class="<?=$has_auth ? 'ok' : 'warn'?>"><?php
-if (!$has_auth) {
+<?=t('Account', 'Cuenta')?>: <span class="<?=($has_auth || $active_row !== null) ? 'ok' : 'warn'?>"><?php
+// With several accounts configured, the cached oauthAccount in .claude.json
+// belongs to whichever account wrote it last, so it cannot name the one in
+// use. The profile list knows, and already carries the label.
+if (!$has_auth && $active_row === null) {
     echo t('Not authenticated', 'Sin autenticar');
+} elseif ($active_row !== null) {
+    if (count($profiles) > 1) {
+        echo htmlspecialchars($active_row['label']);
+        if ($active_row['email'] !== '') echo ' &middot; ';
+    }
+    if ($active_row['email'] !== '') {
+        echo htmlspecialchars($active_row['email']);
+        if ($active_row['plan'] !== '') echo ' (' . htmlspecialchars(ucfirst($active_row['plan'])) . ')';
+    } elseif (count($profiles) <= 1) {
+        echo t('Not signed in', 'Sin iniciar sesión');
+    }
 } elseif ($account_email !== '') {
     echo htmlspecialchars($account_email) . ($account_plan !== '' ? ' (' . htmlspecialchars($account_plan) . ')' : '');
 } else {
@@ -1692,6 +2145,118 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 <blockquote class="inline_help"><?=t('Store Claude config on your array to avoid flash wear.', 'Guarda la configuración de Claude en tu array para no desgastar el flash drive.')?></blockquote>
 <input type="submit" value="<?=t('Apply', 'Aplicar')?>">
 </form>
+</div>
+
+<div class="claude-box">
+<h4><?=t('Claude accounts', 'Cuentas de Claude')?></h4>
+<p><?=t(
+    'Lets this server hold more than one Claude login and choose which one it uses. Everything stays on this server: each account keeps its own credentials in a separate folder inside your appdata, and the account you pick here is the one used by Remote Control and by "claude" in the terminal.',
+    'Permite que este servidor tenga más de una sesión de Claude iniciada y elegir cuál usa. Todo se queda en este servidor: cada cuenta guarda sus credenciales en una carpeta aparte dentro de tu appdata, y la cuenta que elijas aquí es la que usan el Control Remoto y el comando "claude" de la terminal.'
+)?></p>
+
+<form method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#file" value="<?=$cfg_file?>">
+<dl>
+<dt><?=t('Several accounts:', 'Varias cuentas:')?></dt>
+<dd>
+<!-- The hidden field is what makes an unticked box mean "no": an unchecked
+     checkbox posts nothing at all, so without it turning the feature off would
+     simply leave the old value in place. -->
+<input type="hidden" name="MULTI_ACCOUNT" value="no">
+<label><input type="checkbox" name="MULTI_ACCOUNT" value="yes"<?=$multi_account ? ' checked' : ''?>> <?=t('Enabled', 'Habilitado')?></label>
+</dd>
+</dl>
+<dl>
+<dt><?=t('Memory and settings:', 'Memoria y ajustes:')?></dt>
+<dd>
+<select name="ACCOUNT_MODE"<?=$mode_locked ? ' disabled' : ''?>>
+<option value="shared"<?=$account_mode === 'shared' ? ' selected' : ''?>><?=t('Shared between accounts', 'Compartidos entre cuentas')?></option>
+<option value="isolated"<?=$account_mode === 'isolated' ? ' selected' : ''?>><?=t('Separate for each account', 'Separados para cada cuenta')?></option>
+</select>
+</dd>
+</dl>
+<blockquote class="inline_help"><?=t(
+    'Shared is the usual choice: every account works with the same agent memory, settings and MCP servers, and only the login itself changes. Separate gives each account its own memory, settings and history, which start out empty. Both let several accounts be used at the same time.',
+    'Compartidos es lo habitual: todas las cuentas trabajan con la misma memoria del agente, los mismos ajustes y los mismos servidores MCP, y lo único que cambia es la sesión iniciada. Separados le da a cada cuenta su propia memoria, ajustes e historial, que empiezan vacíos. En ambos casos se pueden usar varias cuentas a la vez.'
+)?></blockquote>
+<?php if ($mode_locked): ?>
+<blockquote class="inline_help"><span class="dim-text"><?=t(
+    'This cannot be changed while more than one account exists, because it decides where each account keeps its files. Remove the extra accounts first.',
+    'Esto no se puede cambiar mientras exista más de una cuenta, porque decide dónde guarda sus ficheros cada una. Elimina antes las cuentas adicionales.'
+)?></span></blockquote>
+<?php endif; ?>
+<input type="submit" value="<?=t('Apply', 'Aplicar')?>">
+</form>
+
+<?php if ($multi_account): ?>
+<dl>
+<dt><?=t('Accounts:', 'Cuentas:')?></dt>
+<dd>
+<table class="claude-history">
+<tr>
+<th><?=t('Name', 'Nombre')?></th>
+<th><?=t('Signed in as', 'Sesión iniciada como')?></th>
+<th><?=t('Plan', 'Plan')?></th>
+<th><?=t('In use', 'En uso')?></th>
+<th></th>
+</tr>
+<?php foreach ($profiles as $p): ?>
+<tr>
+<td><?=htmlspecialchars($p['label'])?><?php if ($p['slug'] !== $p['label']): ?> <span class="dim-text">(<?=htmlspecialchars($p['slug'])?>)</span><?php endif; ?></td>
+<td><?php if ($p['logged']): ?><?=htmlspecialchars($p['email'])?><?php else: ?><span class="warn"><?=t('Not signed in', 'Sin iniciar sesión')?></span><?php endif; ?></td>
+<td><?=$p['plan'] !== '' ? htmlspecialchars(ucfirst($p['plan'])) : '&mdash;'?></td>
+<td><?php if ($p['active']): ?><span class="ok"><?=t('Yes', 'Sí')?></span><?php else: ?><span class="dim-text"><?=t('No', 'No')?></span><?php endif; ?></td>
+<td>
+<?php if (!$p['active']): ?>
+<form method="POST" action="/update.php" target="progressFrame" style="display:inline;">
+<input type="hidden" name="#command" value="<?=$profiles_script?>">
+<input type="hidden" name="#arg[0]" value="activate">
+<input type="hidden" name="#arg[1]" value="<?=htmlspecialchars($p['slug'])?>">
+<input type="submit" value="<?=t('Use this one', 'Usar esta')?>">
+</form>
+<?php endif; ?>
+<?php if ($p['slug'] !== 'default' && !$p['active']): ?>
+<form method="POST" action="/update.php" target="progressFrame" style="display:inline;">
+<input type="hidden" name="#command" value="<?=$profiles_script?>">
+<input type="hidden" name="#arg[0]" value="remove">
+<input type="hidden" name="#arg[1]" value="<?=htmlspecialchars($p['slug'])?>">
+<input type="submit" value="<?=t('Remove', 'Eliminar')?>">
+</form>
+<?php endif; ?>
+</td>
+</tr>
+<?php endforeach; ?>
+</table>
+</dd>
+</dl>
+<blockquote class="inline_help"><?=t(
+    'Removing an account only takes it off this list; its folder inside appdata is left alone, so nothing is lost by accident. Switching accounts restarts Remote Control if it is running, and terminals you already have open keep the previous account until you start a new one.',
+    'Eliminar una cuenta solo la quita de esta lista; su carpeta dentro de appdata se deja intacta, así que no se pierde nada por accidente. Cambiar de cuenta reinicia el Control Remoto si está corriendo, y las terminales que ya tengas abiertas siguen con la cuenta anterior hasta que abras una nueva.'
+)?></blockquote>
+
+<form method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#command" value="<?=$profiles_script?>">
+<input type="hidden" name="#arg[0]" value="add">
+<dl>
+<dt><?=t('Add an account:', 'Añadir una cuenta:')?></dt>
+<dd>
+<input type="text" name="#arg[1]" placeholder="<?=t('short name', 'nombre corto')?>" class="narrow">
+<input type="text" name="#arg[2]" placeholder="<?=t('label shown here', 'etiqueta que se ve aquí')?>" class="narrow">
+</dd>
+</dl>
+<blockquote class="inline_help"><?=t(
+    'The short name is used for the folder that holds this account, so it takes lowercase letters, digits and underscores only. The label is free text and is what you see in the table above. Creating an account does not sign it in yet.',
+    'El nombre corto se usa para la carpeta que guarda esta cuenta, así que admite solo minúsculas, dígitos y guiones bajos. La etiqueta es texto libre y es lo que se ve en la tabla de arriba. Crear una cuenta todavía no inicia sesión en ella.'
+)?></blockquote>
+<input type="submit" value="<?=t('Add', 'Añadir')?>">
+</form>
+
+<form method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#command" value="<?=$profiles_script?>">
+<input type="hidden" name="#arg[0]" value="refresh">
+<input type="submit" value="<?=t('Refresh account details', 'Actualizar datos de las cuentas')?>">
+</form>
+<?php endif; ?>
 </div>
 
 <div class="claude-box">
@@ -2050,13 +2615,18 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.08.31.5 has been installed!"
+    echo " Claude Code plugin v2026.08.31.7 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
     echo "-----------------------------------------------------------"
     echo ""
 fi
+
+# Every install and update, not just the first one: keeps /usr/local/bin/claude
+# pointing at the current launcher so a new version takes effect without
+# waiting for a reboot.
+/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh launcher
 ]]>
 </INLINE>
 </FILE>
