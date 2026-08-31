@@ -73,6 +73,36 @@ claim of authorship over the base plugin.
   persists workspace trust for a home directory. Includes session history, reconnect-to-any-past
   session, and auto-recovery if a session gets archived on the claude.ai side.
 
+- **Live resource usage**: the Settings page shows the CPU and memory Claude Code is actually
+  using on this server — the Remote Control bridge, the session worker it spawns, and any
+  interactive `claude` in a terminal — refreshed every few seconds while the page is open, with a
+  per-process breakdown. CPU is a real between-polls delta read from `/proc`, not `ps`'s `pcpu`,
+  which is a lifetime average and reads ~99% for a session that has been idle for weeks.
+- **Plan usage**: the page reports your Claude plan's 5-hour and weekly windows, any per-model
+  weekly window, and your credit balance and spend if the account has extra usage enabled, each
+  with a countdown to when it resets. It reads Anthropic's own usage endpoint — the one the CLI's
+  `/usage` command uses — which is a metadata endpoint: **it runs no inference and costs no
+  tokens**. Credentials are never rewritten by the page, and the token is never passed on a
+  command line where `ps` could read it.
+- **A tabbed Settings page**: Dashboard, Accounts, Remote Control and Settings, instead of one
+  long scroll. The Dashboard carries the state — versions, array, resources, plan usage — and
+  everything you configure lives under its own tab.
+- **Several Claude accounts on one server**, off by default. Turn it on under Accounts, add an
+  account, and pick which one the server uses; the choice applies to Remote Control and to
+  `claude` in a terminal alike. **You choose whether the accounts share the agent's memory,
+  settings and MCP servers, or whether each account keeps its own** — sharing is the default, so
+  adding a second account doesn't leave you starting from nothing. Several accounts can be signed
+  in and connected at the same time.
+- **Signing in happens in the browser**, with no terminal: the page opens the authorisation URL,
+  you paste back the code it gives you, and that's it. The one-time code is posted, never logged.
+- **Everything is reported per account** once you have more than one: plan usage and limits, sign-in
+  state, CPU and memory (attributed by reading which account each process actually selected), and
+  Remote Control — each account runs its own supervised session, with its own directory, log,
+  session id and history, and they can be connected simultaneously.
+- **Your existing login is never touched.** It stays exactly where it is as the main account,
+  extra accounts get their own folder beside it, and removing an account deletes its credentials
+  and settings and nothing else — the agent's memory and session transcripts are always preserved.
+
 ### ✅ Compatibility
 
 Requires Unraid **6.12.0+** (inherited from upstream). Verified on this fork's own NAS running
@@ -191,6 +221,38 @@ claro al autor original, sin reclamar autoría del plugin base.
   `/root/claude-remote-control` en vez de `/root` directamente, porque Unraid nunca recuerda la
   confianza del workspace para un directorio home. Incluye historial de sesiones, reconexión a
   cualquier sesión pasada, y recuperación automática si una sesión queda archivada en claude.ai.
+
+- **Consumo de recursos en vivo**: la página de ajustes muestra la CPU y la memoria que Claude Code
+  consume de verdad en este servidor — el puente de Control Remoto, el proceso de sesión que lanza
+  y cualquier `claude` interactivo que tengas en una terminal — actualizado cada pocos segundos
+  mientras la página esté abierta, con el desglose por proceso. La CPU es una diferencia real entre
+  medidas leída de `/proc`, no el `pcpu` de `ps`, que es una media de toda la vida del proceso y
+  marca ~99% en una sesión que lleva semanas parada.
+- **Uso del plan**: la página informa de las ventanas de 5 horas y semanal de tu plan de Claude, de
+  las ventanas semanales por modelo si las hay, y del saldo y lo gastado si la cuenta tiene uso
+  adicional activado, cada uno con la cuenta atrás hasta que se reinicia. Lee el propio endpoint de
+  uso de Anthropic, el mismo que usa el comando `/usage` del CLI, que es un endpoint de metadatos:
+  **no ejecuta inferencia y no consume tokens**. La página nunca reescribe las credenciales, y el
+  token jamás viaja en una línea de comandos donde `ps` pudiera leerlo.
+- **Página de ajustes con pestañas**: Panel, Cuentas, Control Remoto y Ajustes, en vez de un único
+  scroll interminable. El Panel reúne el estado — versiones, array, recursos, uso del plan — y todo
+  lo que se configura vive en su propia pestaña.
+- **Varias cuentas de Claude en un mismo servidor**, desactivado por defecto. Lo activas en Cuentas,
+  añades una cuenta y eliges cuál usa el servidor; esa elección vale igual para el Control Remoto y
+  para el `claude` de la terminal. **Tú decides si las cuentas comparten la memoria del agente, los
+  ajustes y los servidores MCP, o si cada una tiene los suyos** — compartir es lo predeterminado,
+  así que añadir una segunda cuenta no te deja empezando de cero. Puede haber varias cuentas con
+  sesión iniciada y conectadas a la vez.
+- **Iniciar sesión se hace en el navegador**, sin terminal: la página abre la URL de autorización,
+  pegas el código que te da y ya está. El código de un solo uso viaja por POST y nunca se escribe
+  en ningún log.
+- **Todo se informa por cuenta** en cuanto tienes más de una: uso y límites del plan, estado de la
+  sesión, CPU y memoria (atribuidas leyendo qué cuenta ha seleccionado realmente cada proceso) y el
+  Control Remoto — cada cuenta ejecuta su propia sesión supervisada, con su directorio, su log, su
+  id de sesión y su histórico, y pueden estar conectadas a la vez.
+- **Tu sesión actual no se toca jamás.** Se queda exactamente donde está como cuenta principal, las
+  cuentas nuevas van a su propia carpeta al lado, y eliminar una cuenta borra sus credenciales y
+  sus ajustes y nada más: la memoria del agente y los transcripts de sesión se conservan siempre.
 
 ### ✅ Compatibilidad
 

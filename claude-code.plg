@@ -1,13 +1,13 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.09.01.6"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.09.01.7"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
-###2026.09.01.6
+###2026.09.01.7
 - Several Claude accounts on one server. Turn on "Several accounts" under Claude accounts on the Settings page, add an account, and pick which one this server uses. The account you pick is used by Remote Control and by claude in the terminal.
 - You choose whether the accounts share the agent memory, settings and MCP servers, or whether each account keeps its own. Sharing is the default, so adding a second account does not leave you starting from nothing.
 - Nothing about the login you already have is moved or rewritten: it stays exactly where it is as the main account, extra accounts get their own folder beside it, and removing an account leaves its folder untouched unless you ask for it to be deleted.
@@ -359,22 +359,24 @@ UvoAevLz9r8oLdHO7/QE9Ce+s7W1u/t/qdjd3dq6k9Af0DifAfkfT+rKBNGKAAAAAElFTkSuQmCC
      description, falling back to a bare "**claude-code**" if this is
      missing) — separate from this repo's own top-level README.md. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/README.md" Mode="0644">
-<SHA256>678bf46ace835698ab0137320129c7597d67cdf5c2752c0dcbe185faa0e95920</SHA256>
+<SHA256>5c6b2edc08dd9e2ba0397685559292d7085d713de0181e132bc4b1e1fda3eaf5</SHA256>
 <INLINE>
 <![CDATA[
 **Claude Code Remote Control**
 
 AI-powered coding assistant CLI from Anthropic, installed on Unraid with persistent
 authentication across reboots. Run `claude` from the Unraid terminal, or drive a session from
-claude.ai/code or the Claude mobile app using Remote Control. Configure and view live logs
-from Settings > Utilities > Claude Code.
+claude.ai/code or the Claude mobile app using Remote Control. Supports several Claude accounts
+at once, signed in from the browser, with plan usage and limits reported per account. Configure
+it all from Settings > Utilities > Claude Code.
 
 ---
 
 Asistente de programación con IA de Anthropic, instalado en Unraid con autenticación
 persistente entre reinicios. Ejecuta `claude` desde la terminal de Unraid, o controla una sesión
-desde claude.ai/code o la app móvil de Claude con Control Remoto. Configúralo y mira los logs
-en vivo desde Settings > Utilities > Claude Code.
+desde claude.ai/code o la app móvil de Claude con Control Remoto. Admite varias cuentas de Claude
+a la vez, con inicio de sesión desde el navegador y el uso y los límites del plan por cuenta.
+Configúralo todo desde Settings > Utilities > Claude Code.
 ]]>
 </INLINE>
 </FILE>
@@ -3497,7 +3499,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.09.01.6 has been installed!"
+    echo " Claude Code plugin v2026.09.01.7 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
