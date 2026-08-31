@@ -1,12 +1,38 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.08.31"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.08.31.2"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.08.31.2
+- v2.2.1: The live CPU/memory figures moved up into the status bar at the top
+  of the page, next to the rest of the state, so the headline numbers are
+  visible without scrolling. The per-process breakdown stays further down.
+- v2.2.1: "Check for Updates" and "Reinstall" now open a popup that streams
+  the installer's output live, line by line, with a Close button when it
+  finishes. Until now they ran into Unraid's thin progress strip, which showed
+  almost nothing, so there was no way to tell what the script actually did or
+  whether it had failed short of digging through the log afterwards.
+- v2.2.1: The one-time migration of an existing /root/.claude into appdata no
+  longer deletes the original unless the copy actually succeeded. It used to
+  discard the copy's exit status and remove the source either way, so a copy
+  interrupted halfway -- full disk, appdata share dropping out -- destroyed the
+  only remaining copy of the authentication, session state and agent memory it
+  was supposed to be preserving.
+- v2.2.1: Fixed Update and Reinstall misreporting a healthy install. Both run
+  with a minimal PATH that excludes the very directories Claude Code is
+  installed into, so "is claude installed" always answered no: Reinstall ended
+  with a bogus "Installation Incomplete" even though it had just succeeded, and
+  Update refused to run at all, telling you to reinstall a Claude Code that was
+  already there. Found because the new popup finally made this output visible.
+- v2.2.1: Uninstalling the plugin now stops Remote Control first. It used to
+  leave the supervisor running as an orphan, respawning "claude remote-control"
+  every 5 seconds from a plugin whose files had already been deleted, and the
+  only way to stop it was a reboot. Appdata and config are still preserved on
+  removal, exactly as before.
 ###2026.08.31
 - v2.2.0: The Settings page now shows live CPU and memory usage for Claude Code
   on this server: the Remote Control bridge, the session worker it starts, and
@@ -341,12 +367,20 @@ fi
 
 <!-- Install/setup script -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh" Mode="0755">
-<SHA256>aee5ce9870e97eda8cb856ee2440bdee799b1b72fafb6cb55baa059b4ea87600</SHA256>
+<SHA256>fa5e220e0bb3288e9b2f529259f74759093b8784409ced1adc569f8b1931a127</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
 
 # Don't use set -e - we want to continue even if some steps fail
+
+# Scripts launched from the web UI inherit a minimal PATH from emhttpd --
+# /bin:/sbin:/usr/bin:/usr/sbin -- which contains neither /usr/local/bin
+# (where ensure_symlink puts the launcher) nor /root/.local/bin (where the
+# native installer puts the binary). Without this, "command -v claude" below
+# fails on a perfectly working install and this script ends with a bogus
+# "Installation Incomplete".
+export PATH="/usr/local/bin:/root/.local/bin:$PATH"
 
 PLUGIN_CFG="/boot/config/plugins/claude-code/claude-code.cfg"
 CLAUDE_CONFIG_RUNTIME="/root/.claude"
@@ -533,12 +567,28 @@ setup_persistence() {
             # Merge: appdata takes precedence, but copy any missing files from runtime
             # Use -a (archive) -n (no clobber); dotglob ensures hidden files are included
             shopt -s dotglob
-            cp -an "$CLAUDE_CONFIG_RUNTIME"/* "$APPDATA_PATH/.claude/" 2>/dev/null || true
+            cp -an "$CLAUDE_CONFIG_RUNTIME"/* "$APPDATA_PATH/.claude/"
+            migrate_rc=$?
             shopt -u dotglob
+            # Only delete the source once the copy has definitely succeeded.
+            # This tree holds authentication, session state and agent memory;
+            # the previous version discarded the copy's exit status and removed
+            # it unconditionally, so a copy that failed halfway (full disk,
+            # appdata share dropping out mid-migration) destroyed the only
+            # remaining copy of all of it.
+            if [ $migrate_rc -ne 0 ]; then
+                echo "WARNING: could not merge $CLAUDE_CONFIG_RUNTIME into $APPDATA_PATH/.claude."
+                echo "Nothing was deleted -- your existing config is untouched at $CLAUDE_CONFIG_RUNTIME."
+                return 1
+            fi
+            rm -rf "$CLAUDE_CONFIG_RUNTIME"
         else
-            mv "$CLAUDE_CONFIG_RUNTIME" "$APPDATA_PATH/.claude"
+            if ! mv "$CLAUDE_CONFIG_RUNTIME" "$APPDATA_PATH/.claude"; then
+                echo "WARNING: could not move $CLAUDE_CONFIG_RUNTIME to $APPDATA_PATH/.claude."
+                echo "Nothing was deleted -- your existing config is untouched."
+                return 1
+            fi
         fi
-        rm -rf "$CLAUDE_CONFIG_RUNTIME"
     fi
 
     # Create .claude directory in appdata if needed
@@ -637,10 +687,16 @@ echo "=== Manual Reinstall $(date) ===" >> "$LOGFILE"
      restore_cached_binary() restores from on every boot, so without
      re-caching here, any update would silently be reverted on next reboot. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/update-claude.sh" Mode="0755">
-<SHA256>d16b0307c79bba29bf255593954b4ff05305215e32079da311123a24ac68ec9a</SHA256>
+<SHA256>ead54c1fe9d73458adca7da0828211bc111f68aa1b7ee43dd370261cc7943deb</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
+# See install-claude.sh: the web UI runs this with a minimal PATH that has
+# neither /usr/local/bin nor /root/.local/bin on it, so without this the
+# "is claude installed" check below always failed and this script exited
+# immediately telling you to reinstall a Claude Code that was already there.
+export PATH="/usr/local/bin:/root/.local/bin:$PATH"
+
 LOGFILE="/var/log/claude-code-install.log"
 exec > >(tee -a "$LOGFILE") 2>&1
 echo "=== Manual Update $(date) ==="
@@ -1031,7 +1087,7 @@ echo json_encode([
 
 <!-- Web UI -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/claude-code.page">
-<SHA256>0bab75aefb5fca86e1b3f986b927388a5a3604abe956a404046e123612b2798a</SHA256>
+<SHA256>954b180fb68bf5a165f9b7b7feac1fd3cd251e2c86b22b027cc230fad91124b8</SHA256>
 <INLINE>
 <![CDATA[
 Menu="Utilities"
@@ -1263,6 +1319,11 @@ Claude Code: <span class="<?=$claude_installed ? 'ok' : 'error'?>"><?=$claude_in
 <?=t('Auth', 'Auth')?>: <span class="<?=$has_auth ? 'ok' : 'warn'?>"><?=$has_auth ? t('Configured', 'Configurada') : t('Not authenticated', 'Sin autenticar')?></span>
 <span class="sep">&middot;</span>
 Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : t('Not configured', 'No configurado')?></span>
+<span class="sep">&middot;</span>
+<!-- Filled in by the poller defined with the Resource usage box further down.
+     The headline figures live up here so they are visible without scrolling;
+     the per-process breakdown stays in that box. -->
+<span id="claude-stats-bar"><span class="dim-text"><?=t('measuring...', 'midiendo...')?></span></span>
 </div>
 
 <div class="claude-box">
@@ -1376,11 +1437,11 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 <div class="claude-box">
 <h4><?=t('Resource usage', 'Consumo de recursos')?></h4>
 <p><?=t(
-    'Live CPU and memory used by Claude Code on this server: the Remote Control bridge, the session worker it starts, and any interactive claude you are running in a terminal. Refreshes every few seconds while this page is open.',
-    'CPU y memoria que consume Claude Code en este servidor en tiempo real: el puente de Control Remoto, el proceso de sesión que lanza, y cualquier claude interactivo que tengas abierto en una terminal. Se actualiza cada pocos segundos mientras esta página esté abierta.'
+    'Live CPU and memory used by Claude Code on this server: the Remote Control bridge, the session worker it starts, and any interactive claude you are running in a terminal. Refreshes every few seconds while this page is open. The totals are in the status bar at the top of this page; the breakdown per process is below.',
+    'CPU y memoria que consume Claude Code en este servidor en tiempo real: el puente de Control Remoto, el proceso de sesión que lanza, y cualquier claude interactivo que tengas abierto en una terminal. Se actualiza cada pocos segundos mientras esta página esté abierta. Los totales están en la barra de estado arriba del todo; aquí abajo tienes el desglose por proceso.'
 )?></p>
 
-<div class="claude-status" id="claude-stats-bar"><?=t('Measuring...', 'Midiendo...')?></div>
+<p id="claude-stats-idle" style="display:none;" class="dim-text"><?=t('Claude Code is not running.', 'Claude Code no está corriendo.')?></p>
 
 <table class="claude-history" id="claude-stats-table" style="display:none;">
 <thead><tr><th>PID</th><th>CPU</th><th>RAM</th><th><?=t('Process', 'Proceso')?></th></tr></thead>
@@ -1403,7 +1464,10 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
       'procs'     => t('Processes', 'Procesos'),
       'cores'     => t('cores', 'núcleos'),
   ])?>;
+  // The totals render into the page's top status bar; only the per-process
+  // table and its "nothing running" placeholder live in this box.
   var bar = document.getElementById('claude-stats-bar');
+  var idle = document.getElementById('claude-stats-idle');
   var table = document.getElementById('claude-stats-table');
   var tbody = table.getElementsByTagName('tbody')[0];
 
@@ -1419,8 +1483,10 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
     if (!d.count) {
       bar.innerHTML = '<span class="warn">' + esc(L.idle) + '</span>';
       table.style.display = 'none';
+      idle.style.display = '';
       return;
     }
+    idle.style.display = 'none';
     // The very first poll has no earlier sample to diff against, so there is
     // no CPU figure to show yet -- only from the second poll onwards.
     var cpu = d.have_delta ? d.cpu_pct.toFixed(1) + '%' : L.measuring;
@@ -1506,19 +1572,21 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 <div class="claude-box">
 <h4><?=t('Update Claude Code', 'Actualizar Claude Code')?></h4>
 <p><?=t('Checks with Anthropic for a newer Claude Code release and installs it if available. Use this to get new versions -- once Claude Code is installed, Reinstall below will not fetch a newer one on its own.', 'Comprueba si hay una versión más reciente de Claude Code y la instala si la hay. Usa esto para obtener nuevas versiones -- una vez instalado, Reinstalar no busca una versión más nueva por sí solo.')?></p>
-<form method="POST" action="/update.php" target="progressFrame">
-<input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/update-claude.sh">
-<input type="submit" value="<?=t('Check for Updates', 'Buscar actualizaciones')?>">
-</form>
+<!-- openBox streams the script's output into a modal, line by line, and adds a
+     Close button when it exits; closing it reloads this page so the version
+     shown above is the one that just got installed. The alternative Unraid
+     offers, POSTing to update.php with target="progressFrame", shows the
+     output in a one-line strip at the bottom of the window, where an
+     installer's output is effectively unreadable. -->
+<input type="button" value="<?=t('Check for Updates', 'Buscar actualizaciones')?>"
+       onclick="openBox('/plugins/claude-code/scripts/update-claude.sh','<?=t('Updating Claude Code', 'Actualizando Claude Code')?>',600,900,true);">
 </div>
 
 <div class="claude-box">
 <h4><?=t('Reinstall Claude Code', 'Reinstalar Claude Code')?></h4>
 <p><?=t('Fixes a broken setup (missing symlink, stuck config) by re-running the installer. Does not check for a newer version -- use Update above for that.', 'Arregla una instalación rota (symlink perdido, configuración atascada) volviendo a ejecutar el instalador. No comprueba si hay una versión nueva -- usa Actualizar arriba para eso.')?></p>
-<form method="POST" action="/update.php" target="progressFrame">
-<input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/reinstall-and-log.sh">
-<input type="submit" value="<?=t('Reinstall', 'Reinstalar')?>">
-</form>
+<input type="button" value="<?=t('Reinstall', 'Reinstalar')?>"
+       onclick="openBox('/plugins/claude-code/scripts/reinstall-and-log.sh','<?=t('Reinstalling Claude Code', 'Reinstalando Claude Code')?>',600,900,true);">
 </div>
 ]]>
 </INLINE>
@@ -1628,7 +1696,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.08.31 has been installed!"
+    echo " Claude Code plugin v2026.08.31.2 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
@@ -1644,6 +1712,27 @@ fi
 <INLINE>
 <![CDATA[
 echo "Removing Claude Code plugin..."
+
+# Stop Remote Control *first*, while the script that knows how to do it still
+# exists. Skipping this used to leave the supervisor running as an orphan: it
+# respawns "claude remote-control" every 5s and its stop path had just been
+# deleted along with the plugin, so only a reboot got rid of it.
+RC_SCRIPT="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh"
+if [ -x "$RC_SCRIPT" ]; then
+    "$RC_SCRIPT" stop 2>/dev/null || true
+fi
+# Same teardown inline, in case the plugin tree was already gone (a failed or
+# repeated removal) and the branch above never ran. All of these live in
+# /var/run -- nothing here touches config or appdata.
+rm -f /var/run/claude-remote-control.enabled /var/run/claude-remote-control.pin
+if [ -f /var/run/claude-remote-control.pid ]; then
+    kill "$(cat /var/run/claude-remote-control.pid)" 2>/dev/null || true
+    rm -f /var/run/claude-remote-control.pid
+fi
+# The supervisor runs as "bash .../remote-control.sh _run" and forks subshells
+# and a session watcher under it, none of which the pidfile covers.
+pkill -f "remote-control.sh _run" 2>/dev/null || true
+pkill -f "claude remote-control" 2>/dev/null || true
 
 # Remove startup entry from go file
 sed -i '/# Start Claude Code/d' /boot/config/go 2>/dev/null || true
