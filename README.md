@@ -84,9 +84,22 @@ claim of authorship over the base plugin.
   `/usage` command uses — which is a metadata endpoint: **it runs no inference and costs no
   tokens**. Credentials are never rewritten by the page, and the token is never passed on a
   command line where `ps` could read it.
-- **A tabbed Settings page**: Dashboard, Accounts, Remote Control and Settings, instead of one
+- **A tabbed Settings page**: Dashboard, Accounts, Remote Control, Claude Code Config and Settings, instead of one
   long scroll. The Dashboard carries the state — versions, array, resources, plan usage — and
   everything you configure lives under its own tab.
+- **Claude Code's own configuration, from the browser**: the Claude Code Config tab edits the
+  `settings.json` Claude Code reads — model and fallback models, effort level, output style,
+  extended thinking, response language, theme, editor mode, the permission mode and the
+  allow/ask/deny rules, Remote Control at session start, environment variables, transcript
+  retention, auto memory, hooks and the update channel — with a JSON editor covering every
+  remaining key in Anthropic's settings reference. Saving a field leaves the rest of the file
+  untouched and keeps the previous version beside it as `settings.json.bak`.
+- **Plan figures that don't disappear**: Claude Code renews its access token while it is in use, so
+  an account left idle for hours can no longer refresh its usage. The plan line then shows the last
+  reading that worked together with the time it was taken, instead of going blank, and every reset
+  countdown also gives the date and time it lands on. The line also says whether the subscription
+  is active and when it renews next (the monthly anniversary of the start date — Anthropic reports
+  that date, not the billing one, so it is marked as an estimate).
 - **Several Claude accounts on one server**, off by default. Turn it on under Accounts, add an
   account, and pick which one the server uses; the choice applies to Remote Control and to
   `claude` in a terminal alike. **You choose whether the accounts share the agent's memory,
@@ -234,9 +247,23 @@ claro al autor original, sin reclamar autoría del plugin base.
   uso de Anthropic, el mismo que usa el comando `/usage` del CLI, que es un endpoint de metadatos:
   **no ejecuta inferencia y no consume tokens**. La página nunca reescribe las credenciales, y el
   token jamás viaja en una línea de comandos donde `ps` pudiera leerlo.
-- **Página de ajustes con pestañas**: Panel, Cuentas, Control Remoto y Ajustes, en vez de un único
+- **Página de ajustes con pestañas**: Panel, Cuentas, Control Remoto, Config. de Claude y Ajustes, en vez de un único
   scroll interminable. El Panel reúne el estado — versiones, array, recursos, uso del plan — y todo
   lo que se configura vive en su propia pestaña.
+- **La configuración del propio Claude Code, desde el navegador**: la pestaña Config. de Claude
+  edita el `settings.json` que lee Claude Code — modelo y modelos de respaldo, nivel de esfuerzo,
+  estilo de salida, pensamiento extendido, idioma de las respuestas, tema, modo de edición, el modo
+  de permisos y las reglas de permitir/preguntar/denegar, el Control Remoto al iniciar sesión, las
+  variables de entorno, cuánto se conservan las transcripciones, la memoria automática, los hooks y
+  el canal de actualización — más un editor JSON que cubre todas las demás claves de la referencia
+  de ajustes de Anthropic. Guardar un campo no toca el resto del archivo y deja la versión anterior
+  al lado como `settings.json.bak`.
+- **Las cifras del plan ya no desaparecen**: Claude Code renueva su token de acceso mientras se usa,
+  así que una cuenta que lleva horas parada ya no puede refrescar su consumo. La línea del plan
+  muestra entonces la última lectura válida junto con la hora a la que se tomó, en vez de quedarse
+  en blanco, y cada cuenta atrás indica además la fecha y hora exactas en las que cae. La línea dice
+  también si la suscripción está activa y cuándo renueva (el aniversario mensual de la fecha de
+  alta: Anthropic informa de esa fecha, no de la de facturación, así que se marca como estimada).
 - **Varias cuentas de Claude en un mismo servidor**, desactivado por defecto. Lo activas en Cuentas,
   añades una cuenta y eliges cuál usa el servidor; esa elección vale igual para el Control Remoto y
   para el `claude` de la terminal. **Tú decides si las cuentas comparten la memoria del agente, los

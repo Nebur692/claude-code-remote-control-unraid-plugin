@@ -1,12 +1,46 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.09.01.7"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.09.04.2"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.09.04.2
+- The plan usage line no longer goes blank on an account that has been idle.
+  Claude Code renews its access token while it is being used, so after a few
+  quiet hours the figures could not be refreshed and the line said only that
+  the data had expired, exactly when you were asking it where you stood. It
+  now keeps the last reading that worked and shows it with the time it was
+  taken, so there is always a number on screen and always a date next to it.
+- Every reset countdown now also gives the date and time it lands on, for
+  example "resets in 2 h 15 min - 4 Sep, 23:10", instead of a countdown you
+  had to add to the clock yourself.
+- The plan usage line now says whether the subscription is active and when it
+  renews next. Anthropic reports when a subscription started, not its billing
+  date, so the renewal shown is the monthly anniversary of that date and is
+  marked with a tilde; hovering over it explains this.
+- New "Claude Code Config" tab: Claude Code's own settings.json, edited from
+  the browser instead of by hand in a terminal. Fields for the model and
+  fallback models, effort level, output style, extended thinking, response
+  language, theme, editor mode, the permission mode and the allow/ask/deny
+  rules, Remote Control at session start, environment variables, transcript
+  retention, auto memory, hooks and the update channel, plus a JSON editor
+  covering every remaining key in Anthropic's settings reference. Saving a
+  field never rewrites the rest of the file, and the version being replaced is
+  kept beside it as settings.json.bak. With separate accounts each account has
+  its own file and the tab has a selector; with shared accounts there is one
+  file and the tab says so.
+- Fixed "Check for Updates" announcing a version it had not installed. Copying
+  over the Claude binary fails with "Text file busy" while a claude process is
+  running, which on this plugin is the normal case, because Remote Control
+  keeps one up around the clock. The copy failed, the script reported the new
+  version anyway, and the status bar kept showing the old one. The new version
+  is now put in place with a rename, which works while the old one is running,
+  and a failure is now reported as a failure. Restoring the cached binary at
+  boot had the same problem and got the same fix.
+
 ###2026.09.01.7
 - Several Claude accounts on one server. Turn on "Several accounts" under Claude accounts on the Settings page, add an account, and pick which one this server uses. The account you pick is used by Remote Control and by claude in the terminal.
 - You choose whether the accounts share the agent memory, settings and MCP servers, or whether each account keeps its own. Sharing is the default, so adding a second account does not leave you starting from nothing.
@@ -394,7 +428,7 @@ fi
 
 <!-- Install/setup script -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh" Mode="0755">
-<SHA256>f40dc68fa4a0513165454e0c5d1db526e2a9989bfaf59602c687b748cba1d116</SHA256>
+<SHA256>120731e684c43464976d106b235c7d5152642f9cd57bb40eaf1ef0360c917ed4</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -498,14 +532,34 @@ ensure_symlink() {
     return 0
 }
 
+# Copying over a binary something is currently executing fails with "Text file
+# busy", which on this server is the normal case rather than the exception:
+# Remote Control keeps a claude running. Writing beside the target and renaming
+# over it always works -- rename swaps the directory entry and processes
+# already running keep the old inode -- and the exit status is what decides
+# whether the caller may report success. Same helper as in update-claude.sh.
+apply_binary() {
+    local src="$1" dst="$2" tmp="$2.new.$$"
+    if ! cp "$src" "$tmp"; then rm -f "$tmp"; return 1; fi
+    if ! chmod +x "$tmp"; then rm -f "$tmp"; return 1; fi
+    if ! mv -f "$tmp" "$dst"; then rm -f "$tmp"; return 1; fi
+    return 0
+}
+
 restore_cached_binary() {
     # Restore binary from appdata cache (avoids re-downloading on every boot)
     if [ -f "$CACHED_BINARY" ]; then
         echo "Restoring Claude Code from cache..."
         mkdir -p /root/.local/bin
-        cp "$CACHED_BINARY" /root/.local/bin/claude
-        chmod +x /root/.local/bin/claude
-        return 0
+        if cmp -s "$CACHED_BINARY" /root/.local/bin/claude; then
+            echo "Cached binary is already the one installed."
+            return 0
+        fi
+        if apply_binary "$CACHED_BINARY" /root/.local/bin/claude; then
+            return 0
+        fi
+        echo "Could not write /root/.local/bin/claude from the cache."
+        return 1
     fi
     return 1
 }
@@ -514,8 +568,11 @@ cache_binary() {
     # Cache the binary to appdata so it survives reboots
     if [ -x /root/.local/bin/claude ]; then
         mkdir -p "$APPDATA_PATH/bin"
-        cp /root/.local/bin/claude "$CACHED_BINARY"
-        echo "Cached Claude binary for future boots."
+        if apply_binary /root/.local/bin/claude "$CACHED_BINARY"; then
+            echo "Cached Claude binary for future boots."
+        else
+            echo "WARNING: could not cache the Claude binary to $CACHED_BINARY."
+        fi
     fi
 }
 
@@ -755,7 +812,7 @@ echo "=== Manual Reinstall $(date) ===" >> "$LOGFILE"
      restore_cached_binary() restores from on every boot, so without
      re-caching here, any update would silently be reverted on next reboot. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/update-claude.sh" Mode="0755">
-<SHA256>ead54c1fe9d73458adca7da0828211bc111f68aa1b7ee43dd370261cc7943deb</SHA256>
+<SHA256>2e3b744466a078c4a0f005270394a5e6049817f43566fff8ebb3e1dd9b6c8de4</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -775,12 +832,31 @@ PLUGIN_CFG="/boot/config/plugins/claude-code/claude-code.cfg"
 RUNTIME_BIN="/root/.local/bin/claude"
 VERSIONS_DIR="/root/.local/share/claude/versions"
 
+# Copying over a binary that some process is currently executing fails with
+# "Text file busy" (ETXTBSY), and on this plugin that is the normal case, not
+# the exception: Remote Control keeps a claude running around the clock. A
+# plain cp therefore failed every time while the script still announced the
+# new version, so "Applied version 2.1.259" and "Claude Code: 2.1.251" sat on
+# the same screen and every update after the first silently did nothing.
+#
+# Writing next to the target and renaming over it works regardless: rename
+# only replaces the directory entry, and a process already running keeps the
+# old inode until it restarts. The exit status decides what gets reported.
+apply_binary() {
+    local src="$1" dst="$2" tmp="$2.new.$$"
+    if ! cp "$src" "$tmp" 2>&1; then rm -f "$tmp"; return 1; fi
+    if ! chmod +x "$tmp"; then rm -f "$tmp"; return 1; fi
+    if ! mv -f "$tmp" "$dst"; then rm -f "$tmp"; return 1; fi
+    return 0
+}
+
 if ! command -v claude &> /dev/null; then
     echo "Claude Code is not installed yet -- use Reinstall first."
     exit 1
 fi
 
-echo "Current version: $(claude --version 2>/dev/null)"
+before=$(claude --version 2>/dev/null)
+echo "Current version: $before"
 echo "Checking for updates..."
 claude update
 
@@ -790,25 +866,54 @@ claude update
 # from the appdata cache on every boot), so the CLI leaves it untouched
 # and prints a warning -- the newly downloaded version has to be applied
 # by hand below, or "Now running" would still show the old version.
+applied=""
 if [ -d "$VERSIONS_DIR" ]; then
     latest=$(ls -1 "$VERSIONS_DIR" 2>/dev/null | sort -V | tail -1)
     if [ -n "$latest" ] && [ -x "$VERSIONS_DIR/$latest" ]; then
-        cp "$VERSIONS_DIR/$latest" "$RUNTIME_BIN"
-        chmod +x "$RUNTIME_BIN"
-        echo "Applied version $latest to $RUNTIME_BIN."
+        if cmp -s "$VERSIONS_DIR/$latest" "$RUNTIME_BIN"; then
+            echo "Version $latest is already the one installed at $RUNTIME_BIN."
+            applied="$latest"
+        elif apply_binary "$VERSIONS_DIR/$latest" "$RUNTIME_BIN"; then
+            echo "Applied version $latest to $RUNTIME_BIN."
+            applied="$latest"
+        else
+            echo "ERROR: could not write $RUNTIME_BIN, so version $latest was NOT applied."
+            echo "       The version below is still the old one. Try again, and if it keeps"
+            echo "       failing check that /root has free space and that no other update is"
+            echo "       running at the same time."
+        fi
     fi
 fi
 
-echo "Now running: $(claude --version 2>/dev/null)"
+now=$("$RUNTIME_BIN" --version 2>/dev/null)
+echo "Now running: $now"
+
+# Say it plainly when the version on disk is not the one just downloaded,
+# instead of leaving the reader to compare two numbers several lines apart.
+if [ -n "$applied" ] && [ -n "$now" ] && [ "${now%% *}" != "$applied" ]; then
+    echo "WARNING: expected $applied but $RUNTIME_BIN reports ${now%% *}."
+fi
 
 if [ -n "$APPDATA_PATH" ]; then
     if [ -x "$RUNTIME_BIN" ]; then
         mkdir -p "$APPDATA_PATH/bin"
-        cp "$RUNTIME_BIN" "$APPDATA_PATH/bin/claude"
-        echo "Cached the updated binary to $APPDATA_PATH/bin -- this version will survive the next reboot."
+        if apply_binary "$RUNTIME_BIN" "$APPDATA_PATH/bin/claude"; then
+            echo "Cached the updated binary to $APPDATA_PATH/bin -- this version will survive the next reboot."
+        else
+            echo "WARNING: could not cache the binary to $APPDATA_PATH/bin -- the update applies now but may be reverted on the next reboot."
+        fi
     fi
 else
     echo "WARNING: APPDATA_PATH not set, could not cache the update -- it may be reverted on next reboot."
+fi
+
+# A rename leaves processes that were already running on the old inode: they
+# keep the previous version until they are restarted. Remote Control is the
+# one that matters here, since it normally runs for weeks.
+if [ -n "$now" ] && [ "$before" != "$now" ] && pgrep -f "claude remote-control" > /dev/null 2>&1; then
+    echo
+    echo "NOTE: Remote Control is running and is still using $before."
+    echo "      Stop it and start it again from the Remote Control tab to move it to ${now%% *}."
 fi
 ]]>
 </INLINE>
@@ -1753,7 +1858,7 @@ echo json_encode([
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-usage.php" Mode="0644">
-<SHA256>bb43089d4756ef32141101f1a80b4616f4d9ab3554422d6a8f412aff13c3d5c8</SHA256>
+<SHA256>dff74d3b93d5735c58e040bc31a3de864c9869eb52c2660f0ecd8cfffad422a8</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -1795,23 +1900,97 @@ if ($requested !== '' && is_executable($profiles_script)) {
 }
 
 $cache_file = "/var/tmp/claude-code-usage-cache-$slug.json";
-$cache_ttl  = 60;   // successful lookups
-$fail_ttl   = 30;   // failures, so a broken token doesn't hammer the API
+// The last reading that actually worked, kept apart from the cache above. The
+// access token expires after a few hours and only the CLI renews it, so an
+// account nobody has used since the morning answers "expired" and the panel
+// used to go blank exactly when it was asked what the figures were. Keeping
+// the last good reading means the page can always say where the account
+// stands, as long as it also says when that was measured.
+$last_file  = "/var/tmp/claude-code-usage-last-$slug.json";
+// Subscription details. They come from a different endpoint and change once a
+// month at most, so they get their own long cache and are kept even when a
+// later lookup fails.
+$prof_file  = "/var/tmp/claude-code-profile-$slug.json";
+$cache_ttl  = 60;     // successful lookups
+$fail_ttl   = 30;     // failures, so a broken token doesn't hammer the API
+$prof_ttl   = 21600;  // 6 h
 
-function respond($payload, $cache_file, $ttl) {
-    $payload['fetched_at'] = time();
-    $json = json_encode($payload);
+function write_json_file($file, $payload) {
     // Write via a temp file in the same directory so a concurrent poll never
-    // reads a half-written cache.
-    $tmp = $cache_file . '.' . getmypid();
-    if (@file_put_contents($tmp, $json) !== false) {
+    // reads a half-written file.
+    $tmp = $file . '.' . getmypid();
+    if (@file_put_contents($tmp, json_encode($payload)) !== false) {
         @chmod($tmp, 0600);
-        @rename($tmp, $cache_file);
+        @rename($tmp, $file);
     } else {
         @unlink($tmp);
     }
+}
+
+function read_json_file($file) {
+    if (!is_readable($file)) return null;
+    $data = json_decode((string)@file_get_contents($file), true);
+    return is_array($data) ? $data : null;
+}
+
+function respond($payload, $cache_file, $ttl, $last_file = null, $prof_file = null) {
+    $payload['fetched_at'] = time();
+
+    if (($payload['state'] ?? '') === 'ok') {
+        if ($last_file !== null && !empty($payload['windows'])) {
+            write_json_file($last_file, [
+                'windows'     => $payload['windows'],
+                'spend'       => $payload['spend'] ?? null,
+                'measured_at' => time(),
+            ]);
+        }
+    } elseif ($last_file !== null) {
+        // Nothing to report right now: fall back to the last reading that
+        // worked and mark it as what it is, so the page can show the figures
+        // with the time they were taken instead of an empty line.
+        $prev = read_json_file($last_file);
+        if ($prev && !empty($prev['windows'])) {
+            $payload['windows']     = $prev['windows'];
+            $payload['spend']       = $prev['spend'] ?? null;
+            $payload['measured_at'] = (int)($prev['measured_at'] ?? 0);
+            $payload['stale']       = true;
+        }
+    }
+
+    // Subscription details survive a failed usage lookup: they were true the
+    // last time anyone could ask, and they do not move by the hour.
+    if ($prof_file !== null && !isset($payload['subscription'])) {
+        $prof = read_json_file($prof_file);
+        if ($prof && !empty($prof['subscription'])) $payload['subscription'] = $prof['subscription'];
+    }
+
+    $json = json_encode($payload);
+    write_json_file($cache_file, $payload);
     echo $json;
     exit;
+}
+
+// Next monthly billing anniversary of a subscription that started at $start_ts.
+// The API says when the subscription began and whether it is active, but not
+// when it renews, so this is derived: the same day of the following month,
+// clamped to that month's length for a subscription started on a 29th-31st.
+// The page labels it as an estimate for exactly this reason.
+function next_monthly_anniversary($start_ts, $now) {
+    $day  = (int)date('j', $start_ts);
+    $hour = (int)date('G', $start_ts);
+    $min  = (int)date('i', $start_ts);
+    $sec  = (int)date('s', $start_ts);
+    $y = (int)date('Y', $now);
+    $m = (int)date('n', $now);
+    for ($k = 0; $k < 24; $k++) {
+        $mm = $m + $k;
+        $yy = $y + intdiv($mm - 1, 12);
+        $mo = (($mm - 1) % 12) + 1;
+        $days_in_month = (int)date('t', mktime(0, 0, 0, $mo, 1, $yy));
+        $cand = mktime($hour, $min, $sec, $mo, min($day, $days_in_month), $yy);
+        if ($cand > $now) return $cand;
+    }
+    return null;
 }
 
 // Serve from cache while it is fresh.
@@ -1865,40 +2044,45 @@ foreach ($cred_paths as $path) {
 if ($token === null) {
     // Either not logged in, or logged in with an API key rather than a Claude
     // subscription -- neither has plan windows to report.
-    respond(['state' => 'no-auth'], $cache_file, $fail_ttl);
+    respond(['state' => 'no-auth'], $cache_file, $fail_ttl, $last_file, $prof_file);
 }
 
 if ($expires_at !== null && $expires_at <= time()) {
     // Don't spend a request we know will 401.
-    respond(['state' => 'expired'], $cache_file, $fail_ttl);
+    respond(['state' => 'expired'], $cache_file, $fail_ttl, $last_file, $prof_file);
 }
 
-$ch = curl_init('https://api.anthropic.com/api/oauth/usage');
-curl_setopt_array($ch, [
-    CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_TIMEOUT        => 8,
-    CURLOPT_CONNECTTIMEOUT => 5,
-    CURLOPT_HTTPHEADER     => [
-        'Authorization: Bearer ' . $token,
-        'Content-Type: application/json',
-        'anthropic-beta: oauth-2025-04-20',
-    ],
-]);
-$body = curl_exec($ch);
-$http = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-curl_close($ch);
-unset($token);
+// Both endpoints below are read with the same headers; neither runs inference.
+function oauth_get($url, $token) {
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 8,
+        CURLOPT_CONNECTTIMEOUT => 5,
+        CURLOPT_HTTPHEADER     => [
+            'Authorization: Bearer ' . $token,
+            'Content-Type: application/json',
+            'anthropic-beta: oauth-2025-04-20',
+        ],
+    ]);
+    $body = curl_exec($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    return [$code, $body];
+}
+
+[$http, $body] = oauth_get('https://api.anthropic.com/api/oauth/usage', $token);
 
 if ($http === 401 || $http === 403) {
-    respond(['state' => 'expired'], $cache_file, $fail_ttl);
+    respond(['state' => 'expired'], $cache_file, $fail_ttl, $last_file, $prof_file);
 }
 if ($http !== 200 || !is_string($body)) {
-    respond(['state' => 'error', 'http' => $http], $cache_file, $fail_ttl);
+    respond(['state' => 'error', 'http' => $http], $cache_file, $fail_ttl, $last_file, $prof_file);
 }
 
 $data = json_decode($body, true);
 if (!is_array($data)) {
-    respond(['state' => 'error', 'http' => $http], $cache_file, $fail_ttl);
+    respond(['state' => 'error', 'http' => $http], $cache_file, $fail_ttl, $last_file, $prof_file);
 }
 
 // Turn an ISO-8601 reset timestamp into epoch seconds; null stays null.
@@ -1962,11 +2146,47 @@ if (is_array($s) && (($s['enabled'] ?? false) === true || $extra_on)) {
     ];
 }
 
+// Subscription: status and, derived from when it started, when it renews next.
+// A separate endpoint (/api/oauth/profile, the one the CLI reads for account
+// details) and a much longer cache, since none of this moves during a day.
+$subscription = null;
+$prof_cached = read_json_file($prof_file);
+if ($prof_cached && isset($prof_cached['fetched_at']) &&
+    (time() - (int)$prof_cached['fetched_at']) < $prof_ttl && !empty($prof_cached['subscription'])) {
+    $subscription = $prof_cached['subscription'];
+} else {
+    [$phttp, $pbody] = oauth_get('https://api.anthropic.com/api/oauth/profile', $token);
+    $pdata = ($phttp === 200 && is_string($pbody)) ? json_decode($pbody, true) : null;
+    if (is_array($pdata) && is_array($pdata['organization'] ?? null)) {
+        $org = $pdata['organization'];
+        $started = isset($org['subscription_created_at']) ? strtotime((string)$org['subscription_created_at']) : false;
+        $subscription = [
+            'status'   => (string)($org['subscription_status'] ?? ''),
+            'plan'     => (string)($org['organization_type'] ?? ''),
+            'billing'  => (string)($org['billing_type'] ?? ''),
+            'since'    => $started === false ? null : $started,
+            // Only a stripe subscription renews on a billing cycle; a seat in a
+            // team or an enterprise agreement does not, so no date is guessed
+            // for those.
+            'renews'   => ($started !== false && ($org['billing_type'] ?? '') === 'stripe_subscription')
+                            ? next_monthly_anniversary($started, time()) : null,
+            'trial_ends' => isset($org['claude_code_trial_ends_at']) && $org['claude_code_trial_ends_at']
+                            ? (strtotime((string)$org['claude_code_trial_ends_at']) ?: null) : null,
+        ];
+        write_json_file($prof_file, ['fetched_at' => time(), 'subscription' => $subscription]);
+    } elseif ($prof_cached && !empty($prof_cached['subscription'])) {
+        // The lookup failed; what was true last time still beats nothing.
+        $subscription = $prof_cached['subscription'];
+    }
+}
+unset($token);
+
 respond([
-    'state'   => 'ok',
-    'windows' => $windows,
-    'spend'   => $spend,
-], $cache_file, $cache_ttl);
+    'state'        => 'ok',
+    'windows'      => $windows,
+    'spend'        => $spend,
+    'subscription' => $subscription,
+], $cache_file, $cache_ttl, $last_file, $prof_file);
 ]]>
 </INLINE>
 </FILE>
@@ -2624,6 +2844,191 @@ switch ($action) {
 </INLINE>
 </FILE>
 
+<!-- Reads and writes Claude Code's own settings.json for the Configuration
+     tab: only paths this plugin built, one backup per save, unknown keys kept. -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-config.php" Mode="0644">
+<SHA256>19813d4fd381a59d1a9d74c89c8d6feb423b36844d72be87e6a600b627b92a22</SHA256>
+<INLINE>
+<![CDATA[
+<?php
+// Claude Code's own settings.json, read and written from the Configuration tab.
+//
+// This is not the plugin's configuration (that lives in claude-code.cfg on the
+// flash share). It is the file Claude Code itself reads for the model, the
+// permission rules, the environment and everything else in Anthropic's
+// settings reference, which until now could only be edited by opening a
+// terminal and writing JSON by hand.
+//
+// Three rules this file follows, in order of importance:
+//
+//   1. It never rewrites a key it was not asked about. The form sends only the
+//      fields it manages; everything else in the file is read, kept and written
+//      back untouched, so a hand-written statusLine or hooks block survives a
+//      save from the browser.
+//   2. It only ever writes a path built here from the plugin's own config. The
+//      account name in the request selects one of those paths; it never becomes
+//      part of one.
+//   3. It keeps the previous version of the file next to it as settings.json.bak
+//      before every write, and validates the JSON before replacing anything.
+
+header('Content-Type: application/json');
+header('Cache-Control: no-store');
+
+$cc_cfg_file = '/boot/config/plugins/claude-code/claude-code.cfg';
+$cc_cfg = is_readable($cc_cfg_file) ? (@parse_ini_file($cc_cfg_file) ?: []) : [];
+$cc_appdata = rtrim((string)($cc_cfg['APPDATA_PATH'] ?? ''), '/');
+if ($cc_appdata === '') $cc_appdata = '/mnt/user/appdata/claude-code';
+
+function cc_done($ok, $message, $extra = []) {
+    echo json_encode(array_merge(['ok' => $ok, 'message' => $message], $extra));
+    exit;
+}
+
+// Every settings file this endpoint may touch, keyed by account.
+//
+// With the accounts feature off, or on in shared mode, there is exactly one:
+// the accounts share a config home, so they share this file too. In isolated
+// mode each account's config home is its own directory and so is its file.
+function cc_targets($appdata, $cfg) {
+    $targets = ['default' => "$appdata/.claude/settings.json"];
+    $multi = ($cfg['MULTI_ACCOUNT'] ?? 'no') === 'yes';
+    $mode  = ($cfg['ACCOUNT_MODE'] ?? 'shared') === 'isolated' ? 'isolated' : 'shared';
+    if ($multi && $mode === 'isolated') {
+        foreach (preg_split('/\s+/', trim((string)($cfg['PROFILES'] ?? ''))) as $slug) {
+            // The slug pattern is the one profiles.sh enforces when creating an
+            // account. Anything else is not an account this plugin made.
+            if ($slug === '' || !preg_match('/^[a-z0-9_]{1,24}$/', $slug)) continue;
+            $targets[$slug] = "$appdata/profiles/$slug/settings.json";
+        }
+    }
+    return $targets;
+}
+
+$cc_targets = cc_targets($cc_appdata, $cc_cfg);
+$cc_slug = (string)($_REQUEST['profile'] ?? 'default');
+if (!isset($cc_targets[$cc_slug])) $cc_slug = 'default';
+$cc_path = $cc_targets[$cc_slug];
+
+// Reads the current file. A missing file is not an error: it simply means
+// nothing has been configured yet, which is the normal state.
+function cc_read($path) {
+    if (!is_readable($path)) return ['exists' => false, 'raw' => '', 'settings' => []];
+    $raw = (string)@file_get_contents($path);
+    $parsed = json_decode($raw, true);
+    return [
+        'exists'   => true,
+        'raw'      => $raw,
+        'settings' => is_array($parsed) ? $parsed : [],
+        'valid'    => is_array($parsed),
+    ];
+}
+
+// PHP encodes an empty array as [], and a settings.json whose top level is an
+// array is a file Claude Code refuses to load. An empty document has to stay
+// an object.
+function cc_encode($data) {
+    if (!$data) return "{}\n";
+    return json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
+}
+
+function cc_write($path, $text) {
+    $dir = dirname($path);
+    if (!is_dir($dir) && !@mkdir($dir, 0755, true)) return 'could not create ' . $dir;
+    // Keep the version being replaced, so a bad save is one file copy away
+    // from being undone.
+    if (is_file($path)) @copy($path, "$path.bak");
+    $tmp = "$path.tmp." . getmypid();
+    if (@file_put_contents($tmp, $text) === false) { @unlink($tmp); return "could not write $tmp"; }
+    @chmod($tmp, 0644);
+    // Rename rather than write in place: a reader never sees half a file, and
+    // Claude Code watches this path and reloads it as soon as it changes.
+    if (!@rename($tmp, $path)) { @unlink($tmp); return "could not replace $path"; }
+    return '';
+}
+
+// Sets or removes one key, addressed by its dotted path exactly as the
+// settings reference writes it ("permissions.defaultMode"). A null value
+// removes the key, and removes the parent object with it when that leaves it
+// empty -- an empty "permissions": {} is noise in a file people read.
+function cc_apply(&$data, $dotted, $value) {
+    $parts = explode('.', $dotted);
+    $leaf = array_pop($parts);
+    if (!$parts) {
+        if ($value === null) unset($data[$leaf]); else $data[$leaf] = $value;
+        return;
+    }
+    $head = array_shift($parts);
+    // Removing a key from a branch that does not exist is already done.
+    if ($value === null && (!isset($data[$head]) || !is_array($data[$head]))) return;
+    if (!isset($data[$head]) || !is_array($data[$head])) $data[$head] = [];
+    cc_apply($data[$head], implode('.', array_merge($parts, [$leaf])), $value);
+    if ($value === null && !$data[$head]) unset($data[$head]);
+}
+
+$cc_action = (string)($_REQUEST['action'] ?? 'read');
+
+if ($cc_action === 'read') {
+    $cur = cc_read($cc_path);
+    cc_done(true, '', [
+        'profile'  => $cc_slug,
+        'path'     => $cc_path,
+        'exists'   => $cur['exists'],
+        'valid'    => $cur['exists'] ? (bool)($cur['valid'] ?? false) : true,
+        'raw'      => $cur['raw'],
+        'settings' => $cur['settings'] ?: new stdClass(),
+    ]);
+}
+
+if ($cc_action !== 'save' || $_SERVER['REQUEST_METHOD'] !== 'POST') {
+    cc_done(false, 'unknown action');
+}
+
+$cur = cc_read($cc_path);
+
+// Two ways in, and they are deliberately different. "values" edits the fields
+// the form knows about and leaves the rest of the document alone; "raw"
+// replaces the whole document, which is what the JSON editor is for.
+if (isset($_POST['raw'])) {
+    $text = trim((string)$_POST['raw']);
+    if ($text === '') $text = '{}';
+    $parsed = json_decode($text, true);
+    if ($parsed === null && strtolower($text) !== 'null') {
+        cc_done(false, 'Invalid JSON: ' . json_last_error_msg());
+    }
+    if (!is_array($parsed) || array_values($parsed) === $parsed && $parsed) {
+        cc_done(false, 'The document must be a JSON object, e.g. { "model": "sonnet" }');
+    }
+    $data = $parsed;
+} else {
+    $raw_values = (string)($_POST['values'] ?? '');
+    $values = json_decode($raw_values, true);
+    if (!is_array($values)) cc_done(false, 'No values received');
+    if ($cur['exists'] && !($cur['valid'] ?? false)) {
+        // Merging into a file we could not parse would silently discard
+        // whatever is in it. Refuse, and point at the editor below.
+        cc_done(false, 'The current settings.json is not valid JSON, so it cannot be edited field by field. Fix it in the JSON editor first.');
+    }
+    $data = $cur['settings'];
+    foreach ($values as $key => $value) {
+        if (!is_string($key) || !preg_match('/^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/', $key)) continue;
+        cc_apply($data, $key, $value);
+    }
+}
+
+$err = cc_write($cc_path, cc_encode($data));
+if ($err !== '') cc_done(false, $err);
+
+$after = cc_read($cc_path);
+cc_done(true, 'Saved to ' . $cc_path, [
+    'profile'  => $cc_slug,
+    'path'     => $cc_path,
+    'raw'      => $after['raw'],
+    'settings' => $after['settings'] ?: new stdClass(),
+]);
+]]>
+</INLINE>
+</FILE>
+
 <!-- Web UI. The page itself is only the tab container: it carries no body,
      so it does not become a tab of its own. The four pages below fill it. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/claude-code.page">
@@ -2642,7 +3047,7 @@ Tabs="true"
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeDashboard.page">
-<SHA256>939b54949c4820c2124258999defb9c652bbe6917f6801f9d50a94390a27c385</SHA256>
+<SHA256>554457b2146d1b93d07d0b0bfc44b5287c0dcfe229b6bcc73521a3f7609e7ad2</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:1"
@@ -2667,10 +3072,13 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 </div>
 
 <!-- Claude.ai plan usage, on its own line under the status bar: the 5-hour and
-     weekly windows, plus any per-model weekly window and credit balance the
-     plan reports. Hidden entirely unless the lookup succeeds, so a box logged
-     in with an API key -- which has no plan windows -- shows nothing rather
-     than an error nobody can act on. -->
+     weekly windows with the date each one resets, any per-model window and
+     credit balance the plan reports, and when the subscription renews.
+     A server logged in with an API key has no plan windows and no reading
+     ever succeeded for it, so it says so plainly instead of showing an error
+     nobody can act on. Once a reading has succeeded the figures stay on the
+     line even when the account has been idle too long to refresh them, with
+     the time they were taken. -->
 <!-- One line per account. Plan limits belong to an account, so even with a
      single account the figures are labelled with whose they are; with several
      there is no meaningful combined number to show. -->
@@ -2691,7 +3099,31 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
       'min'       => t('min', 'min'),
       'nodata'    => t('not signed in', 'sin iniciar sesión'),
       'plan'      => t('Plan usage', 'Uso del plan'),
+      // Shown with the figures whenever they are the last reading rather than
+      // a current one, so a number on this line is never mistaken for live.
+      'last'      => t('last reading', 'última lectura'),
+      'sub'       => t('Subscription', 'Suscripción'),
+      'renews'    => t('renews', 'renueva'),
+      'trial'     => t('trial ends', 'prueba acaba'),
+      // The states Stripe reports for a Claude subscription. Anything else is
+      // shown exactly as the API worded it rather than guessed at.
+      'status'    => [
+          'active'     => t('active', 'activa'),
+          'trialing'   => t('trial', 'en prueba'),
+          'past_due'   => t('payment overdue', 'pago pendiente'),
+          'canceled'   => t('cancelled', 'cancelada'),
+          'cancelled'  => t('cancelled', 'cancelada'),
+          'unpaid'     => t('unpaid', 'sin pagar'),
+          'incomplete' => t('incomplete', 'incompleta'),
+          'paused'     => t('paused', 'en pausa'),
+      ],
+      'est_help'  => t('Estimated: Anthropic reports when the subscription started and that it is active, not the billing date. This is the monthly anniversary of the start date.',
+                       'Estimada: Anthropic informa de cuándo empezó la suscripción y de que está activa, no de la fecha de facturación. Esta es el aniversario mensual de la fecha de alta.'),
+      'stale_help'=> t('Claude Code renews its access token while it is in use. After a few idle hours the plan figures can no longer be refreshed, so the last reading is shown with the time it was taken.',
+                       'Claude Code renueva su token de acceso mientras se usa. Tras unas horas sin actividad ya no se pueden refrescar las cifras del plan, así que se muestra la última lectura con la hora a la que se tomó.'),
   ])?>;
+  // Dates are written the way the webGUI language is set, not the browser's.
+  var LOCALE = <?=json_encode($isSpanish ? 'es-ES' : 'en-GB')?>;
   // Model display names come from the API, so escape before injecting them.
   function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
@@ -2711,6 +3143,17 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
     return m + ' ' + L.min;
   }
 
+  // The countdown says how long you have; the date says when that is, which is
+  // what you need to decide whether to wait for it. Both, not one or the other.
+  function stamp(ts, withTime) {
+    if (!ts) return '';
+    var o = withTime === false
+      ? { day: 'numeric', month: 'short', year: 'numeric' }
+      : { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' };
+    try { return new Date(ts * 1000).toLocaleString(LOCALE, o); }
+    catch (e) { return new Date(ts * 1000).toLocaleString(); }
+  }
+
   function money(v, cur) { return v.toFixed(2) + ' ' + esc(cur || 'USD'); }
 
   // Builds the figures for one account. Shared by the single-account bar and by
@@ -2722,14 +3165,31 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
       var name = w.key === 'five_hour' ? L.five_hour
                : (w.key === 'model' ? L.seven_day + ' (' + w.label + ')' : L.seven_day);
       var rel = until(w.resets_at);
+      var abs = stamp(w.resets_at);
       parts.push('<b>' + esc(name) + ':</b> ' +
                  '<span class="' + cls(w.percent) + '">' + Math.round(w.percent) + '%</span>' +
-                 (rel ? ' <span class="dim-text">(' + esc(L.resets) + ' ' + esc(rel) + ')</span>' : ''));
+                 (rel ? ' <span class="dim-text">(' + esc(L.resets) + ' ' + esc(rel) +
+                        (abs ? ' &mdash; ' + esc(abs) : '') + ')</span>' : ''));
     }
     // Only present when the account actually has extra usage enabled.
     if (d.spend) {
       if (d.spend.balance !== null) parts.push('<b>' + esc(L.balance) + ':</b> ' + money(d.spend.balance, d.spend.currency));
       if (d.spend.used !== null) parts.push('<b>' + esc(L.spent) + ':</b> ' + money(d.spend.used, d.spend.currency));
+    }
+    // When the subscription renews. Anthropic reports the start date and the
+    // status, never the billing date, so the renewal is the monthly
+    // anniversary and is marked with a "~" and an explanation on hover.
+    var s = d.subscription;
+    if (s && (s.status || s.renews)) {
+      var bits = [];
+      if (s.status) {
+        var good = (s.status === 'active' || s.status === 'trialing');
+        bits.push('<span class="' + (good ? 'ok' : 'warn') + '">' +
+                  esc(L.status[s.status] || s.status) + '</span>');
+      }
+      if (s.renews) bits.push('<span title="' + esc(L.est_help) + '">' + esc(L.renews) + ' ~' + esc(stamp(s.renews, false)) + '</span>');
+      if (s.trial_ends) bits.push('<span class="warn">' + esc(L.trial) + ' ' + esc(stamp(s.trial_ends, false)) + '</span>');
+      parts.push('<b>' + esc(L.sub) + ':</b> ' + bits.join(' '));
     }
     return parts.join('<span class="sep">&middot;</span>');
   }
@@ -2755,15 +3215,23 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
   function renderAccount(acct, d) {
     var row = rowFor(acct.slug);
     var who = '<b>' + esc(L.plan) + '</b> <span class="sep">&middot;</span> <span class="ok">' + esc(acct.label) + '</span>: ';
-    if (!d || d.state !== 'ok') {
-      // An account with no usable token has no windows to report; say so rather
-      // than leaving a gap the reader has to interpret.
+    if (!d || (d.state !== 'ok' && !(d.windows && d.windows.length))) {
+      // Nothing was ever read for this account, so there is genuinely nothing
+      // to show: say why rather than leaving a gap the reader has to interpret.
       var why = d && d.state === 'expired' ? L.expired : L.nodata;
       row.innerHTML = who + '<span class="dim-text">' + esc(why) + '</span>';
       return;
     }
     var figures = usageParts(d);
-    row.innerHTML = who + (figures || '<span class="dim-text">' + esc(L.nodata) + '</span>');
+    // An account that has been idle for hours can no longer refresh its token,
+    // and the figures then stop moving. Rather than blanking the line, show the
+    // last reading and say when it was taken.
+    var age = '';
+    if (d.state !== 'ok' || d.stale) {
+      age = '<span class="sep">&middot;</span><span class="warn" title="' + esc(L.stale_help) + '">' +
+            esc(L.last) + ': ' + esc(stamp(d.measured_at)) + '</span>';
+    }
+    row.innerHTML = who + (figures || '<span class="dim-text">' + esc(L.nodata) + '</span>') + age;
   }
 
   function pollAccounts() {
@@ -3309,11 +3777,449 @@ if ($rc_owner === '') {
 </INLINE>
 </FILE>
 
-<FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeSettings.page">
-<SHA256>953e81023ee8870cd7847e7388c617aff02a3d9b36324890449a59a01c32ea82</SHA256>
+<FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeConfig.page">
+<SHA256>a2683e408819c94c9c44a31497316953365691569c5c59e15c8998b4b670e76c</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:4"
+Title="Claude Code Config"
+Tag="sliders"
+---
+<?php require_once "/usr/local/emhttp/plugins/claude-code/include/common.php"; ?>
+<?php
+// Claude Code's own configuration, the file it reads as user settings:
+// $APPDATA/.claude/settings.json. Everything on this tab is Anthropic's
+// setting, not this plugin's -- the plugin's own options stay on the Settings
+// tab. The full reference is linked at the bottom of the page, and the JSON
+// editor below covers every key it lists, including the ones with no field
+// here.
+//
+// The catalog below decides both what the form shows and how each value is
+// typed when it is saved, so a field cannot render as a checkbox and be saved
+// as a string. Types:
+//   bool   three states: unset, true, false. Unset is not the same as false
+//          for most of these keys, so it has to be expressible.
+//   select one of a fixed list, or unset
+//   text   free text, unset when empty
+//   number whole number, unset when empty
+//   lines  array of strings, one per line
+//   kv     object of NAME=value lines
+$cc_fields = [
+  [
+    'title' => t('Model and responses', 'Modelo y respuestas'),
+    'help'  => t('Claude Code applies most of these to a running session as soon as you save. The model, the effort level and the output style are read when a session starts, so those reach the next session rather than the one open now.',
+                 'Claude Code aplica la mayoría en cuanto guardas, incluso con una sesión abierta. El modelo, el nivel de esfuerzo y el estilo de salida se leen al iniciar la sesión, así que esos afectan a la siguiente, no a la que ya está abierta.'),
+    'fields' => [
+      ['key' => 'model', 'type' => 'text', 'list' => ['default', 'sonnet', 'opus', 'haiku', 'opusplan', 'claude-sonnet-5', 'claude-opus-5', 'claude-haiku-4-5'],
+       'label' => t('Model', 'Modelo'),
+       'help'  => t('Model every new session starts with: an alias such as sonnet or opus, or a full model ID. Empty means your account default.',
+                    'Modelo con el que arranca cada sesión: un alias como sonnet u opus, o un ID completo. Vacío usa el modelo por defecto de tu cuenta.')],
+      ['key' => 'fallbackModel', 'type' => 'lines',
+       'label' => t('Fallback models', 'Modelos de respaldo'),
+       'help'  => t('One per line. Tried in order when the model above is overloaded or unavailable.',
+                    'Uno por línea. Se prueban en orden cuando el modelo de arriba está saturado o no disponible.')],
+      ['key' => 'effortLevel', 'type' => 'select', 'options' => ['low', 'medium', 'high', 'xhigh'],
+       'label' => t('Effort level', 'Nivel de esfuerzo'),
+       'help'  => t('How much reasoning Claude spends by default. Lower is faster and cheaper; higher thinks more and uses more of your plan.',
+                    'Cuánto razona Claude por defecto. Más bajo es más rápido y gasta menos; más alto piensa más y consume más plan.')],
+      ['key' => 'outputStyle', 'type' => 'text',
+       'label' => t('Output style', 'Estilo de salida'),
+       'help'  => t('Name of a built-in or custom output style, which changes the instructions Claude works under.',
+                    'Nombre de un estilo de salida integrado o propio, que cambia las instrucciones con las que trabaja Claude.')],
+      ['key' => 'alwaysThinkingEnabled', 'type' => 'bool',
+       'label' => t('Extended thinking', 'Pensamiento extendido'),
+       'help'  => t('On by default for models that support it. Set it to No to turn it off for every session.',
+                    'Activado por defecto en los modelos que lo admiten. Ponlo en No para desactivarlo en todas las sesiones.')],
+      ['key' => 'language', 'type' => 'text',
+       'label' => t('Response language', 'Idioma de las respuestas'),
+       'help'  => t('A language name, such as spanish or english. Claude Code adds it to the system prompt verbatim.',
+                    'Un nombre de idioma, por ejemplo spanish o english. Claude Code lo añade tal cual a las instrucciones del sistema.')],
+      ['key' => 'autoCompactEnabled', 'type' => 'bool',
+       'label' => t('Auto-compact conversation', 'Compactar conversación automáticamente'),
+       'help'  => t('Summarises the conversation on its own when the context window fills up. On by default.',
+                    'Resume la conversación por su cuenta cuando la ventana de contexto se llena. Activado por defecto.')],
+      ['key' => 'theme', 'type' => 'select', 'options' => ['auto', 'dark', 'light', 'dark-daltonized', 'light-daltonized', 'dark-ansi', 'light-ansi'],
+       'label' => t('Theme', 'Tema'),
+       'help'  => t('Colour theme of the terminal interface.', 'Tema de color de la interfaz en la terminal.')],
+      ['key' => 'editorMode', 'type' => 'select', 'options' => ['normal', 'vim'],
+       'label' => t('Editor mode', 'Modo de edición'),
+       'help'  => t('Key bindings in the prompt: standard, or vim with its normal/insert/visual modes.',
+                    'Atajos de teclado al escribir: estándar, o vim con sus modos normal/insert/visual.')],
+      ['key' => 'verbose', 'type' => 'bool',
+       'label' => t('Verbose output', 'Salida detallada'),
+       'help'  => t('Show each tool call in full instead of collapsing it to a summary line.',
+                    'Muestra cada llamada a herramienta completa en vez de resumirla en una línea.')],
+      ['key' => 'spinnerTipsEnabled', 'type' => 'bool',
+       'label' => t('Tips while working', 'Consejos mientras trabaja'),
+       'help'  => t('The rotating tips next to the spinner. On by default.',
+                    'Los consejos que van rotando junto al indicador de actividad. Activados por defecto.')],
+    ],
+  ],
+  [
+    'title' => t('Permissions', 'Permisos'),
+    'help'  => t('What Claude may do without stopping to ask. Rules are written as Tool(argument), e.g. Bash(git status:*) or Read(/mnt/user/**). These apply as soon as you save, including to a session that is already open.',
+                 'Lo que Claude puede hacer sin preguntar. Las reglas se escriben como Herramienta(argumento), por ejemplo Bash(git status:*) o Read(/mnt/user/**). Se aplican al guardar, incluso a una sesión ya abierta.'),
+    'fields' => [
+      ['key' => 'permissions.defaultMode', 'type' => 'select',
+       'options' => ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'],
+       'label' => t('Default permission mode', 'Modo de permisos por defecto'),
+       'help'  => t('The mode new sessions start in. default asks before anything that is not a read; acceptEdits also allows edits; plan blocks changes until you approve a plan; bypassPermissions asks for nothing at all, which on a server reachable from outside is worth thinking twice about.',
+                    'El modo con el que arrancan las sesiones nuevas. default pregunta antes de todo lo que no sea lectura; acceptEdits permite además las ediciones; plan bloquea los cambios hasta que apruebes un plan; bypassPermissions no pregunta nada, algo que conviene pensarse dos veces en un servidor accesible desde fuera.')],
+      ['key' => 'permissions.allow', 'type' => 'lines',
+       'label' => t('Always allow', 'Permitir siempre'),
+       'help'  => t('One rule per line. These run without asking.', 'Una regla por línea. Se ejecutan sin preguntar.')],
+      ['key' => 'permissions.ask', 'type' => 'lines',
+       'label' => t('Always ask', 'Preguntar siempre'),
+       'help'  => t('One rule per line. These always prompt, even in a permissive mode.',
+                    'Una regla por línea. Siempre preguntan, incluso en un modo permisivo.')],
+      ['key' => 'permissions.deny', 'type' => 'lines',
+       'label' => t('Never allow', 'No permitir nunca'),
+       'help'  => t('One rule per line. These are refused outright; a deny rule beats an allow rule.',
+                    'Una regla por línea. Se rechazan siempre; una regla de denegar gana a una de permitir.')],
+      ['key' => 'permissions.additionalDirectories', 'type' => 'lines',
+       'label' => t('Additional directories', 'Directorios adicionales'),
+       'help'  => t('One path per line. Directories Claude may work in besides the one the session started from, e.g. /mnt/user/appdata.',
+                    'Una ruta por línea. Directorios en los que Claude puede trabajar además del de arranque de la sesión, por ejemplo /mnt/user/appdata.')],
+    ],
+  ],
+  [
+    'title' => t('Remote Control', 'Control Remoto'),
+    'help'  => t('These are Claude Code\'s own Remote Control settings, and they apply to every session on this server, including sessions you start by hand in a terminal. Starting and stopping the bridge this plugin supervises stays on the Remote Control tab.',
+                 'Estos son los ajustes de Control Remoto del propio Claude Code y afectan a todas las sesiones de este servidor, incluidas las que abras a mano en una terminal. Arrancar y parar el puente que supervisa este plugin sigue estando en la pestaña Control Remoto.'),
+    'fields' => [
+      ['key' => 'remoteControlAtStartup', 'type' => 'bool',
+       'label' => t('Connect at session start', 'Conectar al iniciar sesión'),
+       'help'  => t('Connect Remote Control automatically whenever an interactive session starts, instead of waiting for /remote-control.',
+                    'Conecta el Control Remoto automáticamente al abrir una sesión interactiva, en vez de esperar a /remote-control.')],
+      ['key' => 'disableRemoteControl', 'type' => 'bool',
+       'label' => t('Disable Remote Control', 'Desactivar Control Remoto'),
+       'help'  => t('Yes refuses Remote Control entirely, including this plugin\'s own service. Leave it unset unless you want it off.',
+                    'Sí rechaza el Control Remoto por completo, incluido el servicio de este plugin. Déjalo sin definir salvo que lo quieras desactivado.')],
+    ],
+  ],
+  [
+    'title' => t('Environment and maintenance', 'Entorno y mantenimiento'),
+    'help'  => '',
+    'fields' => [
+      ['key' => 'env', 'type' => 'kv',
+       'label' => t('Environment variables', 'Variables de entorno'),
+       'help'  => t('One NAME=value per line. Set for every session and for the processes it starts. Anything you put here is stored in plain text in this file.',
+                    'Un NOMBRE=valor por línea. Se aplican a cada sesión y a los procesos que lance. Lo que pongas aquí queda en texto plano en este archivo.')],
+      ['key' => 'cleanupPeriodDays', 'type' => 'number',
+       'label' => t('Keep transcripts for (days)', 'Conservar transcripciones (días)'),
+       'help'  => t('How many days Claude Code keeps session transcripts before deleting them. 30 by default. This does not touch agent memory.',
+                    'Cuántos días conserva Claude Code las transcripciones de sesión antes de borrarlas. 30 por defecto. No afecta a la memoria del agente.')],
+      ['key' => 'autoMemoryEnabled', 'type' => 'bool',
+       'label' => t('Auto memory', 'Memoria automática'),
+       'help'  => t('Whether Claude reads and writes its automatic memory directory. On by default.',
+                    'Si Claude lee y escribe su directorio de memoria automática. Activada por defecto.')],
+      ['key' => 'respectGitignore', 'type' => 'bool',
+       'label' => t('Respect .gitignore', 'Respetar .gitignore'),
+       'help'  => t('Leave files matched by .gitignore out of the @ file picker. On by default.',
+                    'Deja fuera del selector de archivos @ lo que coincida con .gitignore. Activado por defecto.')],
+      ['key' => 'disableAllHooks', 'type' => 'bool',
+       'label' => t('Disable all hooks', 'Desactivar todos los hooks'),
+       'help'  => t('Turns off every hook, custom status line and custom file-suggestion command at once.',
+                    'Desactiva de golpe todos los hooks, la línea de estado personalizada y los comandos de sugerencia de archivos.')],
+      ['key' => 'autoUpdatesChannel', 'type' => 'select', 'options' => ['latest', 'stable'],
+       'label' => t('Update channel', 'Canal de actualización'),
+       'help'  => t('Which releases Check for Updates follows: latest is the newest release, stable is about a week behind and skips releases with known regressions.',
+                    'Qué versiones sigue Buscar actualizaciones: latest es la más reciente, stable va una semana por detrás y se salta las versiones con regresiones conocidas.')],
+      ['key' => 'timeZone', 'type' => 'text',
+       'label' => t('Time zone', 'Zona horaria'),
+       'help'  => t('An IANA name such as Europe/Madrid. Empty uses the server time zone.',
+                    'Un nombre IANA como Europe/Madrid. Vacío usa la zona horaria del servidor.')],
+    ],
+  ],
+];
+
+// The files this tab can edit, and the account each one belongs to. With the
+// accounts feature off, or on in shared mode, there is a single shared file:
+// the accounts share a config home, so a change here applies to all of them.
+$cc_shared = !($multi_account && $account_mode === 'isolated');
+$cc_files = [];
+if ($cc_shared) {
+    $cc_files[] = ['slug' => 'default', 'label' => t('All accounts', 'Todas las cuentas'), 'path' => "$appdata_path/.claude/settings.json"];
+} else {
+    foreach (($profiles ?: [['slug' => 'default', 'label' => t('Main account', 'Cuenta principal'), 'email' => '']]) as $cc_p) {
+        $cc_files[] = [
+            'slug'  => $cc_p['slug'],
+            'label' => ($cc_p['email'] ?? '') !== '' ? $cc_p['email'] : $cc_p['label'],
+            'path'  => $cc_p['slug'] === 'default' ? "$appdata_path/.claude/settings.json"
+                                                   : "$appdata_path/profiles/{$cc_p['slug']}/settings.json",
+        ];
+    }
+}
+
+// Current contents, read once per file here rather than fetched by the browser:
+// the values have to be in the fields on first paint, not a moment later.
+foreach ($cc_files as $cc_i => $cc_f) {
+    $cc_raw = is_readable($cc_f['path']) ? (string)@file_get_contents($cc_f['path']) : '';
+    $cc_parsed = $cc_raw === '' ? [] : json_decode($cc_raw, true);
+    $cc_files[$cc_i]['raw']      = $cc_raw;
+    $cc_files[$cc_i]['exists']   = $cc_raw !== '';
+    $cc_files[$cc_i]['valid']    = $cc_raw === '' || is_array($cc_parsed);
+    $cc_files[$cc_i]['settings'] = is_array($cc_parsed) ? $cc_parsed : [];
+}
+
+// Reads one dotted key out of a parsed settings document.
+function cc_get($settings, $dotted) {
+    $ref = $settings;
+    foreach (explode('.', $dotted) as $part) {
+        if (!is_array($ref) || !array_key_exists($part, $ref)) return null;
+        $ref = $ref[$part];
+    }
+    return $ref;
+}
+
+// Turns a stored value into what the field shows. Everything the form manages
+// is a string, a number, a boolean, a list of strings or a flat object, and a
+// value of any other shape is left to the JSON editor rather than being
+// flattened into a field that could not save it back.
+function cc_field_value($type, $value) {
+    if ($value === null) return '';
+    switch ($type) {
+        case 'bool':   return $value === true ? 'true' : ($value === false ? 'false' : '');
+        case 'number': return is_numeric($value) ? (string)$value : '';
+        case 'lines':  return is_array($value) ? implode("\n", array_filter($value, 'is_scalar')) : '';
+        case 'kv':
+            if (!is_array($value)) return '';
+            $out = [];
+            foreach ($value as $k => $v) if (is_scalar($v)) $out[] = "$k=$v";
+            return implode("\n", $out);
+        default:       return is_scalar($value) ? (string)$value : '';
+    }
+}
+
+// The type of every field, for the browser: it decides there whether a value
+// travels as a string, a number, a boolean or a list, so a field cannot be
+// saved in a shape Claude Code would reject.
+$cc_types = [];
+foreach ($cc_fields as $cc_g) foreach ($cc_g['fields'] as $cc_fd) $cc_types[$cc_fd['key']] = $cc_fd['type'];
+?>
+
+<p><?=t(
+  'Claude Code\'s own settings: the model it uses, what it may do without asking, its environment and its housekeeping. This is Anthropic\'s configuration file, not this plugin\'s -- the plugin\'s own options are on the Settings tab.',
+  'La configuración del propio Claude Code: el modelo que usa, lo que puede hacer sin preguntar, su entorno y su mantenimiento. Este es el archivo de configuración de Anthropic, no el de este plugin -- las opciones del plugin están en la pestaña Ajustes.'
+)?></p>
+
+<div class="claude-status">
+<b><?=t('File:', 'Archivo:')?></b> <code id="cc-path"><?=htmlspecialchars($cc_files[0]['path'])?></code>
+<span class="sep">&middot;</span>
+<?php if ($cc_shared): ?>
+<span class="ok"><?=t('shared by every account on this server', 'compartido por todas las cuentas de este servidor')?></span>
+<?php else: ?>
+<span class="ok"><?=t('one file per account (separate accounts mode)', 'un archivo por cuenta (modo de cuentas separadas)')?></span>
+<?php endif; ?>
+</div>
+
+<?php if (count($cc_files) > 1): ?>
+<div class="claude-box">
+<h4><?=t('Account', 'Cuenta')?></h4>
+<dl>
+<dt><?=t('Editing settings for:', 'Editando la configuración de:')?></dt>
+<dd><select id="cc-account" onchange="ccSelect(this.value)">
+<?php foreach ($cc_files as $cc_f): ?>
+<option value="<?=htmlspecialchars($cc_f['slug'])?>"><?=htmlspecialchars($cc_f['label'])?></option>
+<?php endforeach; ?>
+</select></dd>
+</dl>
+<blockquote class="inline_help"><?=t('Each account keeps its own config directory in separate-accounts mode, so each one has its own settings file.',
+                                     'En el modo de cuentas separadas cada cuenta tiene su propio directorio de configuración, así que cada una tiene su propio archivo de ajustes.')?></blockquote>
+</div>
+<?php endif; ?>
+
+<?php foreach ($cc_files as $cc_idx => $cc_f): ?>
+<div class="cc-pane" id="cc-pane-<?=htmlspecialchars($cc_f['slug'])?>" data-path="<?=htmlspecialchars($cc_f['path'])?>"<?=$cc_idx ? ' style="display:none;"' : ''?>>
+
+<?php if (!$cc_f['valid']): ?>
+<div class="claude-notice"><?=t('This settings file is not valid JSON, so the fields below cannot be filled in or saved. Fix it in the JSON editor at the bottom of this tab.',
+                                'Este archivo de ajustes no es JSON válido, así que los campos de abajo no se pueden rellenar ni guardar. Corrígelo en el editor JSON del final de esta pestaña.')?></div>
+<?php endif; ?>
+
+<?php foreach ($cc_fields as $cc_g): ?>
+<div class="claude-box">
+<h4><?=htmlspecialchars($cc_g['title'])?></h4>
+<?php if ($cc_g['help'] !== ''): ?><p><?=htmlspecialchars($cc_g['help'])?></p><?php endif; ?>
+<?php foreach ($cc_g['fields'] as $cc_fd):
+    $cc_id = 'cc-' . $cc_f['slug'] . '-' . str_replace('.', '_', $cc_fd['key']);
+    $cc_val = cc_field_value($cc_fd['type'], cc_get($cc_f['settings'], $cc_fd['key']));
+?>
+<dl>
+<dt><?=htmlspecialchars($cc_fd['label'])?></dt>
+<dd>
+<?php if ($cc_fd['type'] === 'bool'): ?>
+  <select id="<?=$cc_id?>" data-key="<?=htmlspecialchars($cc_fd['key'])?>">
+    <option value=""<?=$cc_val === '' ? ' selected' : ''?>><?=t('Not set (Claude Code default)', 'Sin definir (valor por defecto)')?></option>
+    <option value="true"<?=$cc_val === 'true' ? ' selected' : ''?>><?=t('Yes', 'Sí')?></option>
+    <option value="false"<?=$cc_val === 'false' ? ' selected' : ''?>><?=t('No', 'No')?></option>
+  </select>
+<?php elseif ($cc_fd['type'] === 'select'): ?>
+  <select id="<?=$cc_id?>" data-key="<?=htmlspecialchars($cc_fd['key'])?>">
+    <option value=""<?=$cc_val === '' ? ' selected' : ''?>><?=t('Not set (Claude Code default)', 'Sin definir (valor por defecto)')?></option>
+    <?php foreach ($cc_fd['options'] as $cc_o): ?>
+    <option value="<?=htmlspecialchars($cc_o)?>"<?=$cc_val === $cc_o ? ' selected' : ''?>><?=htmlspecialchars($cc_o)?></option>
+    <?php endforeach; ?>
+  </select>
+<?php elseif ($cc_fd['type'] === 'lines' || $cc_fd['type'] === 'kv'): ?>
+  <textarea id="<?=$cc_id?>" data-key="<?=htmlspecialchars($cc_fd['key'])?>" rows="4" cols="60" spellcheck="false"><?=htmlspecialchars($cc_val)?></textarea>
+<?php elseif ($cc_fd['type'] === 'number'): ?>
+  <input type="number" min="1" step="1" id="<?=$cc_id?>" data-key="<?=htmlspecialchars($cc_fd['key'])?>" value="<?=htmlspecialchars($cc_val)?>" class="narrow">
+<?php else: ?>
+  <input type="text" id="<?=$cc_id?>" data-key="<?=htmlspecialchars($cc_fd['key'])?>" value="<?=htmlspecialchars($cc_val)?>" class="narrow"
+    <?php if (!empty($cc_fd['list'])): ?>list="<?=$cc_id?>-list"<?php endif; ?>>
+  <?php if (!empty($cc_fd['list'])): ?>
+  <datalist id="<?=$cc_id?>-list"><?php foreach ($cc_fd['list'] as $cc_o): ?><option value="<?=htmlspecialchars($cc_o)?>"><?php endforeach; ?></datalist>
+  <?php endif; ?>
+<?php endif; ?>
+</dd>
+</dl>
+<blockquote class="inline_help"><?=htmlspecialchars($cc_fd['help'])?></blockquote>
+<?php endforeach; ?>
+</div>
+<?php endforeach; ?>
+
+<div class="claude-box">
+<h4><?=t('Save', 'Guardar')?></h4>
+<p><?=t('Saves only the fields on this tab. Anything else already in the file -- hooks, a status line, MCP settings -- is read, kept and written back unchanged, and the previous version is left beside it as settings.json.bak.',
+        'Guarda solo los campos de esta pestaña. Lo demás que ya haya en el archivo -- hooks, línea de estado, ajustes de MCP -- se lee, se conserva y se vuelve a escribir igual, y la versión anterior queda al lado como settings.json.bak.')?></p>
+<input type="button" value="<?=t('Save settings', 'Guardar ajustes')?>" onclick="ccSave('<?=htmlspecialchars($cc_f['slug'])?>')">
+<span id="cc-msg-<?=htmlspecialchars($cc_f['slug'])?>" style="margin-left:10px;"></span>
+</div>
+
+<div class="claude-box">
+<h4><?=t('All options (JSON)', 'Todas las opciones (JSON)')?></h4>
+<p><?=t('The whole file, for the keys that have no field above. Saving here replaces the document, so it is the one place where a key can be added or removed by hand.',
+        'El archivo completo, para las claves que no tienen campo arriba. Guardar aquí reemplaza el documento entero, así que es el único sitio donde añadir o quitar una clave a mano.')?></p>
+<textarea id="cc-raw-<?=htmlspecialchars($cc_f['slug'])?>" rows="16" cols="90" spellcheck="false" style="font-family:monospace;"><?=htmlspecialchars($cc_f['raw'] !== '' ? $cc_f['raw'] : "{\n}\n")?></textarea>
+<blockquote class="inline_help"><?=t('Checked before anything is written: invalid JSON is refused and the file on disk is left as it was. The previous version is kept as settings.json.bak.',
+                                     'Se comprueba antes de escribir nada: un JSON inválido se rechaza y el archivo del disco se queda como estaba. La versión anterior se guarda como settings.json.bak.')?></blockquote>
+<input type="button" value="<?=t('Save JSON', 'Guardar JSON')?>" onclick="ccSaveRaw('<?=htmlspecialchars($cc_f['slug'])?>')">
+<span id="cc-rawmsg-<?=htmlspecialchars($cc_f['slug'])?>" style="margin-left:10px;"></span>
+<p><?=t('Every available key is documented at', 'Todas las claves disponibles están documentadas en')?>
+   <a href="https://code.claude.com/docs/en/settings-reference" target="_blank">code.claude.com/docs/en/settings-reference</a>.</p>
+</div>
+
+</div>
+<?php endforeach; ?>
+
+<script>
+(function () {
+  var TYPES = <?=json_encode($cc_types)?>;
+  var PATHS = <?=json_encode(array_column($cc_files, 'path', 'slug'))?>;
+  var L = <?=json_encode([
+      'saving'  => t('Saving...', 'Guardando...'),
+      'saved'   => t('Saved', 'Guardado'),
+      'network' => t('Could not reach the server', 'No se pudo contactar con el servidor'),
+      'badnum'  => t('is not a whole number', 'no es un número entero'),
+      'badkv'   => t('must be written as NAME=value, one per line', 'debe escribirse como NOMBRE=valor, uno por línea'),
+  ])?>;
+  // Every POST to a page under the webGUI needs this token or PHP's prepend
+  // file ends the request with an empty body, which arrives here looking
+  // exactly like the server being unreachable.
+  var CSRF = <?=json_encode($var['csrf_token'] ?? '')?>;
+  var ENDPOINT = '/plugins/claude-code/include/claude-config.php';
+
+  function el(id) { return document.getElementById(id); }
+
+  window.ccSelect = function (slug) {
+    var panes = document.getElementsByClassName('cc-pane');
+    for (var i = 0; i < panes.length; i++) panes[i].style.display = (panes[i].id === 'cc-pane-' + slug) ? '' : 'none';
+    if (el('cc-path')) el('cc-path').textContent = PATHS[slug] || '';
+  };
+
+  // Turns what is in the fields into the JSON types settings.json expects. An
+  // empty field means "not set" and travels as null, which removes the key
+  // rather than writing an empty string Claude Code would have to interpret.
+  function collect(slug, msg) {
+    var values = {}, key, node, raw;
+    for (key in TYPES) {
+      node = el('cc-' + slug + '-' + key.replace(/\./g, '_'));
+      if (!node) continue;
+      raw = (node.value || '').trim();
+      if (raw === '') { values[key] = null; continue; }
+      switch (TYPES[key]) {
+        case 'bool':
+          values[key] = (raw === 'true');
+          break;
+        case 'number':
+          if (!/^\d+$/.test(raw)) { msg(key + ': ' + L.badnum, false); return null; }
+          values[key] = parseInt(raw, 10);
+          break;
+        case 'lines':
+          var list = raw.split('\n').map(function (s) { return s.trim(); }).filter(function (s) { return s !== ''; });
+          values[key] = list.length ? list : null;
+          break;
+        case 'kv':
+          var obj = {}, any = false, bad = false;
+          raw.split('\n').forEach(function (line) {
+            line = line.trim();
+            if (line === '') return;
+            var eq = line.indexOf('=');
+            if (eq < 1) { bad = true; return; }
+            obj[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+            any = true;
+          });
+          if (bad) { msg(key + ': ' + L.badkv, false); return null; }
+          values[key] = any ? obj : null;
+          break;
+        default:
+          values[key] = raw;
+      }
+    }
+    return values;
+  }
+
+  function post(body, node, onOk) {
+    body.set('csrf_token', CSRF);
+    node.textContent = L.saving;
+    node.className = '';
+    fetch(ENDPOINT, { method: 'POST', cache: 'no-store', headers: { 'X-CSRF-TOKEN': CSRF }, body: body })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        node.textContent = d.ok ? (L.saved + ' — ' + (d.path || '')) : (d.message || '');
+        node.className = d.ok ? 'ok' : 'error';
+        if (d.ok && onOk) onOk(d);
+      })
+      .catch(function () { node.textContent = L.network; node.className = 'error'; });
+  }
+
+  window.ccSave = function (slug) {
+    var node = el('cc-msg-' + slug);
+    var show = function (text, ok) { node.textContent = text; node.className = ok ? 'ok' : 'error'; };
+    var values = collect(slug, show);
+    if (values === null) return;
+    var body = new URLSearchParams();
+    body.set('action', 'save');
+    body.set('profile', slug);
+    body.set('values', JSON.stringify(values));
+    post(body, node, function (d) {
+      // Keep the JSON editor in step with what was just written, so the two
+      // halves of this tab never show different files.
+      var box = el('cc-raw-' + slug);
+      if (box && typeof d.raw === 'string') box.value = d.raw;
+    });
+  };
+
+  window.ccSaveRaw = function (slug) {
+    var node = el('cc-rawmsg-' + slug);
+    var body = new URLSearchParams();
+    body.set('action', 'save');
+    body.set('profile', slug);
+    body.set('raw', el('cc-raw-' + slug).value);
+    post(body, node, function () { setTimeout(function () { location.reload(); }, 900); });
+  };
+})();
+</script>
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeSettings.page">
+<SHA256>f7d08e02a223c93ce35ed86b3aed9e7d86669744bd266af387754506c2440d54</SHA256>
+<INLINE>
+<![CDATA[
+Menu="claude-code:5"
 Title="Settings"
 Tag="cog"
 ---
@@ -3384,12 +4290,13 @@ Tag="cog"
      languages/LOCALE/SEGMENT.txt for each segment of the request URI, and
      this page sits under a segment named claude-code. -->
 <FILE Name="/usr/local/emhttp/languages/es_ES/claude-code.txt" Mode="0644">
-<SHA256>0279c3e00b2bd3e3fe8fe88a0895426788e9793abf2cb14682575f98ec4fba4a</SHA256>
+<SHA256>b35c281668848cd4b2531c77c1b6f9e5f0ef8d39fe3340fa370ad9da7d31112c</SHA256>
 <INLINE>
 <![CDATA[
 Dashboard=Panel
 Accounts=Cuentas
 Remote Control=Control Remoto
+Claude Code Config=Config. de Claude
 Settings=Ajustes
 ]]>
 </INLINE>
@@ -3499,7 +4406,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.09.01.7 has been installed!"
+    echo " Claude Code plugin v2026.09.04.2 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
@@ -3572,6 +4479,8 @@ rm -f /usr/local/bin/claude
 rm -f /var/tmp/claude-code-stats-sample.json
 # Cached figures, including the one file per account the usage panel writes.
 rm -f /var/tmp/claude-code-usage-cache*.json
+# Last known plan figures and the subscription details behind them.
+rm -f /var/tmp/claude-code-usage-last-*.json /var/tmp/claude-code-profile-*.json
 rm -f /var/tmp/claude-login-*.log /var/tmp/claude-login-*.fifo
 
 # Note: We keep config and appdata for potential reinstall
