@@ -1,12 +1,29 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.09.04.2"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.09.06"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.09.06
+- The Claude Code Config tab now has a preset selector at the top. Automatic
+  sets the model to "default", Claude Code's own automatic model choice, and
+  leaves everything else unset. Default (nothing set) clears every field the
+  preset manages, exactly as if the tab had never been touched. Optimized for
+  Opus 5 pins the model to Opus 5, sets a medium effort level, turns off
+  always-on extended thinking and turns on auto-compact -- the two settings
+  that most directly control how many tokens a session burns -- keeps Sonnet 5
+  as a fallback so work continues if Opus is temporarily overloaded, and
+  follows the stable update channel. A preset only fills in the fields; it
+  never saves on its own, so you can review the values before applying them.
+- Update now restarts Remote Control by itself, per account, whenever it
+  actually applies a new Claude Code version, instead of only telling you to
+  do it by hand from the Remote Control tab. An update that changes nothing
+  leaves a running bridge alone. Reinstall picks up the same restart when it
+  finds a newer binary already cached and a bridge running under the old one.
+
 ###2026.09.04.2
 - The plan usage line no longer goes blank on an account that has been idle.
   Claude Code renews its access token while it is being used, so after a few
@@ -428,7 +445,7 @@ fi
 
 <!-- Install/setup script -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh" Mode="0755">
-<SHA256>120731e684c43464976d106b235c7d5152642f9cd57bb40eaf1ef0360c917ed4</SHA256>
+<SHA256>6559bae075fa9fa4660a9498bb2dd29b3a71d89f22f595a68c9560a38ea97ca0</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -485,6 +502,11 @@ if [ -z "$APPDATA_PATH" ]; then
 fi
 
 CACHED_BINARY="$APPDATA_PATH/bin/claude"
+
+# Set by restore_cached_binary() only when it actually swaps the runtime
+# binary, so the restart below fires on a real change and never on a boot or
+# a Reinstall that finds everything already up to date.
+binary_changed=""
 
 echo "=== Claude Code Installation ==="
 
@@ -546,6 +568,44 @@ apply_binary() {
     return 0
 }
 
+# A rename (see apply_binary above) leaves any already-running "claude
+# remote-control" on the old inode: harmless while it keeps working, but it
+# will not pick up the new binary until it restarts. Restarts only the
+# accounts that are actually running, and only when a swap genuinely
+# happened -- a boot with nothing running, or a Reinstall that finds the
+# cached binary already matches, must not touch a session that is already
+# fine. Same helper as in update-claude.sh, where this restart was asked for
+# first; kept here too because a manual Reinstall can swap the same binary
+# under the same running bridge.
+restart_running_remote_control() {
+    local script="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh"
+    local version="$1"
+    [ -x "$script" ] || return 0
+
+    local MULTI_ACCOUNT="no" PROFILES=""
+    [ -f "$PLUGIN_CFG" ] && source "$PLUGIN_CFG"
+    local accounts="default"
+    [ "$MULTI_ACCOUNT" = "yes" ] && accounts="default $PROFILES"
+
+    local acct pidfile
+    for acct in $accounts; do
+        if [ "$acct" = "default" ]; then pidfile="/var/run/claude-remote-control.pid"
+        else pidfile="/var/run/claude-remote-control-$acct.pid"; fi
+
+        if [ -f "$pidfile" ] && [ -d "/proc/$(cat "$pidfile" 2>/dev/null)" ]; then
+            echo "Restarting Remote Control for account '$acct' so its bridge picks up ${version:-the new version} (it will drop for a few seconds)..."
+            "$script" stop "$acct"
+            "$script" start "$acct"
+            sleep 1
+            if [ -f "$pidfile" ] && [ -d "/proc/$(cat "$pidfile" 2>/dev/null)" ]; then
+                echo "Remote Control for account '$acct' is back up."
+            else
+                echo "WARNING: Remote Control for account '$acct' did not come back up -- start it by hand from the Remote Control tab."
+            fi
+        fi
+    done
+}
+
 restore_cached_binary() {
     # Restore binary from appdata cache (avoids re-downloading on every boot)
     if [ -f "$CACHED_BINARY" ]; then
@@ -556,6 +616,9 @@ restore_cached_binary() {
             return 0
         fi
         if apply_binary "$CACHED_BINARY" /root/.local/bin/claude; then
+            # Only set once a swap actually happened: this is what tells the
+            # caller whether a running bridge needs restarting below.
+            binary_changed="yes"
             return 0
         fi
         echo "Could not write /root/.local/bin/claude from the cache."
@@ -771,6 +834,15 @@ if ! install_claude_code; then
     echo "Or install manually: curl -fsSL https://claude.ai/install.sh | bash"
 fi
 
+# At boot, Remote Control is never auto-started (see README), so this is
+# always a no-op here -- restart_running_remote_control finds nothing running
+# and prints nothing. It only ever does something on a manual Reinstall that
+# found a newer binary already cached, with a bridge live under the old one.
+if [ "$binary_changed" = "yes" ] && command -v claude &> /dev/null; then
+    echo
+    restart_running_remote_control "$(claude --version 2>/dev/null | awk '{print $1}')"
+fi
+
 echo ""
 if command -v claude &> /dev/null; then
     echo "=== Installation Complete ==="
@@ -812,7 +884,7 @@ echo "=== Manual Reinstall $(date) ===" >> "$LOGFILE"
      restore_cached_binary() restores from on every boot, so without
      re-caching here, any update would silently be reverted on next reboot. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/update-claude.sh" Mode="0755">
-<SHA256>2e3b744466a078c4a0f005270394a5e6049817f43566fff8ebb3e1dd9b6c8de4</SHA256>
+<SHA256>1b0c639c3040e7cc05c019c4e3a9c42a8abdf76377498bc6cf9016aa408a0592</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -848,6 +920,42 @@ apply_binary() {
     if ! chmod +x "$tmp"; then rm -f "$tmp"; return 1; fi
     if ! mv -f "$tmp" "$dst"; then rm -f "$tmp"; return 1; fi
     return 0
+}
+
+# A rename (see apply_binary above) leaves any already-running "claude
+# remote-control" on the old inode: harmless while it keeps working, but it
+# will not pick up the new version until it restarts. Restarts only the
+# accounts that are actually running, and only when a swap genuinely
+# happened -- an update that changed nothing must not touch a session that is
+# already fine. Same helper as in install-claude.sh, which needs it too: a
+# Reinstall can swap the same binary under the same running bridge.
+restart_running_remote_control() {
+    local script="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh"
+    local version="$1"
+    [ -x "$script" ] || return 0
+
+    local MULTI_ACCOUNT="no" PROFILES=""
+    [ -f "$PLUGIN_CFG" ] && source "$PLUGIN_CFG"
+    local accounts="default"
+    [ "$MULTI_ACCOUNT" = "yes" ] && accounts="default $PROFILES"
+
+    local acct pidfile
+    for acct in $accounts; do
+        if [ "$acct" = "default" ]; then pidfile="/var/run/claude-remote-control.pid"
+        else pidfile="/var/run/claude-remote-control-$acct.pid"; fi
+
+        if [ -f "$pidfile" ] && [ -d "/proc/$(cat "$pidfile" 2>/dev/null)" ]; then
+            echo "Restarting Remote Control for account '$acct' so its bridge picks up ${version:-the new version} (it will drop for a few seconds)..."
+            "$script" stop "$acct"
+            "$script" start "$acct"
+            sleep 1
+            if [ -f "$pidfile" ] && [ -d "/proc/$(cat "$pidfile" 2>/dev/null)" ]; then
+                echo "Remote Control for account '$acct' is back up."
+            else
+                echo "WARNING: Remote Control for account '$acct' did not come back up -- start it by hand from the Remote Control tab."
+            fi
+        fi
+    done
 }
 
 if ! command -v claude &> /dev/null; then
@@ -907,13 +1015,15 @@ else
     echo "WARNING: APPDATA_PATH not set, could not cache the update -- it may be reverted on next reboot."
 fi
 
-# A rename leaves processes that were already running on the old inode: they
-# keep the previous version until they are restarted. Remote Control is the
-# one that matters here, since it normally runs for weeks.
-if [ -n "$now" ] && [ "$before" != "$now" ] && pgrep -f "claude remote-control" > /dev/null 2>&1; then
+# Restart whatever is actually running, per account, so this doesn't have to
+# be done by hand from the Remote Control tab any more -- only when a version
+# genuinely moved, so an update that changed nothing leaves a live session
+# alone. A restarted bridge resumes its own saved session id; if claude.ai
+# already closed that session it simply opens a fresh one, which is expected,
+# not an error.
+if [ -n "$applied" ] && [ -n "$now" ] && [ "$before" != "$now" ]; then
     echo
-    echo "NOTE: Remote Control is running and is still using $before."
-    echo "      Stop it and start it again from the Remote Control tab to move it to ${now%% *}."
+    restart_running_remote_control "${now%% *}"
 fi
 ]]>
 </INLINE>
@@ -3778,7 +3888,7 @@ if ($rc_owner === '') {
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeConfig.page">
-<SHA256>a2683e408819c94c9c44a31497316953365691569c5c59e15c8998b4b670e76c</SHA256>
+<SHA256>ea60cd02e3ab182f73aa3fa55ee0aedc742422a5e5a4ab167011e4c924c8d3c1</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:4"
@@ -4013,6 +4123,24 @@ foreach ($cc_fields as $cc_g) foreach ($cc_g['fields'] as $cc_fd) $cc_types[$cc_
 <?php endif; ?>
 </div>
 
+<div class="claude-box">
+<h4><?=t('Preset', 'Preajuste')?></h4>
+<dl>
+<dt><?=t('Apply a preset', 'Aplicar un preajuste')?></dt>
+<dd><select id="cc-preset" onchange="ccApplyPreset(this.value)">
+<option value=""><?=t('Choose a preset...', 'Elegir un preajuste...')?></option>
+<option value="automatic"><?=t('Automatic', 'Automática')?></option>
+<option value="none"><?=t('Default (nothing set)', 'Por defecto (sin nada configurado)')?></option>
+<option value="opus5"><?=t('Optimized for Opus 5', 'Optimizado para Opus 5')?></option>
+</select></dd>
+</dl>
+<blockquote class="inline_help"><?=t(
+  'A preset only fills in the Model and responses fields below for the account selected underneath -- it does not save by itself, so review the values and click "Save settings" to apply them. Automatic sets the model to "default", Claude Code\'s own automatic model choice, and leaves the rest unset. Default (nothing set) clears every field this preset manages, exactly as if this tab had never been touched. Optimized for Opus 5 pins the model to Opus 5, sets a medium effort level, turns off always-on extended thinking and turns on auto-compact -- the two settings that most directly control how many tokens a session burns -- keeps Sonnet 5 as a fallback so work continues if Opus is temporarily overloaded, and follows the stable update channel.',
+  'Un preajuste solo rellena los campos de Modelo y respuestas de más abajo para la cuenta seleccionada debajo -- no guarda por sí solo, así que revisa los valores y pulsa "Guardar ajustes" para aplicarlos. Automática pone el modelo en "default", la selección automática de modelo del propio Claude Code, y deja lo demás sin definir. Por defecto (sin nada configurado) borra todos los campos que gestiona este preajuste, tal y como si nunca se hubiera tocado esta pestaña. Optimizado para Opus 5 fija el modelo en Opus 5, pone el nivel de esfuerzo en medio, desactiva el pensamiento extendido siempre activo y activa la compactación automática -- los dos ajustes que más determinan cuántos tokens gasta una sesión --, mantiene Sonnet 5 como modelo de respaldo para que el trabajo no se pare si Opus está saturado, y sigue el canal de actualización estable.'
+)?></blockquote>
+<span id="cc-preset-msg"></span>
+</div>
+
 <?php if (count($cc_files) > 1): ?>
 <div class="claude-box">
 <h4><?=t('Account', 'Cuenta')?></h4>
@@ -4113,6 +4241,7 @@ foreach ($cc_fields as $cc_g) foreach ($cc_g['fields'] as $cc_fd) $cc_types[$cc_
       'network' => t('Could not reach the server', 'No se pudo contactar con el servidor'),
       'badnum'  => t('is not a whole number', 'no es un número entero'),
       'badkv'   => t('must be written as NAME=value, one per line', 'debe escribirse como NOMBRE=valor, uno por línea'),
+      'preset'  => t('Preset applied -- review and click "Save settings"', 'Preajuste aplicado -- revisa y pulsa "Guardar ajustes"'),
   ])?>;
   // Every POST to a page under the webGUI needs this token or PHP's prepend
   // file ends the request with an empty body, which arrives here looking
@@ -4122,10 +4251,51 @@ foreach ($cc_fields as $cc_g) foreach ($cc_g['fields'] as $cc_fd) $cc_types[$cc_
 
   function el(id) { return document.getElementById(id); }
 
+  // Presets only ever touch these Model-and-responses fields. Never
+  // permissions, environment variables or anything else the form manages --
+  // a preset silently changing what a session may do without asking would be
+  // a much bigger decision than picking a model, and it is not what a model
+  // preset is for. Each preset lists a value for every field it manages, so
+  // applying one is deterministic regardless of what was there before;
+  // '' clears a field (removes the key on save) exactly like emptying it by
+  // hand would.
+  var PRESETS = {
+    // Claude Code's own automatic model choice. Everything else unset.
+    automatic: { model: 'default', fallbackModel: '', effortLevel: '', alwaysThinkingEnabled: '', autoCompactEnabled: '', autoUpdatesChannel: '' },
+    // The blank slate: as if this tab had never been touched.
+    none:      { model: '', fallbackModel: '', effortLevel: '', alwaysThinkingEnabled: '', autoCompactEnabled: '', autoUpdatesChannel: '' },
+    // Opus 5, tuned to spend as few tokens as a session reasonably can while
+    // still finishing the job: medium effort (xhigh reasons harder for a lot
+    // more tokens; low can under-think a genuinely hard step), extended
+    // thinking off by default (the single biggest per-turn token cost),
+    // auto-compact on (a smaller context is a cheaper one), a Sonnet 5
+    // fallback so an overloaded Opus does not just stop, and the stable
+    // update channel so it keeps working the same way from one day to the
+    // next.
+    opus5:     { model: 'claude-opus-5', fallbackModel: 'claude-sonnet-5', effortLevel: 'medium', alwaysThinkingEnabled: 'false', autoCompactEnabled: 'true', autoUpdatesChannel: 'stable' },
+  };
+
+  window.ccApplyPreset = function (presetKey) {
+    var preset = PRESETS[presetKey];
+    var msg = el('cc-preset-msg');
+    if (!preset) { if (msg) msg.textContent = ''; return; }
+    var slug = el('cc-account') ? el('cc-account').value : 'default';
+    var key, node;
+    for (key in preset) {
+      node = el('cc-' + slug + '-' + key.replace(/\./g, '_'));
+      if (node) node.value = preset[key];
+    }
+    if (msg) { msg.textContent = L.preset; msg.className = 'ok'; }
+  };
+
   window.ccSelect = function (slug) {
     var panes = document.getElementsByClassName('cc-pane');
     for (var i = 0; i < panes.length; i++) panes[i].style.display = (panes[i].id === 'cc-pane-' + slug) ? '' : 'none';
     if (el('cc-path')) el('cc-path').textContent = PATHS[slug] || '';
+    // A preset choice is a one-time fill for whichever account it was applied
+    // to, not a standing setting -- switching accounts starts that over.
+    if (el('cc-preset')) el('cc-preset').value = '';
+    if (el('cc-preset-msg')) el('cc-preset-msg').textContent = '';
   };
 
   // Turns what is in the fields into the JSON types settings.json expects. An
@@ -4406,7 +4576,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.09.04.2 has been installed!"
+    echo " Claude Code plugin v2026.09.06 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"

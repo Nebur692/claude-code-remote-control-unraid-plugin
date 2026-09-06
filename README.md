@@ -94,6 +94,16 @@ claim of authorship over the base plugin.
   retention, auto memory, hooks and the update channel — with a JSON editor covering every
   remaining key in Anthropic's settings reference. Saving a field leaves the rest of the file
   untouched and keeps the previous version beside it as `settings.json.bak`.
+- **A preset selector on the Config tab**: Automatic (Claude Code's own automatic model choice),
+  Default (clears every field the preset manages, exactly as if the tab had never been touched),
+  and Optimized for Opus 5 (pins the model to Opus 5, medium effort, always-on extended thinking
+  off, auto-compact on — the two settings that most directly control how many tokens a session
+  burns — a Sonnet 5 fallback so work continues if Opus is overloaded, and the stable update
+  channel). A preset only fills in the fields; you still review and save.
+- **Update restarts Remote Control for you.** Applying a new Claude Code version used to leave any
+  running bridge on the old binary until you stopped and started it by hand. Update (and Reinstall,
+  when it finds a newer binary already cached) now restarts each account's bridge that is actually
+  running, and only when the version genuinely changed.
 - **Plan figures that don't disappear**: Claude Code renews its access token while it is in use, so
   an account left idle for hours can no longer refresh its usage. The plan line then shows the last
   reading that worked together with the time it was taken, instead of going blank, and every reset
@@ -258,6 +268,17 @@ claro al autor original, sin reclamar autoría del plugin base.
   el canal de actualización — más un editor JSON que cubre todas las demás claves de la referencia
   de ajustes de Anthropic. Guardar un campo no toca el resto del archivo y deja la versión anterior
   al lado como `settings.json.bak`.
+- **Un selector de preajustes en la pestaña Config.**: Automática (la selección automática de
+  modelo del propio Claude Code), Por defecto (borra todos los campos que gestiona el preajuste,
+  tal y como si nunca se hubiera tocado la pestaña) y Optimizado para Opus 5 (fija el modelo en
+  Opus 5, esfuerzo medio, pensamiento extendido siempre activo desactivado, compactación automática
+  activada — los dos ajustes que más determinan cuántos tokens gasta una sesión —, Sonnet 5 como
+  respaldo para que el trabajo no se pare si Opus está saturado, y el canal de actualización
+  estable). Un preajuste solo rellena los campos; tú sigues revisando y guardando.
+- **Actualizar reinicia el Control Remoto por ti.** Aplicar una versión nueva de Claude Code dejaba
+  cualquier puente en marcha usando el binario antiguo hasta pararlo y arrancarlo a mano. Ahora
+  Actualizar (y Reinstalar, cuando encuentra un binario más nuevo ya en caché) reinicia el puente de
+  cada cuenta que esté realmente en marcha, y solo cuando la versión ha cambiado de verdad.
 - **Las cifras del plan ya no desaparecen**: Claude Code renueva su token de acceso mientras se usa,
   así que una cuenta que lleva horas parada ya no puede refrescar su consumo. La línea del plan
   muestra entonces la última lectura válida junto con la hora a la que se tomó, en vez de quedarse
