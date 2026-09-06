@@ -96,10 +96,11 @@ claim of authorship over the base plugin.
   untouched and keeps the previous version beside it as `settings.json.bak`.
 - **A preset selector on the Config tab**: Automatic (Claude Code's own automatic model choice),
   Default (clears every field the preset manages, exactly as if the tab had never been touched),
-  and Optimized for Opus 5 (pins the model to Opus 5, medium effort, always-on extended thinking
-  off, auto-compact on — the two settings that most directly control how many tokens a session
-  burns — a Sonnet 5 fallback so work continues if Opus is overloaded, and the stable update
-  channel). A preset only fills in the fields; you still review and save.
+  and Optimized for Opus 5 — which pins the model to Opus 5, keeps auto-compact on, follows the
+  stable update channel, and caps how much raw text a very verbose command is allowed to dump into
+  the conversation, **without** lowering the effort level, turning off extended thinking, or
+  falling back to a weaker model on overload: choosing Opus 5 means staying on Opus 5, at full
+  intelligence. A preset only fills in the fields; you still review and save.
 - **Update restarts Remote Control for you.** Applying a new Claude Code version used to leave any
   running bridge on the old binary until you stopped and started it by hand. Update (and Reinstall,
   when it finds a newer binary already cached) now restarts each account's bridge that is actually
@@ -270,11 +271,12 @@ claro al autor original, sin reclamar autoría del plugin base.
   al lado como `settings.json.bak`.
 - **Un selector de preajustes en la pestaña Config.**: Automática (la selección automática de
   modelo del propio Claude Code), Por defecto (borra todos los campos que gestiona el preajuste,
-  tal y como si nunca se hubiera tocado la pestaña) y Optimizado para Opus 5 (fija el modelo en
-  Opus 5, esfuerzo medio, pensamiento extendido siempre activo desactivado, compactación automática
-  activada — los dos ajustes que más determinan cuántos tokens gasta una sesión —, Sonnet 5 como
-  respaldo para que el trabajo no se pare si Opus está saturado, y el canal de actualización
-  estable). Un preajuste solo rellena los campos; tú sigues revisando y guardando.
+  tal y como si nunca se hubiera tocado la pestaña) y Optimizado para Opus 5 — que fija el modelo en
+  Opus 5, mantiene la compactación automática activada, sigue el canal de actualización estable y
+  limita cuánto texto en bruto puede volcar un comando muy «hablador» en la conversación, **sin**
+  bajarle el nivel de esfuerzo, sin desactivar el pensamiento extendido ni caer a un modelo más
+  simple si Opus está saturado: elegir Opus 5 significa seguir usando Opus 5, con toda su
+  inteligencia intacta. Un preajuste solo rellena los campos; tú sigues revisando y guardando.
 - **Actualizar reinicia el Control Remoto por ti.** Aplicar una versión nueva de Claude Code dejaba
   cualquier puente en marcha usando el binario antiguo hasta pararlo y arrancarlo a mano. Ahora
   Actualizar (y Reinstalar, cuando encuentra un binario más nuevo ya en caché) reinicia el puente de

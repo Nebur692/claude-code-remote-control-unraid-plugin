@@ -1,12 +1,32 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.09.06"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.09.06.2"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.09.06.2
+- Corrected the Opus 5 preset released a few hours ago. It no longer lowers
+  the effort level or turns off extended thinking: Anthropic's own docs say a
+  lower effort level "can trade off some intelligence", and turning extended
+  thinking off removes it for the whole session, not just for the easy turns
+  -- exactly what a preset promising not to touch Opus 5's intelligence
+  should not do quietly. It no longer falls back to Sonnet on overload
+  either, since choosing Opus 5 should mean staying on Opus 5. What is left
+  costs nothing in quality: the right model pinned, auto-compact kept on, the
+  stable update channel, and a cap on how much raw text a very verbose
+  command (long installs, big logs) is allowed to dump into the conversation
+  -- Claude can still read the rest from a file afterwards if it genuinely
+  needs to.
+- Added the setting behind that last point, "Command output limit"
+  (bashOutputMaxChars), to the Config tab itself -- previously it could only
+  be reached through the raw JSON editor at the bottom of the tab.
+- Rewrote every help text on the Config tab in plainer language, aimed at
+  someone with no technical background, instead of the more technical
+  wording it shipped with a few hours ago.
+
 ###2026.09.06
 - The Claude Code Config tab now has a preset selector at the top. Automatic
   sets the model to "default", Claude Code's own automatic model choice, and
@@ -3888,7 +3908,7 @@ if ($rc_owner === '') {
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeConfig.page">
-<SHA256>ea60cd02e3ab182f73aa3fa55ee0aedc742422a5e5a4ab167011e4c924c8d3c1</SHA256>
+<SHA256>f37402808a09b75a5ef7513c093aa6db15a5c41bbd1c154e4a76a81cd6dfb2db</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:4"
@@ -3917,128 +3937,134 @@ Tag="sliders"
 $cc_fields = [
   [
     'title' => t('Model and responses', 'Modelo y respuestas'),
-    'help'  => t('Claude Code applies most of these to a running session as soon as you save. The model, the effort level and the output style are read when a session starts, so those reach the next session rather than the one open now.',
-                 'Claude Code aplica la mayoría en cuanto guardas, incluso con una sesión abierta. El modelo, el nivel de esfuerzo y el estilo de salida se leen al iniciar la sesión, así que esos afectan a la siguiente, no a la que ya está abierta.'),
+    'help'  => t('Most of these apply as soon as you save, even to a session you already have open. Three of them -- the model, the effort level and the output style -- only take effect the next time you start a session, not the one that is already running.',
+                 'La mayoría se aplican en cuanto guardas, aunque tengas una sesión abierta. Tres de ellos -- el modelo, el nivel de esfuerzo y el estilo de respuesta -- solo se aplican a partir de la siguiente sesión que abras, no a la que ya está abierta.'),
     'fields' => [
       ['key' => 'model', 'type' => 'text', 'list' => ['default', 'sonnet', 'opus', 'haiku', 'opusplan', 'claude-sonnet-5', 'claude-opus-5', 'claude-haiku-4-5'],
        'label' => t('Model', 'Modelo'),
-       'help'  => t('Model every new session starts with: an alias such as sonnet or opus, or a full model ID. Empty means your account default.',
-                    'Modelo con el que arranca cada sesión: un alias como sonnet u opus, o un ID completo. Vacío usa el modelo por defecto de tu cuenta.')],
+       'help'  => t('The model every new session starts with. You can type a short name like sonnet or opus, or a full model name. Leave it empty to use whatever your account uses by default.',
+                    'El modelo con el que arrancará cada sesión nueva. Puedes escribir un nombre corto, como sonnet u opus, o el nombre completo del modelo. Si lo dejas vacío, se usará el que tengas configurado por defecto en tu cuenta.')],
       ['key' => 'fallbackModel', 'type' => 'lines',
        'label' => t('Fallback models', 'Modelos de respaldo'),
-       'help'  => t('One per line. Tried in order when the model above is overloaded or unavailable.',
-                    'Uno por línea. Se prueban en orden cuando el modelo de arriba está saturado o no disponible.')],
+       'help'  => t('One per line. If the model above is not available right now (for example, because too many people are using it), Claude tries these instead, in the order you list them. Leave it empty and Claude will simply wait for the model above to be free again.',
+                    'Uno por línea. Si el modelo de arriba no está disponible en un momento dado (por ejemplo, por estar saturado), Claude probará con estos, en el orden en que los escribas. Si lo dejas vacío, Claude esperará a que el modelo de arriba vuelva a estar disponible.')],
       ['key' => 'effortLevel', 'type' => 'select', 'options' => ['low', 'medium', 'high', 'xhigh'],
        'label' => t('Effort level', 'Nivel de esfuerzo'),
-       'help'  => t('How much reasoning Claude spends by default. Lower is faster and cheaper; higher thinks more and uses more of your plan.',
-                    'Cuánto razona Claude por defecto. Más bajo es más rápido y gasta menos; más alto piensa más y consume más plan.')],
+       'help'  => t('How hard Claude thinks before answering, by default. Higher means it reasons more thoroughly through difficult steps, but takes longer and uses more of your plan; lower answers faster and uses less, at the cost of thinking less on hard steps. If you are not sure, leave it empty -- Claude Code already picks a sensible level on its own.',
+                    'Cuánto se «piensa» una respuesta antes de darla. Más alto significa que Claude razona más a fondo los pasos difíciles, pero tarda más y gasta más de tu plan; más bajo responde antes y gasta menos, a cambio de pensar menos en esos pasos. Si no sabes cuál elegir, déjalo vacío: Claude Code ya elige por su cuenta un nivel que funciona bien en la mayoría de los casos.')],
       ['key' => 'outputStyle', 'type' => 'text',
-       'label' => t('Output style', 'Estilo de salida'),
-       'help'  => t('Name of a built-in or custom output style, which changes the instructions Claude works under.',
-                    'Nombre de un estilo de salida integrado o propio, que cambia las instrucciones con las que trabaja Claude.')],
+       'label' => t('Output style', 'Estilo de respuesta'),
+       'help'  => t('The name of a response style -- one that comes built into Claude Code, or one you created yourself. It changes the tone and the instructions Claude follows while it works.',
+                    'El nombre de un estilo de respuesta: uno de los que trae Claude Code de fábrica, o uno que hayas creado tú. Cambia el tono y las instrucciones con las que trabaja Claude.')],
       ['key' => 'alwaysThinkingEnabled', 'type' => 'bool',
        'label' => t('Extended thinking', 'Pensamiento extendido'),
-       'help'  => t('On by default for models that support it. Set it to No to turn it off for every session.',
-                    'Activado por defecto en los modelos que lo admiten. Ponlo en No para desactivarlo en todas las sesiones.')],
+       'help'  => t('Makes Claude "think out loud" before answering, on every message, on models that support it -- this is switched on by default on those models. Only set this to No if you would rather have quicker, more direct answers even on hard problems, in exchange for using fewer tokens.',
+                    'Hace que Claude «piense en voz alta» antes de responder, en todos los mensajes, en los modelos que lo permiten -- está activado de fábrica en esos modelos. Ponlo en No solo si prefieres respuestas más rápidas y directas, incluso en problemas difíciles, a cambio de gastar menos tokens.')],
       ['key' => 'language', 'type' => 'text',
        'label' => t('Response language', 'Idioma de las respuestas'),
-       'help'  => t('A language name, such as spanish or english. Claude Code adds it to the system prompt verbatim.',
-                    'Un nombre de idioma, por ejemplo spanish o english. Claude Code lo añade tal cual a las instrucciones del sistema.')],
+       'help'  => t('The name of a language, such as spanish or english. Claude will answer you in that language.',
+                    'El nombre de un idioma, por ejemplo español o inglés. Claude te responderá en ese idioma.')],
       ['key' => 'autoCompactEnabled', 'type' => 'bool',
        'label' => t('Auto-compact conversation', 'Compactar conversación automáticamente'),
-       'help'  => t('Summarises the conversation on its own when the context window fills up. On by default.',
-                    'Resume la conversación por su cuenta cuando la ventana de contexto se llena. Activado por defecto.')],
+       'help'  => t('When a conversation runs long, Claude summarises the older part of it by itself so it can keep working without running out of room to remember things. Switched on by default.',
+                    'Cuando una conversación se alarga mucho, Claude resume por su cuenta la parte más antigua para poder seguir trabajando sin quedarse sin espacio para recordar cosas. Activado de fábrica.')],
       ['key' => 'theme', 'type' => 'select', 'options' => ['auto', 'dark', 'light', 'dark-daltonized', 'light-daltonized', 'dark-ansi', 'light-ansi'],
        'label' => t('Theme', 'Tema'),
-       'help'  => t('Colour theme of the terminal interface.', 'Tema de color de la interfaz en la terminal.')],
+       'help'  => t('The colours Claude Code uses in the terminal.', 'Los colores con los que se ve Claude Code en la terminal.')],
       ['key' => 'editorMode', 'type' => 'select', 'options' => ['normal', 'vim'],
        'label' => t('Editor mode', 'Modo de edición'),
-       'help'  => t('Key bindings in the prompt: standard, or vim with its normal/insert/visual modes.',
-                    'Atajos de teclado al escribir: estándar, o vim con sus modos normal/insert/visual.')],
+       'help'  => t('How the keyboard behaves while you type: the usual way, or vim mode for anyone already used to that text editor.',
+                    'Cómo se comporta el teclado mientras escribes: el modo habitual, o el modo vim para quien ya esté acostumbrado a ese editor de texto.')],
       ['key' => 'verbose', 'type' => 'bool',
        'label' => t('Verbose output', 'Salida detallada'),
-       'help'  => t('Show each tool call in full instead of collapsing it to a summary line.',
-                    'Muestra cada llamada a herramienta completa en vez de resumirla en una línea.')],
+       'help'  => t('Shows everything Claude does in full detail, instead of summarising each action in a single line.',
+                    'Muestra con todo detalle cada cosa que hace Claude, en vez de resumirla en una sola línea.')],
       ['key' => 'spinnerTipsEnabled', 'type' => 'bool',
        'label' => t('Tips while working', 'Consejos mientras trabaja'),
-       'help'  => t('The rotating tips next to the spinner. On by default.',
-                    'Los consejos que van rotando junto al indicador de actividad. Activados por defecto.')],
+       'help'  => t('The little tips that appear next to the "working" spinner while you wait. Switched on by default.',
+                    'Los consejos que van apareciendo junto al indicador de «trabajando» mientras esperas. Activado de fábrica.')],
     ],
   ],
   [
     'title' => t('Permissions', 'Permisos'),
-    'help'  => t('What Claude may do without stopping to ask. Rules are written as Tool(argument), e.g. Bash(git status:*) or Read(/mnt/user/**). These apply as soon as you save, including to a session that is already open.',
-                 'Lo que Claude puede hacer sin preguntar. Las reglas se escriben como Herramienta(argumento), por ejemplo Bash(git status:*) o Read(/mnt/user/**). Se aplican al guardar, incluso a una sesión ya abierta.'),
+    'help'  => t('What Claude is allowed to do without stopping to ask you first. Each rule names an action and, in brackets, what it applies to -- for example Bash(git status:*) means "may run git status without asking", and Read(/mnt/user/**) means "may read files inside /mnt/user". You do not need to fully understand the syntax: you can copy rules from Claude Code\'s documentation, or just ask Claude for an example. These apply as soon as you save, even to a session you already have open.',
+                 'Qué puede hacer Claude sin pararse a pedirte permiso antes. Cada regla indica una acción y, entre paréntesis, sobre qué se aplica -- por ejemplo, Bash(git status:*) significa «puede ejecutar git status sin preguntar», y Read(/mnt/user/**) significa «puede leer archivos dentro de /mnt/user». No hace falta que entiendas del todo esta forma de escribirlas: puedes copiar reglas de la documentación de Claude Code, o simplemente pedirle un ejemplo a Claude. Se aplican en cuanto guardas, incluso en una sesión que ya tengas abierta.'),
     'fields' => [
       ['key' => 'permissions.defaultMode', 'type' => 'select',
        'options' => ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'],
        'label' => t('Default permission mode', 'Modo de permisos por defecto'),
-       'help'  => t('The mode new sessions start in. default asks before anything that is not a read; acceptEdits also allows edits; plan blocks changes until you approve a plan; bypassPermissions asks for nothing at all, which on a server reachable from outside is worth thinking twice about.',
-                    'El modo con el que arrancan las sesiones nuevas. default pregunta antes de todo lo que no sea lectura; acceptEdits permite además las ediciones; plan bloquea los cambios hasta que apruebes un plan; bypassPermissions no pregunta nada, algo que conviene pensarse dos veces en un servidor accesible desde fuera.')],
+       'help'  => t('The mode every new session starts in. default asks before doing anything other than reading; acceptEdits also lets Claude edit files without asking; plan makes Claude show you a plan and wait for your approval before changing anything; bypassPermissions does not ask about anything at all -- worth thinking twice about if this server can be reached from outside your network.',
+                    'El modo con el que arranca cada sesión nueva. default pregunta antes de hacer cualquier cosa que no sea leer; acceptEdits deja además que Claude edite archivos sin preguntar; plan hace que Claude te enseñe un plan y espere tu aprobación antes de cambiar nada; bypassPermissions no pregunta absolutamente nada -- conviene pensárselo dos veces si este servidor se puede alcanzar desde fuera de tu red.')],
       ['key' => 'permissions.allow', 'type' => 'lines',
        'label' => t('Always allow', 'Permitir siempre'),
-       'help'  => t('One rule per line. These run without asking.', 'Una regla por línea. Se ejecutan sin preguntar.')],
+       'help'  => t('One rule per line. Anything that matches these, Claude does straight away, without asking you.',
+                    'Una regla por línea. Lo que coincida con estas reglas, Claude lo hace directamente, sin pedirte permiso.')],
       ['key' => 'permissions.ask', 'type' => 'lines',
        'label' => t('Always ask', 'Preguntar siempre'),
-       'help'  => t('One rule per line. These always prompt, even in a permissive mode.',
-                    'Una regla por línea. Siempre preguntan, incluso en un modo permisivo.')],
+       'help'  => t('One rule per line. Anything that matches these, Claude always asks you about first, even in a mode that would otherwise let it through.',
+                    'Una regla por línea. Lo que coincida con estas reglas, Claude siempre te lo pregunta antes, incluso en un modo que de otra forma lo dejaría pasar.')],
       ['key' => 'permissions.deny', 'type' => 'lines',
        'label' => t('Never allow', 'No permitir nunca'),
-       'help'  => t('One rule per line. These are refused outright; a deny rule beats an allow rule.',
-                    'Una regla por línea. Se rechazan siempre; una regla de denegar gana a una de permitir.')],
+       'help'  => t('One rule per line. Anything that matches these is refused outright, even if it also matches an "always allow" rule -- a "never" rule always wins.',
+                    'Una regla por línea. Lo que coincida con estas reglas se rechaza siempre, aunque también coincida con una regla de «permitir siempre» -- prohibir siempre gana.')],
       ['key' => 'permissions.additionalDirectories', 'type' => 'lines',
        'label' => t('Additional directories', 'Directorios adicionales'),
-       'help'  => t('One path per line. Directories Claude may work in besides the one the session started from, e.g. /mnt/user/appdata.',
-                    'Una ruta por línea. Directorios en los que Claude puede trabajar además del de arranque de la sesión, por ejemplo /mnt/user/appdata.')],
+       'help'  => t('One folder path per line. Places Claude may work in besides the folder the session was started from -- for example /mnt/user/appdata.',
+                    'Una ruta por línea. Carpetas donde Claude puede trabajar además de la carpeta desde la que arrancaste la sesión -- por ejemplo, /mnt/user/appdata.')],
     ],
   ],
   [
     'title' => t('Remote Control', 'Control Remoto'),
-    'help'  => t('These are Claude Code\'s own Remote Control settings, and they apply to every session on this server, including sessions you start by hand in a terminal. Starting and stopping the bridge this plugin supervises stays on the Remote Control tab.',
-                 'Estos son los ajustes de Control Remoto del propio Claude Code y afectan a todas las sesiones de este servidor, incluidas las que abras a mano en una terminal. Arrancar y parar el puente que supervisa este plugin sigue estando en la pestaña Control Remoto.'),
+    'help'  => t('These are Claude Code\'s own Remote Control settings, and they apply to every session on this server, including ones you start by hand in a terminal. To start or stop the connection this plugin manages, go to the Remote Control tab instead.',
+                 'Estos ajustes son del propio Claude Code y afectan a todas las sesiones de este servidor, incluidas las que abras tú a mano en una terminal. Para arrancar o parar la conexión que gestiona este plugin, ve a la pestaña Control Remoto.'),
     'fields' => [
       ['key' => 'remoteControlAtStartup', 'type' => 'bool',
        'label' => t('Connect at session start', 'Conectar al iniciar sesión'),
-       'help'  => t('Connect Remote Control automatically whenever an interactive session starts, instead of waiting for /remote-control.',
-                    'Conecta el Control Remoto automáticamente al abrir una sesión interactiva, en vez de esperar a /remote-control.')],
+       'help'  => t('Connects Remote Control automatically every time you open a session, so you do not have to type /remote-control yourself.',
+                    'Conecta el Control Remoto automáticamente cada vez que abres una sesión, sin que tengas que escribir /remote-control tú mismo.')],
       ['key' => 'disableRemoteControl', 'type' => 'bool',
        'label' => t('Disable Remote Control', 'Desactivar Control Remoto'),
-       'help'  => t('Yes refuses Remote Control entirely, including this plugin\'s own service. Leave it unset unless you want it off.',
-                    'Sí rechaza el Control Remoto por completo, incluido el servicio de este plugin. Déjalo sin definir salvo que lo quieras desactivado.')],
+       'help'  => t('Setting this to Yes switches Remote Control off completely, including the one this plugin manages. Leave it unset unless you want it off entirely.',
+                    'Ponerlo en Sí desactiva el Control Remoto por completo, incluido el que gestiona este plugin. Déjalo sin definir salvo que quieras apagarlo del todo.')],
     ],
   ],
   [
     'title' => t('Environment and maintenance', 'Entorno y mantenimiento'),
-    'help'  => '',
+    'help'  => t('How Claude Code behaves behind the scenes -- what it remembers between sessions, how it tidies up after itself, and a few extra technical options for more advanced setups.',
+                 'Cómo se comporta Claude Code por dentro: qué recuerda entre sesiones, cómo se mantiene ordenado por su cuenta, y algunos ajustes técnicos adicionales para configuraciones más avanzadas.'),
     'fields' => [
       ['key' => 'env', 'type' => 'kv',
        'label' => t('Environment variables', 'Variables de entorno'),
-       'help'  => t('One NAME=value per line. Set for every session and for the processes it starts. Anything you put here is stored in plain text in this file.',
-                    'Un NOMBRE=valor por línea. Se aplican a cada sesión y a los procesos que lance. Lo que pongas aquí queda en texto plano en este archivo.')],
+       'help'  => t('One per line, written as NAME=value. These apply to every session and to anything it runs. Whatever you write here is stored as plain, unencrypted text in this file, so avoid putting passwords or other sensitive information here.',
+                    'Una por línea, escrita como NOMBRE=valor. Se aplican a todas las sesiones y a lo que estas ejecuten. Lo que escribas aquí se guarda sin cifrar, tal cual, en este archivo, así que evita poner aquí contraseñas u otra información sensible.')],
       ['key' => 'cleanupPeriodDays', 'type' => 'number',
        'label' => t('Keep transcripts for (days)', 'Conservar transcripciones (días)'),
-       'help'  => t('How many days Claude Code keeps session transcripts before deleting them. 30 by default. This does not touch agent memory.',
-                    'Cuántos días conserva Claude Code las transcripciones de sesión antes de borrarlas. 30 por defecto. No afecta a la memoria del agente.')],
+       'help'  => t('How many days Claude Code keeps a record of your conversations before deleting it automatically. 30 days by default. This does not affect the memory Claude keeps about you and your projects, which is kept separately.',
+                    'Cuántos días guarda Claude Code el registro de tus conversaciones antes de borrarlo automáticamente. Por defecto son 30 días. Esto no afecta a la memoria que Claude guarda sobre ti y tus proyectos, que se conserva aparte.')],
       ['key' => 'autoMemoryEnabled', 'type' => 'bool',
        'label' => t('Auto memory', 'Memoria automática'),
-       'help'  => t('Whether Claude reads and writes its automatic memory directory. On by default.',
-                    'Si Claude lee y escribe su directorio de memoria automática. Activada por defecto.')],
+       'help'  => t('Whether Claude can automatically save and read notes about what it learns about you and your projects, from one session to the next. Switched on by default.',
+                    'Si Claude puede guardar y leer, de forma automática, notas sobre lo que va aprendiendo de ti y de tus proyectos, de una sesión a otra. Activada de fábrica.')],
       ['key' => 'respectGitignore', 'type' => 'bool',
        'label' => t('Respect .gitignore', 'Respetar .gitignore'),
-       'help'  => t('Leave files matched by .gitignore out of the @ file picker. On by default.',
-                    'Deja fuera del selector de archivos @ lo que coincida con .gitignore. Activado por defecto.')],
+       'help'  => t('When you type @ to search for a file, do not suggest the ones a project normally excludes (the ones listed in its .gitignore file, if it has one). Switched on by default.',
+                    'Cuando escribes @ para buscar un archivo, no sugerir los que un proyecto normalmente excluye (los que aparecen en su archivo .gitignore, si lo tiene). Activado de fábrica.')],
       ['key' => 'disableAllHooks', 'type' => 'bool',
        'label' => t('Disable all hooks', 'Desactivar todos los hooks'),
-       'help'  => t('Turns off every hook, custom status line and custom file-suggestion command at once.',
-                    'Desactiva de golpe todos los hooks, la línea de estado personalizada y los comandos de sugerencia de archivos.')],
+       'help'  => t('Switches off, all at once, every custom automation you have set up: hooks (custom actions that run automatically), a custom status line, and any custom file-suggestion command.',
+                    'Desactiva de golpe todas las automatizaciones personalizadas que tengas: los hooks (acciones que se ejecutan automáticamente), la línea de estado personalizada, y cualquier comando propio de sugerencia de archivos.')],
       ['key' => 'autoUpdatesChannel', 'type' => 'select', 'options' => ['latest', 'stable'],
        'label' => t('Update channel', 'Canal de actualización'),
-       'help'  => t('Which releases Check for Updates follows: latest is the newest release, stable is about a week behind and skips releases with known regressions.',
-                    'Qué versiones sigue Buscar actualizaciones: latest es la más reciente, stable va una semana por detrás y se salta las versiones con regresiones conocidas.')],
+       'help'  => t('Which releases Claude Code looks for when it checks for updates. latest gives you the newest release as soon as it comes out; stable stays about a week behind and skips releases that turned out to have known problems.',
+                    'Qué versiones sigue Claude Code cuando comprueba si hay actualizaciones. latest te da la versión más reciente en cuanto sale; stable va aproximadamente una semana por detrás y se salta las versiones en las que ya se han encontrado fallos.')],
       ['key' => 'timeZone', 'type' => 'text',
        'label' => t('Time zone', 'Zona horaria'),
-       'help'  => t('An IANA name such as Europe/Madrid. Empty uses the server time zone.',
-                    'Un nombre IANA como Europe/Madrid. Vacío usa la zona horaria del servidor.')],
+       'help'  => t('The time zone you want Claude to use, written as Continent/City -- for example, Europe/Madrid. Leave it empty to use the server\'s own time zone.',
+                    'La zona horaria que quieres que use Claude, escrita como Continente/Ciudad -- por ejemplo, Europe/Madrid. Si lo dejas vacío, se usa la zona horaria del propio servidor.')],
+      ['key' => 'bashOutputMaxChars', 'type' => 'number',
+       'label' => t('Command output limit', 'Límite de salida de comandos'),
+       'help'  => t('How much text from a command\'s output Claude sees right away, before it has to go and look for the rest. Some commands print a huge amount of text that rarely matters (long installs, big log files); a lower number stops that from piling up in the conversation for nothing, and Claude can still read the full output afterwards from a file if it genuinely needs to. Default is 30000, and the highest you can set is 128000.',
+                    'Cuánto texto de la salida de un comando puede ver Claude de golpe, antes de tener que ir a buscar el resto. Algunos comandos escriben muchísimo texto que casi nunca hace falta entero (instalaciones largas, archivos de registro grandes); un número más bajo evita que ese texto se acumule sin necesidad en la conversación, y si de verdad hace falta más, Claude puede leerlo después desde un archivo. Por defecto son 30000, y el máximo que se puede poner es 128000.')],
     ],
   ],
 ];
@@ -4135,8 +4161,8 @@ foreach ($cc_fields as $cc_g) foreach ($cc_g['fields'] as $cc_fd) $cc_types[$cc_
 </select></dd>
 </dl>
 <blockquote class="inline_help"><?=t(
-  'A preset only fills in the Model and responses fields below for the account selected underneath -- it does not save by itself, so review the values and click "Save settings" to apply them. Automatic sets the model to "default", Claude Code\'s own automatic model choice, and leaves the rest unset. Default (nothing set) clears every field this preset manages, exactly as if this tab had never been touched. Optimized for Opus 5 pins the model to Opus 5, sets a medium effort level, turns off always-on extended thinking and turns on auto-compact -- the two settings that most directly control how many tokens a session burns -- keeps Sonnet 5 as a fallback so work continues if Opus is temporarily overloaded, and follows the stable update channel.',
-  'Un preajuste solo rellena los campos de Modelo y respuestas de más abajo para la cuenta seleccionada debajo -- no guarda por sí solo, así que revisa los valores y pulsa "Guardar ajustes" para aplicarlos. Automática pone el modelo en "default", la selección automática de modelo del propio Claude Code, y deja lo demás sin definir. Por defecto (sin nada configurado) borra todos los campos que gestiona este preajuste, tal y como si nunca se hubiera tocado esta pestaña. Optimizado para Opus 5 fija el modelo en Opus 5, pone el nivel de esfuerzo en medio, desactiva el pensamiento extendido siempre activo y activa la compactación automática -- los dos ajustes que más determinan cuántos tokens gasta una sesión --, mantiene Sonnet 5 como modelo de respaldo para que el trabajo no se pare si Opus está saturado, y sigue el canal de actualización estable.'
+  'A preset just fills in some of the fields below for the account you have selected further down -- it never saves anything by itself, so you can check the values and press "Save settings" whenever you are happy with them. Automatic lets Claude Code choose the model on its own ("default") and leaves everything else alone. Default (nothing set) clears everything this preset manages, exactly as if this tab had never been touched. Optimized for Opus 5 makes sure Opus 5 is the model in use, keeps automatic conversation summarising on so a long session never runs out of room, follows the more reliable update channel, and trims the extra text that very "talkative" commands dump into the conversation -- all without turning down how much Opus 5 thinks, and without switching to a different, weaker model if Opus is busy: if you choose Opus 5, you keep using Opus 5.',
+  'Un preajuste solo rellena algunos de los campos de aquí abajo para la cuenta que tengas seleccionada más abajo -- no guarda nada por sí solo, así que puedes revisar los valores y pulsar «Guardar ajustes» cuando estés conforme. Automática deja que Claude Code elija el modelo por su cuenta («default») y no toca nada más. Por defecto (sin nada configurado) borra todo lo que gestiona este preajuste, tal y como si nunca hubieras tocado esta pestaña. Optimizado para Opus 5 asegura que se use el modelo Opus 5, mantiene activado el resumen automático de conversaciones largas para que nunca se quede sin espacio, sigue el canal de actualización más fiable, y recorta el texto de sobra que sueltan los comandos muy «habladores» -- todo esto sin bajarle a Opus 5 lo que piensa, y sin cambiar a un modelo distinto y más simple si Opus está ocupado: si eliges Opus 5, sigues usando Opus 5.'
 )?></blockquote>
 <span id="cc-preset-msg"></span>
 </div>
@@ -4251,28 +4277,39 @@ foreach ($cc_fields as $cc_g) foreach ($cc_g['fields'] as $cc_fd) $cc_types[$cc_
 
   function el(id) { return document.getElementById(id); }
 
-  // Presets only ever touch these Model-and-responses fields. Never
-  // permissions, environment variables or anything else the form manages --
-  // a preset silently changing what a session may do without asking would be
-  // a much bigger decision than picking a model, and it is not what a model
-  // preset is for. Each preset lists a value for every field it manages, so
-  // applying one is deterministic regardless of what was there before;
-  // '' clears a field (removes the key on save) exactly like emptying it by
+  // Presets never touch permissions or environment variables -- a preset
+  // silently changing what a session may do without asking, or reading its
+  // secrets, is a much bigger decision than picking a model. They also never
+  // touch effortLevel or alwaysThinkingEnabled: both of those trade away real
+  // reasoning quality on hard problems for fewer tokens (Anthropic's own docs
+  // say medium effort "can trade off some intelligence", and switching
+  // extended thinking off removes it for the whole session, not just for the
+  // easy turns) -- that is a deliberate choice for someone who wants a
+  // cheaper, lighter session, not something an "optimize this model" preset
+  // should decide quietly on someone's behalf. Same reasoning for
+  // fallbackModel: falling back to a weaker model on overload is a real drop
+  // in capability, and whoever picks Opus 5 wants to keep using Opus 5, not
+  // silently get Sonnet answers. What is left costs nothing in quality:
+  // pinning the right model, keeping auto-compact on (already the default),
+  // and trimming raw command-output noise that was never adding intelligence
+  // in the first place. Each preset lists a value for every field it manages,
+  // so applying one is deterministic regardless of what was there before; ''
+  // clears a field (removes the key on save) exactly like emptying it by
   // hand would.
   var PRESETS = {
     // Claude Code's own automatic model choice. Everything else unset.
-    automatic: { model: 'default', fallbackModel: '', effortLevel: '', alwaysThinkingEnabled: '', autoCompactEnabled: '', autoUpdatesChannel: '' },
+    automatic: { model: 'default', fallbackModel: '', autoCompactEnabled: '', autoUpdatesChannel: '', bashOutputMaxChars: '' },
     // The blank slate: as if this tab had never been touched.
-    none:      { model: '', fallbackModel: '', effortLevel: '', alwaysThinkingEnabled: '', autoCompactEnabled: '', autoUpdatesChannel: '' },
-    // Opus 5, tuned to spend as few tokens as a session reasonably can while
-    // still finishing the job: medium effort (xhigh reasons harder for a lot
-    // more tokens; low can under-think a genuinely hard step), extended
-    // thinking off by default (the single biggest per-turn token cost),
-    // auto-compact on (a smaller context is a cheaper one), a Sonnet 5
-    // fallback so an overloaded Opus does not just stop, and the stable
-    // update channel so it keeps working the same way from one day to the
-    // next.
-    opus5:     { model: 'claude-opus-5', fallbackModel: 'claude-sonnet-5', effortLevel: 'medium', alwaysThinkingEnabled: 'false', autoCompactEnabled: 'true', autoUpdatesChannel: 'stable' },
+    none:      { model: '', fallbackModel: '', autoCompactEnabled: '', autoUpdatesChannel: '', bashOutputMaxChars: '' },
+    // Opus 5, without giving up any reasoning quality: the right model, kept
+    // there (no weaker fallback), auto-compact on so a long session never
+    // runs out of room, the stable update channel, and a command-output cap
+    // that only cuts noise a command dumps in bulk (very verbose builds,
+    // installs, logs) -- Claude can still read the full output afterwards
+    // from the file Claude Code saves it to if it genuinely needs more than
+    // this. effortLevel and alwaysThinkingEnabled are deliberately absent:
+    // see the block comment above.
+    opus5:     { model: 'claude-opus-5', fallbackModel: '', autoCompactEnabled: 'true', autoUpdatesChannel: 'stable', bashOutputMaxChars: '15000' },
   };
 
   window.ccApplyPreset = function (presetKey) {
@@ -4576,7 +4613,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.09.06 has been installed!"
+    echo " Claude Code plugin v2026.09.06.2 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
