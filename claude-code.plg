@@ -1,13 +1,13 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.09.07.2"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.09.07.3"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
-###2026.09.07.2
+###2026.09.07.3
 - Added a "Start a new session" button to the Remote Control tab. Until now
   Start only ever resumed the session an account was last using, and the only
   other option asked for a session id you already had, so an account whose
@@ -34,6 +34,11 @@
   nothing else: transcripts are left alone, and the agent memory stored
   beside them is never touched by anything on this page. A session that is
   connected, or that an account is still set to resume, cannot be deleted.
+- Fixed the "the previous session could no longer be resumed" notice staying on
+  screen after the account had already been started, or connected by hand, to a
+  perfectly good session. The marker it reads stays in the log forever, so the
+  notice was shown long after it had stopped being true; anything that picks a
+  session again now supersedes it.
 - The Remove button on the Accounts tab is now shown for the account in use
   as well. It was hidden for it, which meant that with two accounts and the
   extra one in use there was no Remove button anywhere and the feature looked
@@ -2510,7 +2515,7 @@ respond([
 <!-- Shared preamble and styling for the tabs. Every tab requires this once,
      so the state it computes is worked out a single time per request. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/common.php" Mode="0644">
-<SHA256>bdae3b462efb3bc8b6d5065f1deea84fe42f80417d6e92d4e6c0fa34423786b3</SHA256>
+<SHA256>8ebf04045858af43ae055f3d9c022c4a0ab06e65843b990d8175f4f1ccf610cd</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -2694,8 +2699,21 @@ foreach (($profiles ?: [['slug' => 'default', 'label' => t('Main account', 'Cuen
         if ($known_sid !== '' && strpos($session_url, $known_sid) === false) {
             $session_url = "https://claude.ai/code/$known_sid";
         }
-        if ($tail && preg_match_all('/^=== ARCHIVED_SESSION_FALLBACK:.*$/m', $tail, $a)) {
-            $archived = end($a[0]);
+        // Only while it is still the last word on which session this account
+        // is on. The marker stays in the log forever, so matching it anywhere
+        // in the tail meant the notice kept claiming a session had been
+        // dropped long after the account had been started, or connected by
+        // hand, to a perfectly good session -- which is exactly what it looks
+        // like when it is wrong: alarming and untrue. Anything that chooses a
+        // session again (a supervisor start, a connect, a stop) supersedes it.
+        if ($tail && preg_match_all('/^=== ARCHIVED_SESSION_FALLBACK:.*$/m', $tail, $a, PREG_OFFSET_CAPTURE)) {
+            $last = end($a[0]);
+            $newer = 0;
+            if (preg_match_all('/^=== (Remote Control supervisor started|Remote Control stopped by user|Connecting to requested session id|New session requested)/m',
+                               $tail, $b, PREG_OFFSET_CAPTURE)) {
+                $newer = end($b[0])[1];
+            }
+            if ($last[1] > $newer) $archived = $last[0];
         }
     }
 
@@ -4933,7 +4951,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.09.07.2 has been installed!"
+    echo " Claude Code plugin v2026.09.07.3 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
