@@ -1,12 +1,31 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.09.07.3"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.09.08"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.09.08
+- The Remote Control tab no longer says archiving is something only you do on
+  claude.ai. That was wrong, and checking the Claude Code binary says so:
+  it archives a session by itself when the session finishes, and the server
+  archives idle sessions on its own (Claude Code then tries to unarchive them
+  when a bridge reconnects). The plugin itself never archives anything -- the
+  only requests it makes are two read-only ones for plan usage and
+  subscription state.
+- A session that cannot be resumed now says which of the two reasons it is,
+  instead of guessing "probably archived". Either the server no longer finds
+  it (archived and unreachable, expired or deleted), or it is found but has no
+  machine attached to it any more -- and in that second case unarchiving the
+  conversation on claude.ai does not bring the machine back, which is worth
+  knowing before trying. The conversation stays readable there either way;
+  what is gone is the session running on this server.
+- Said plainly next to the field: only a session that still has a machine
+  attached can be reconnected by id, which in practice means one this server
+  started and kept alive.
+
 ###2026.09.07.3
 - Added a "Start a new session" button to the Remote Control tab. Until now
   Start only ever resumed the session an account was last using, and the only
@@ -1113,7 +1132,7 @@ fi
      taken over as "most recent"; see the connect subcommand and the
      Settings page's Session ID field. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh" Mode="0755">
-<SHA256>3d6f858f3388baf358ef4d3b7c7eab91273c938952372dbe1ee9bd9fe8c51145</SHA256>
+<SHA256>c5167e7da6c4ef67a941cdb5bfbe5bb959520e92a78412ee3aa17960da9a5995</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1333,6 +1352,25 @@ session_is_gone() {
         ! printf '%s\n' "$1" | grep -qa "already being served by another"
 }
 
+# Why the CLI refused, in the plugin's own words, so the page can say something
+# more useful than "probably archived" -- which was a guess, and a misleading
+# one: these two cases have different causes and different remedies.
+#
+#  - no environment_id: the session exists and the server hands it over, but it
+#    has no machine attached any more. The bridge that served it is gone, and
+#    that binding is not restored by unarchiving the conversation on claude.ai.
+#  - not found: the server does not return it at all (archived and unreachable,
+#    expired, or deleted).
+session_gone_reason() {
+    if printf '%s\n' "$1" | grep -qa "has no environment_id"; then
+        echo "it has no machine attached to it any more, so it cannot be served from this server again"
+    elif printf '%s\n' "$1" | grep -qa "not found"; then
+        echo "the server no longer finds it: archived and unreachable, expired, or deleted"
+    else
+        echo "the server refused to resume it"
+    fi
+}
+
 run_fresh() {
     local rc_dir="$1"
     echo "=== Starting a fresh session in $rc_dir: $(date) ===" >> "$LOGFILE"
@@ -1359,7 +1397,7 @@ do_run() {
             echo "=== Connecting to requested session id $pinned_id: $(date) ===" >> "$LOGFILE"
             output=$(run_claude "$rc_dir" --session-id "$pinned_id")
             if session_is_gone "$output" || echo "$output" | grep -qi "session failed: Process exited with error"; then
-                echo "=== ARCHIVED_SESSION_FALLBACK: requested session $pinned_id could not be resumed (archived, ended, or never attached to a bridge) -- starting a new session instead: $(date) ===" >> "$LOGFILE"
+                echo "=== ARCHIVED_SESSION_FALLBACK: the requested session $pinned_id could not be resumed because $(session_gone_reason "$output") -- starting a new session instead: $(date) ===" >> "$LOGFILE"
                 # Forget it as well, or the next start would ask for the same
                 # dead id by name and fail its way back here.
                 save_cfg_var "$SESSION_ID_KEY" ""
@@ -1403,7 +1441,7 @@ do_run() {
             # Gone for good: no point retrying, and no threshold to wait
             # out either -- the CLI has told us the id itself is unusable.
             elif session_is_gone "$output"; then
-                echo "=== ARCHIVED_SESSION_FALLBACK: session ${own_id:-in $rc_dir} can no longer be resumed -- starting a new session for account '$PROFILE': $(date) ===" >> "$LOGFILE"
+                echo "=== ARCHIVED_SESSION_FALLBACK: session ${own_id:-in $rc_dir} can no longer be resumed because $(session_gone_reason "$output") -- starting a new session for account '$PROFILE': $(date) ===" >> "$LOGFILE"
                 fail_count=0
                 [ -n "$own_id" ] && save_cfg_var "$SESSION_ID_KEY" ""
                 run_fresh "$rc_dir"
@@ -4042,7 +4080,7 @@ Tag="users"
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeRemote.page">
-<SHA256>538a99f34715ef2c2d96fb64a78e28f74d41003a2f6ca67c7bac0fefee312462</SHA256>
+<SHA256>8e28f5b8e7db57f1d1cdf55c5bd86e1749aa01481d4377eb994a7c6c8e74fcba</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:3"
@@ -4065,8 +4103,12 @@ Tag="desktop"
     'Si la sesión que usaba una cuenta ya no se puede retomar -- archivada en claude.ai, caducada, o que nunca llegó a conectarse -- se arranca otra en su lugar automáticamente, y además puedes pedir una sesión nueva cuando quieras con el botón de abajo.'
 )?></p>
 <p><?=t(
-    'If a session was archived on claude.ai (an action you take there, not something Claude does by itself) or otherwise can no longer be resumed, this is detected automatically after a few failed attempts and a new session starts in its place -- see the notice below when that happens.',
-    'Si una sesión fue archivada en claude.ai (una acción que haces tú allí, no algo que hace Claude por su cuenta) o ya no se puede retomar por otro motivo, esto se detecta automáticamente tras varios intentos fallidos y arranca una sesión nueva en su lugar -- verás un aviso abajo cuando ocurra.'
+    'Sessions do get archived on their own, so this is not always something you did: Claude Code archives a session of its own accord when it finishes, and the server archives sessions that have been idle for a while (it then tries to unarchive them by itself when a bridge reconnects). Either way, when a session can no longer be resumed a new one starts in its place and the notice below says why.',
+    'Las sesiones se archivan solas, así que no siempre es algo que hayas hecho tú: Claude Code archiva por su cuenta una sesión cuando termina, y el servidor archiva las que llevan un rato inactivas (y luego intenta desarchivarlas él mismo cuando un puente se reconecta). En cualquier caso, cuando una sesión ya no se puede retomar se arranca otra en su lugar y el aviso de abajo explica por qué.'
+)?></p>
+<p><?=t(
+    'Two different things can stop a session being resumed, and only one of them is about archiving. A session the server no longer finds is archived and unreachable, expired or deleted. A session that is found but has no machine attached to it cannot be served from here either, and unarchiving the conversation on claude.ai does not bring its machine back -- that binding belongs to the bridge that served it, and it is gone with it. The conversation stays readable on claude.ai in both cases; what cannot be recovered is the session running on this server.',
+    'Hay dos cosas distintas que impiden retomar una sesión, y solo una tiene que ver con el archivado. Una sesión que el servidor ya no encuentra está archivada e inaccesible, caducada o borrada. Una sesión que sí encuentra pero que ya no tiene una máquina asociada tampoco se puede servir desde aquí, y desarchivar la conversación en claude.ai no le devuelve esa máquina: ese vínculo era del puente que la servía y se fue con él. En los dos casos la conversación sigue ahí para leerla en claude.ai; lo que no se recupera es la sesión ejecutándose en este servidor.'
 )?></p>
 <?php if ($multi_account && count($rc_accounts) > 1): ?>
 <p><?=t(
@@ -4085,7 +4127,7 @@ Tag="desktop"
 <?php if ($rc['archived']): ?>
 <div class="claude-notice">
 <b><?=t('Notice:', 'Aviso:')?></b>
-<?=t('The previous session could no longer be resumed (likely archived) -- a new session was started automatically.', 'La sesión anterior ya no se pudo retomar (probablemente archivada) -- se inició una nueva automáticamente.')?>
+<?=t('The previous session could no longer be resumed -- a new session was started automatically. The line below says exactly why.', 'La sesión anterior ya no se pudo retomar -- se inició una nueva automáticamente. La línea de abajo dice exactamente por qué.')?>
 <br><code style="font-size:0.85em;"><?=htmlspecialchars($rc['archived'])?></code>
 </div>
 <?php endif; ?>
@@ -4148,8 +4190,8 @@ Tag="desktop"
 </dd>
 </dl>
 <blockquote class="inline_help"><?=t(
-    'Stops this account\'s current session (if any) and connects to a specific session id instead of the most recent one -- pick one from the history below, or paste an id from claude.ai/code. If that session can no longer be resumed either, it falls back to a fresh one automatically, same as above.',
-    'Detiene la sesión actual de esta cuenta (si hay alguna) y conecta a un id de sesión concreto en vez de al más reciente -- elige uno del histórico de abajo, o pega un id de claude.ai/code. Si esa sesión tampoco se puede retomar, cae a una sesión nueva automáticamente, igual que arriba.'
+    'Stops this account\'s current session (if any) and connects to a specific session id instead of the most recent one. Only a Remote Control session that still has a machine attached can be reconnected, which in practice means one this server started and kept alive: an id copied from claude.ai whose bridge has since stopped will not come back, however healthy the conversation looks there. If it cannot be resumed, a fresh session starts automatically and the notice above says why.',
+    'Detiene la sesión actual de esta cuenta (si hay alguna) y conecta a un id de sesión concreto en vez de al más reciente. Solo se puede reconectar una sesión de Control Remoto que todavía tenga una máquina asociada, que en la práctica es una que haya arrancado y mantenido este servidor: un id copiado de claude.ai cuyo puente ya se paró no vuelve, por muy bien que se vea la conversación allí. Si no se puede retomar, arranca una sesión nueva automáticamente y el aviso de arriba explica por qué.'
 )?></blockquote>
 <input type="submit" value="<?=t('Connect to session ID', 'Conectar a ese ID de sesión')?>">
 </form>
@@ -4951,7 +4993,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.09.07.3 has been installed!"
+    echo " Claude Code plugin v2026.09.08 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
