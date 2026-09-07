@@ -101,6 +101,18 @@ claim of authorship over the base plugin.
   the conversation, **without** lowering the effort level, turning off extended thinking, or
   falling back to a weaker model on overload: choosing Opus 5 means staying on Opus 5, at full
   intelligence. A preset only fills in the fields; you still review and save.
+- **A way out when a session cannot be resumed.** Remote Control has a "Start a new session"
+  button next to Start and Stop: Start resumes the session an account was last using, and this
+  opens an empty one instead, which is what you need when the old session was archived, expired or
+  never attached to a bridge. The supervisor also recognises those failures now — any error naming
+  the session drops it and starts a new one at once, instead of asking for the same dead session
+  every five seconds forever — and only a session that actually connected is remembered as an
+  account's own, so an id that never worked cannot be resumed on the next start.
+- **Old sessions can be deleted from the session list**, which removes the entry and Claude's note
+  about the last session of that directory and nothing else: conversation transcripts are left
+  alone, and the agent memory stored beside them is never touched by anything on this page. A
+  session that is connected, or that an account is still set to resume, has no Delete button.
+
 - **Update restarts Remote Control for you.** Applying a new Claude Code version used to leave any
   running bridge on the old binary until you stopped and started it by hand. Update (and Reinstall,
   when it finds a newer binary already cached) now restarts each account's bridge that is actually
@@ -277,6 +289,20 @@ claro al autor original, sin reclamar autoría del plugin base.
   bajarle el nivel de esfuerzo, sin desactivar el pensamiento extendido ni caer a un modelo más
   simple si Opus está saturado: elegir Opus 5 significa seguir usando Opus 5, con toda su
   inteligencia intacta. Un preajuste solo rellena los campos; tú sigues revisando y guardando.
+- **Una salida cuando una sesión ya no se puede retomar.** El Control Remoto tiene un botón
+  «Iniciar sesión nueva» junto a Iniciar y Detener: Iniciar retoma la sesión que la cuenta estaba
+  usando, y este abre una vacía, que es lo que hace falta cuando la anterior fue archivada, caducó
+  o nunca llegó a conectarse. Además el supervisor ya reconoce esos fallos — cualquier error que
+  nombre la sesión hace que se descarte y arranque otra al momento, en vez de pedir la misma sesión
+  muerta cada cinco segundos indefinidamente — y solo se recuerda como sesión de una cuenta la que
+  llegó a conectarse de verdad, así que un id que nunca funcionó no se reintenta en el siguiente
+  arranque.
+- **Las sesiones viejas se pueden borrar de la lista**, lo que quita la entrada y la nota de Claude
+  sobre cuál fue la última sesión de ese directorio, y nada más: las transcripciones de las
+  conversaciones se quedan donde están, y la memoria persistente del agente que se guarda junto a
+  ellas no la toca nada de esta página. Una sesión conectada, o que una cuenta todavía va a
+  retomar, no tiene botón de Borrar.
+
 - **Actualizar reinicia el Control Remoto por ti.** Aplicar una versión nueva de Claude Code dejaba
   cualquier puente en marcha usando el binario antiguo hasta pararlo y arrancarlo a mano. Ahora
   Actualizar (y Reinstalar, cuando encuentra un binario más nuevo ya en caché) reinicia el puente de

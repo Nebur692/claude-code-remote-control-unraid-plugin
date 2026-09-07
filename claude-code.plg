@@ -1,12 +1,46 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.09.06.2"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.09.07.2"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.09.07.2
+- Added a "Start a new session" button to the Remote Control tab. Until now
+  Start only ever resumed the session an account was last using, and the only
+  other option asked for a session id you already had, so an account whose
+  session could no longer be resumed had no way out from the web page at all.
+- Fixed a supervisor that retried a dead session every five seconds forever.
+  Claude reports an unusable session in several different wordings ("not
+  found. It may have been archived or expired", "has no environment_id");
+  none of them were recognised, so the automatic fallback to a new session
+  never fired. Any error naming the session is now taken at its word: the
+  session is dropped and a new one is started at once, without waiting.
+- The main account now resumes its own session by name, like the extra
+  accounts already did, instead of asking for "the last session in this
+  directory". With two accounts working in the same directory that question
+  had the wrong answer: Claude's note for the directory ends up naming
+  whichever account started a session there last, so the main account could go
+  looking for someone else's session and land on a brand-new one instead of
+  the session it had been resuming for months.
+- Fixed the plugin remembering session ids that had never worked. It picked
+  up any id that appeared in the log, including the ones inside its own
+  status lines and inside error messages, and then tried to resume them on
+  every start. Only a session that actually connected is remembered now.
+- Old sessions can be deleted from the session list. This removes the entry
+  and the note Claude keeps about the last session of that directory, and
+  nothing else: transcripts are left alone, and the agent memory stored
+  beside them is never touched by anything on this page. A session that is
+  connected, or that an account is still set to resume, cannot be deleted.
+- The Remove button on the Accounts tab is now shown for the account in use
+  as well. It was hidden for it, which meant that with two accounts and the
+  extra one in use there was no Remove button anywhere and the feature looked
+  like it did not exist. Removing the account in use switches back to the
+  main account first and stops that account's Remote Control; the account's
+  folder, its memory and its transcripts stay where they are.
+
 ###2026.09.06.2
 - Corrected the Opus 5 preset released a few hours ago. It no longer lowers
   the effort level or turns off extended thinking: Anthropic's own docs say a
@@ -1074,7 +1108,7 @@ fi
      taken over as "most recent"; see the connect subcommand and the
      Settings page's Session ID field. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh" Mode="0755">
-<SHA256>c405c4df1e952110e8d00b762b8073e6af17cdc483e734b9f981d745acac824e</SHA256>
+<SHA256>3d6f858f3388baf358ef4d3b7c7eab91273c938952372dbe1ee9bd9fe8c51145</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1122,6 +1156,9 @@ set_profile() {
     PIDFILE="/var/run/claude-remote-control$SUFFIX.pid"
     ENABLED_FLAG="/var/run/claude-remote-control$SUFFIX.enabled"
     PINFILE="/var/run/claude-remote-control$SUFFIX.pin"
+    # Set by "new": tells the supervisor to open a brand-new session on its
+    # next turn instead of resuming anything.
+    FRESHFILE="/var/run/claude-remote-control$SUFFIX.fresh"
 
     # The environment that selects this account, from the script that owns that
     # decision. Empty for the main account.
@@ -1187,6 +1224,20 @@ get_cfg_var() {
     printf '%s' "${line#*=}" | sed -e 's/^"//' -e 's/"$//'
 }
 
+# Which lines of claude's output actually announce a session this bridge is
+# serving. Everything else is not evidence, and a plain grep for "session_"
+# treated it as if it were: the log also carries this script's own
+# "=== Connecting to requested session id session_X ===" markers and claude's
+# own "Error: Session session_X not found" lines. That is how a session id
+# that had never worked ended up saved as an account's own session and then
+# resumed on every start, forever. Only the URL of an attached session counts,
+# printed either as the "Continue coding in..." line or as the terminal
+# hyperlink claude writes once the bridge is up.
+extract_sid() {
+    grep -aoE 'claude\.ai/code/session_[A-Za-z0-9]+' \
+        | grep -aoE 'session_[A-Za-z0-9]+' | tail -1
+}
+
 # Appends one session id to the history file, skipping if it's already the
 # newest entry (the same id shows up over and over while claude redraws its
 # connection status line in place).
@@ -1202,10 +1253,14 @@ record_sid() {
         # spaces, so appending it bare would make the line ambiguous. Lines
         # written before accounts existed simply have no bracket.
         echo "$(date -Iseconds) $sid $rc_dir [$PROFILE]" >> "$HISTORY_FILE"
-        # Remember it as this account's own session. That is what lets an
-        # account resume its session rather than whatever happens to be the
-        # most recent one in a directory it may be sharing.
-        [ -n "$SESSION_ID_KEY" ] && save_cfg_var "$SESSION_ID_KEY" "$sid"
+    fi
+    # Remember it as this account's own session, outside the history check
+    # above: that check is about not writing the same line twice, while this
+    # is about which session the account resumes next time. An id that is
+    # already in the recent history still has to be recorded here, or an
+    # account that just started a session could be left with none remembered.
+    if [ -n "$SESSION_ID_KEY" ] && [ "$(get_cfg_var "$SESSION_ID_KEY")" != "$sid" ]; then
+        save_cfg_var "$SESSION_ID_KEY" "$sid"
     fi
 }
 
@@ -1224,7 +1279,7 @@ watch_for_sessions() {
     local offset="$1" rc_dir="$2" parent="$3" sid
     while kill -0 "$parent" 2>/dev/null; do
         sleep "$SESSION_POLL_SECONDS"
-        sid=$(tail -c "+$((offset + 1))" "$LOGFILE" 2>/dev/null | grep -oE 'session_[A-Za-z0-9]+' | tail -1)
+        sid=$(tail -c "+$((offset + 1))" "$LOGFILE" 2>/dev/null | extract_sid)
         [ -n "$sid" ] && record_sid "$sid" "$rc_dir"
     done
 }
@@ -1253,8 +1308,24 @@ run_claude() {
     kill "$watcher" 2>/dev/null
     wait "$watcher" 2>/dev/null
     # Also record on exit, in case the attempt was shorter than one poll.
-    record_sid "$(echo "$output" | grep -oE 'session_[A-Za-z0-9]+' | tail -1)" "$rc_dir"
+    record_sid "$(printf '%s\n' "$output" | extract_sid)" "$rc_dir"
     printf '%s\n' "$output"
+}
+
+# Does this attempt's output say the session we asked for is gone for good?
+#
+# claude words this differently depending on why ("not found. It may have been
+# archived or expired", "has no environment_id. It may never have been attached
+# to a bridge", and more to come), and every new wording has cost this plugin
+# the same bug: the supervisor did not recognise the message, never counted a
+# failure, and asked for the same dead session every five seconds forever. So
+# the test is deliberately generic -- any "Error: Session <id> ..." line means
+# the id we asked for is unusable, whatever reason is given. The one exception
+# is a session another instance holds, which is a live session and has its own
+# branch above.
+session_is_gone() {
+    printf '%s\n' "$1" | grep -qaE '^[[:space:]]*Error: Session session_[A-Za-z0-9]+ ' &&
+        ! printf '%s\n' "$1" | grep -qa "already being served by another"
 }
 
 run_fresh() {
@@ -1271,13 +1342,22 @@ do_run() {
     while [ -f "$ENABLED_FLAG" ]; do
         cd "$rc_dir" || break
 
-        if [ -f "$PINFILE" ]; then
+        if [ -f "$FRESHFILE" ]; then
+            # "Start a new session" was pressed. Nothing to resume, on purpose.
+            rm -f "$FRESHFILE" "$PINFILE"
+            echo "=== New session requested from the web page: $(date) ===" >> "$LOGFILE"
+            run_fresh "$rc_dir"
+            fail_count=0
+        elif [ -f "$PINFILE" ]; then
             pinned_id=$(cat "$PINFILE")
             rm -f "$PINFILE"
             echo "=== Connecting to requested session id $pinned_id: $(date) ===" >> "$LOGFILE"
             output=$(run_claude "$rc_dir" --session-id "$pinned_id")
-            if echo "$output" | grep -qi "session failed: Process exited with error"; then
-                echo "=== ARCHIVED_SESSION_FALLBACK: requested session $pinned_id could not be resumed (likely archived or ended) -- starting a new session instead: $(date) ===" >> "$LOGFILE"
+            if session_is_gone "$output" || echo "$output" | grep -qi "session failed: Process exited with error"; then
+                echo "=== ARCHIVED_SESSION_FALLBACK: requested session $pinned_id could not be resumed (archived, ended, or never attached to a bridge) -- starting a new session instead: $(date) ===" >> "$LOGFILE"
+                # Forget it as well, or the next start would ask for the same
+                # dead id by name and fail its way back here.
+                save_cfg_var "$SESSION_ID_KEY" ""
                 run_fresh "$rc_dir"
             fi
             fail_count=0
@@ -1286,11 +1366,19 @@ do_run() {
             # whichever account started it. With accounts sharing a directory
             # that is the wrong session: the CLI refuses to serve one that
             # another instance already holds. So an account that knows its own
-            # session id asks for that one by name, and only falls back to
-            # --continue when it has none yet. The main account keeps using
-            # --continue, exactly as it always has.
-            own_id=""
-            [ "$PROFILE" != "default" ] && own_id=$(get_cfg_var "$SESSION_ID_KEY")
+            # session id asks for that one by name, and falls back to
+            # --continue only when it has none yet.
+            #
+            # This now includes the main account, which used to always use
+            # --continue. Observed on a real server: a second account opened a
+            # session in the same directory, Claude's pointer for that
+            # directory came to name the second account's session, and the main
+            # account's next start would have gone looking for someone else's
+            # session and ended up on a brand-new one instead of the session it
+            # had been resuming for months. Its own id is the honest answer;
+            # a dead one falls through to a fresh session below, which is
+            # exactly what --continue would have done anyway.
+            own_id=$(get_cfg_var "$SESSION_ID_KEY")
             if [ -n "$own_id" ]; then
                 output=$(run_claude "$rc_dir" --session-id "$own_id")
             else
@@ -1304,6 +1392,13 @@ do_run() {
             # infinite loop the archived-session check was added to prevent.
             if echo "$output" | grep -q "already being served by another"; then
                 echo "=== The session in $rc_dir is already held by another instance${own_id:+ (}${own_id}${own_id:+)} -- starting a new session for account '$PROFILE': $(date) ===" >> "$LOGFILE"
+                fail_count=0
+                [ -n "$own_id" ] && save_cfg_var "$SESSION_ID_KEY" ""
+                run_fresh "$rc_dir"
+            # Gone for good: no point retrying, and no threshold to wait
+            # out either -- the CLI has told us the id itself is unusable.
+            elif session_is_gone "$output"; then
+                echo "=== ARCHIVED_SESSION_FALLBACK: session ${own_id:-in $rc_dir} can no longer be resumed -- starting a new session for account '$PROFILE': $(date) ===" >> "$LOGFILE"
                 fail_count=0
                 [ -n "$own_id" ] && save_cfg_var "$SESSION_ID_KEY" ""
                 run_fresh "$rc_dir"
@@ -1337,6 +1432,61 @@ do_run() {
     rm -f "$PIDFILE"
 }
 
+# Removes one session from the lists this page shows.
+#
+# What it deletes is deliberately tiny: the plugin's own history lines, and
+# Claude's per-directory bridge pointer when that pointer names this session.
+# It never deletes a transcript and never goes near the memory directory that
+# lives in the same project folder -- persistent memory is not this button's
+# business, and the path guard below only ever accepts a file literally named
+# bridge-pointer.json inside the appdata tree.
+forget_session() {
+    local sid="$1" p key appdata ptr pid cmd found=no
+    for p in $(all_profiles); do
+        if [ "$p" = "default" ]; then key="LAST_SESSION_ID"; else key="LAST_SESSION_ID_$p"; fi
+        if [ "$(get_cfg_var "$key")" = "$sid" ]; then
+            echo "Session $sid is the one account '$p' is set to use, so it is not an old session."
+            echo "Start a new session for that account first, then delete this one."
+            return 1
+        fi
+    done
+
+    APPDATA_PATH=""
+    [ -f "$PLUGIN_CFG" ] && source "$PLUGIN_CFG"
+    appdata="${APPDATA_PATH:-/mnt/user/appdata/claude-code}"
+
+    for ptr in "$appdata"/.claude/projects/*/bridge-pointer.json \
+               "$appdata"/profiles/*/projects/*/bridge-pointer.json; do
+        [ -f "$ptr" ] || continue
+        [ "$(basename "$ptr")" = "bridge-pointer.json" ] || continue
+        grep -q "\"$sid\"" "$ptr" || continue
+        # A connected session is not an old session. The pid alone proves
+        # nothing (pids are reused), so the process has to be claude's.
+        pid=$(grep -oE '"pid":[0-9]+' "$ptr" | head -1 | tr -dc '0-9')
+        if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
+            cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+            case "$cmd" in
+                *claude*) echo "Session $sid is connected right now (pid $pid). Stop it before deleting it."; return 1 ;;
+            esac
+        fi
+        rm -f "$ptr" && found=yes
+    done
+
+    if [ -f "$HISTORY_FILE" ] && grep -q " $sid " "$HISTORY_FILE"; then
+        grep -v " $sid " "$HISTORY_FILE" > "$HISTORY_FILE.tmp" 2>/dev/null &&
+            mv -f "$HISTORY_FILE.tmp" "$HISTORY_FILE" && found=yes
+        rm -f "$HISTORY_FILE.tmp"
+    fi
+
+    if [ "$found" = yes ]; then
+        echo "Session $sid removed from the list."
+        echo "Its transcript and the agent memory stored with it were not touched."
+    else
+        echo "Session $sid was not in any list this plugin keeps."
+        return 1
+    fi
+}
+
 stop_running() {
     rm -f "$ENABLED_FLAG"
     if [ -f "$PIDFILE" ]; then
@@ -1358,7 +1508,7 @@ stop_running() {
 CMD="${1:-}"
 SLUG=""
 case "${2:-}" in
-    session_*) ;;              # "connect <sid>": a session id, not an account
+    session_*) ;;              # "connect/forget <sid>": a session id, not an account
     "")        ;;
     *) SLUG="$2" ;;
 esac
@@ -1372,7 +1522,7 @@ case "$CMD" in
             echo "Remote Control is already running for account '$PROFILE'."
             exit 0
         fi
-        rm -f "$PINFILE"
+        rm -f "$PINFILE" "$FRESHFILE"
         touch "$ENABLED_FLAG"
         nohup "$0" _run "$PROFILE" > /dev/null 2>&1 &
         echo $! > "$PIDFILE"
@@ -1381,6 +1531,28 @@ case "$CMD" in
         ;;
     _run)
         do_run
+        ;;
+    new)
+        # A session that cannot be resumed used to leave no way out from the
+        # page: Start resumes the remembered id, and Connect needs an id you
+        # already have. This is the missing third door -- open a new one.
+        stop_running
+        rm -f "$PINFILE"
+        save_cfg_var "$SESSION_ID_KEY" ""
+        touch "$FRESHFILE"
+        touch "$ENABLED_FLAG"
+        nohup "$0" _run "$PROFILE" > /dev/null 2>&1 &
+        echo $! > "$PIDFILE"
+        echo "Starting a brand-new session for account '$PROFILE' in directory: $(get_rc_dir)"
+        echo "The previous session is not deleted: it stays in the list below and can still be reconnected by its id."
+        echo "Use 'View live log' for the new session URL."
+        ;;
+    forget)
+        if ! echo "$SID" | grep -qE '^session_[A-Za-z0-9]+$'; then
+            echo "Usage: $0 forget <session_id> (expected a session_... id)"
+            exit 1
+        fi
+        forget_session "$SID"
         ;;
     connect)
         if ! echo "$SID" | grep -qE '^session_[A-Za-z0-9]+$'; then
@@ -1399,7 +1571,7 @@ case "$CMD" in
     stop)
         if [ -n "$SLUG" ]; then
             stop_running
-            rm -f "$PINFILE"
+            rm -f "$PINFILE" "$FRESHFILE"
             echo "=== Remote Control stopped by user $(date) ===" >> "$LOGFILE"
             echo "Remote Control stopped for account '$PROFILE'."
         else
@@ -1408,7 +1580,7 @@ case "$CMD" in
             for p in $(all_profiles); do
                 set_profile "$p"
                 stop_running
-                rm -f "$PINFILE"
+                rm -f "$PINFILE" "$FRESHFILE"
                 [ -f "$LOGFILE" ] && echo "=== Remote Control stopped by user $(date) ===" >> "$LOGFILE"
             done
             echo "Remote Control stopped."
@@ -1422,7 +1594,7 @@ case "$CMD" in
         fi
         ;;
     *)
-        echo "Usage: $0 {start [account]|stop [account]|status [account]|connect [account] <session_id>}"
+        echo "Usage: $0 {start [account]|new [account]|stop [account]|status [account]|connect [account] <session_id>|forget <session_id>}"
         exit 1
         ;;
 esac
@@ -1433,7 +1605,7 @@ esac
 <!-- Claude account profiles: several logins on one server, either sharing
      the agent memory and settings or fully isolated. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/profiles.sh" Mode="0755">
-<SHA256>cace0e5630e7ac8c6841b0e483e625792d6e5b406f059aec03abff77bc055ba3</SHA256>
+<SHA256>aed5968b9b6c4fb917b047928f586334970e549434bb23afe36360fe54837549</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1667,15 +1839,29 @@ cmd_remove() {
         return 1
     fi
     if [ "$slug" = "$ACTIVE_PROFILE" ]; then
-        echo "'$slug' is the account in use. Switch to another one first."
-        return 1
+        # This used to be refused outright, and the page hid the button for the
+        # account in use -- so with two accounts and the extra one in use there
+        # was no Remove button anywhere and the feature looked like it did not
+        # exist. Switching back to the main account first is what someone
+        # pressing Remove means, and nothing is lost by it.
+        echo "'$slug' is the account in use; switching back to the main account first."
+        cmd_activate default || return 1
+        ACTIVE_PROFILE="default"
     fi
+    # Its own bridge must not keep running under an account that is no longer
+    # listed. Named explicitly: a bare "stop" would stop every account.
+    [ -x "$RC_SCRIPT" ] && "$RC_SCRIPT" stop "$slug" >/dev/null 2>&1
     new=""
     for p in $PROFILES; do [ "$p" = "$slug" ] || new="$new $p"; done
     save_cfg_var "PROFILES" "$(echo $new | xargs)"
     del_cfg_var "PROFILE_LABEL_$slug"
     del_cfg_var "PROFILE_EMAIL_$slug"
     del_cfg_var "PROFILE_PLAN_$slug"
+    # Settings that only mean anything while the account is listed. Left
+    # behind, a re-added account with the same name would inherit a session id
+    # and a directory it never asked for.
+    del_cfg_var "LAST_SESSION_ID_$slug"
+    del_cfg_var "REMOTE_CONTROL_DIR_$slug"
     dir=$(profile_dir "$slug")
     if [ "$purge" = "purge" ]; then
         # Only ever inside the profiles directory, and only a path just built
@@ -2974,6 +3160,60 @@ switch ($action) {
 </INLINE>
 </FILE>
 
+<!-- Session actions for the Remote Control tab: taking an old session off
+     the lists, and nothing else. Never a transcript, never memory. -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-sessions.php" Mode="0644">
+<SHA256>0f2a30233b65d2567393d2c3d6aa3e3646a3fdb6c05c9b55342640f50377d700</SHA256>
+<INLINE>
+<![CDATA[
+<?php
+// Session actions from the Remote Control tab. Today there is one: taking an
+// old session off the lists this page shows.
+//
+// Same shape as claude-accounts.php and for the same reason: posting straight
+// at the script through Unraid's #command form puts the answer in a one-line
+// strip nobody reads, so a refusal ("that session is still in use") looks like
+// a button that does nothing. The script stays the authority on what may be
+// deleted -- this only carries its words back to the page.
+//
+// Worth stating plainly, because of what lives next door: deleting a session
+// never touches a transcript and never touches the memory directory Claude
+// keeps inside the same project folder. The script is where that guarantee is
+// enforced; nothing here can widen it.
+
+header('Content-Type: application/json');
+header('Cache-Control: no-store');
+
+putenv('PATH=/usr/local/bin:/root/.local/bin:/bin:/sbin:/usr/bin:/usr/sbin');
+
+$script = '/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh';
+$action = (string)($_POST['action'] ?? '');
+$sid    = trim((string)($_POST['sid'] ?? ''));
+
+function done($ok, $message) {
+    echo json_encode(['ok' => $ok, 'message' => trim($message)]);
+    exit;
+}
+
+if (!is_executable($script)) { done(false, 'remote-control.sh is missing'); }
+
+switch ($action) {
+    case 'forget':
+        // Checked here as well as in the script: this value reaches a shell
+        // command, and a session id has exactly one shape.
+        if (!preg_match('/^session_[A-Za-z0-9]+$/', $sid)) { done(false, 'not a session id'); }
+        $lines = [];
+        $rc = 0;
+        exec(escapeshellarg($script) . ' forget ' . escapeshellarg($sid) . ' 2>&1', $lines, $rc);
+        done($rc === 0, implode("\n", $lines));
+
+    default:
+        done(false, 'unknown action');
+}
+]]>
+</INLINE>
+</FILE>
+
 <!-- Reads and writes Claude Code's own settings.json for the Configuration
      tab: only paths this plugin built, one backup per save, unknown keys kept. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-config.php" Mode="0644">
@@ -3487,7 +3727,7 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeAccounts.page">
-<SHA256>1f7c736dc438879d66857177c533f23428f92e80f2a3993eaf0c969f0cb01fcf</SHA256>
+<SHA256>a17ea3b89a4578ab7a9be60131bb1f8b285f7b3543662d337fdcf6ecccc5a9ea</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:2"
@@ -3561,9 +3801,13 @@ Tag="users"
 <input type="button" value="<?=t('Use this one', 'Usar esta')?>"
        onclick="claudeAccount('activate','<?=htmlspecialchars($p['slug'], ENT_QUOTES)?>');">
 <?php endif; ?>
-<?php if ($p['slug'] !== 'default' && !$p['active']): ?>
+<?php if ($p['slug'] !== 'default'): ?>
+<!-- Shown for the account in use as well. Hiding it there meant that with two
+     accounts, the extra one in use, no Remove button existed anywhere on the
+     page and the feature looked missing; the script switches back to the main
+     account first instead of refusing. -->
 <input type="button" value="<?=t('Remove', 'Eliminar')?>"
-       onclick="claudeAccount('remove','<?=htmlspecialchars($p['slug'], ENT_QUOTES)?>');">
+       onclick="claudeAccountRemove('<?=htmlspecialchars($p['slug'], ENT_QUOTES)?>','<?=htmlspecialchars($p['label'], ENT_QUOTES)?>');">
 <?php endif; ?>
 </td>
 </tr>
@@ -3572,8 +3816,8 @@ Tag="users"
 </dd>
 </dl>
 <blockquote class="inline_help"><?=t(
-    'Removing an account only takes it off this list; its folder inside appdata is left alone, so nothing is lost by accident. Switching accounts restarts Remote Control if it is running, and terminals you already have open keep the previous account until you start a new one.',
-    'Eliminar una cuenta solo la quita de esta lista; su carpeta dentro de appdata se deja intacta, así que no se pierde nada por accidente. Cambiar de cuenta reinicia el Control Remoto si está corriendo, y las terminales que ya tengas abiertas siguen con la cuenta anterior hasta que abras una nueva.'
+    'Removing an account only takes it off this list; its folder inside appdata is left alone, so nothing is lost by accident and neither its memory nor its session transcripts are deleted. You can remove the account you are currently using: this server goes back to the main account first, stopping that account\'s Remote Control on the way. Switching accounts restarts Remote Control if it is running, and terminals you already have open keep the previous account until you start a new one.',
+    'Eliminar una cuenta solo la quita de esta lista; su carpeta dentro de appdata se deja intacta, así que no se pierde nada por accidente y no se borra ni su memoria ni sus transcripciones de sesión. Puedes eliminar incluso la cuenta que estés usando: el servidor vuelve antes a la cuenta principal y de paso detiene el Control Remoto de esa cuenta. Cambiar de cuenta reinicia el Control Remoto si está corriendo, y las terminales que ya tengas abiertas siguen con la cuenta anterior hasta que abras una nueva.'
 )?></blockquote>
 
 <dl>
@@ -3597,6 +3841,8 @@ Tag="users"
       'working' => t('Working...', 'Trabajando...'),
       'network' => t('Could not reach the server.', 'No se pudo contactar con el servidor.'),
       'noname'  => t('Type a name for the account first.', 'Escribe antes un nombre para la cuenta.'),
+      'confirm' => t('Remove the account "%s"? Its folder, its memory and its session transcripts stay where they are; only the account disappears from this list.',
+                     '¿Eliminar la cuenta "%s"? Su carpeta, su memoria y sus transcripciones de sesión se quedan donde están; solo desaparece la cuenta de esta lista.'),
   ])?>;
   var msg = document.getElementById('claude-account-msg');
   // Unraid rejects every POST to a webGUI PHP file that carries no CSRF token,
@@ -3626,6 +3872,14 @@ Tag="users"
   }
 
   window.claudeAccount = function (action, slug) { send({ action: action, slug: slug }); };
+
+  // Asked before removing, not before switching: removing is the one action
+  // here that changes which accounts exist, and it can now be aimed at the
+  // account in use.
+  window.claudeAccountRemove = function (slug, label) {
+    if (!confirm(L.confirm.replace('%s', label || slug))) return;
+    send({ action: 'remove', slug: slug });
+  };
 
   window.claudeAccountAdd = function () {
     var name = document.getElementById('claude-account-name').value.trim();
@@ -3770,7 +4024,7 @@ Tag="users"
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeRemote.page">
-<SHA256>2dc7669153639d55a52e0e3a8f1976d610038936b5c8999fc57851de624929a9</SHA256>
+<SHA256>538a99f34715ef2c2d96fb64a78e28f74d41003a2f6ca67c7bac0fefee312462</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:3"
@@ -3787,6 +4041,10 @@ Tag="desktop"
 <p><?=t(
     'Always resumes the same ongoing session in the directory below (--continue), so context carries over between restarts instead of starting over. It only runs when started below -- never launched automatically at boot.',
     'Siempre retoma la misma sesión en curso en el directorio de abajo (--continue), así que el contexto se mantiene entre reinicios en vez de empezar de cero. Solo corre cuando lo inicias abajo -- nunca se lanza solo al arrancar Unraid.'
+)?></p>
+<p><?=t(
+    'If the session an account was using can no longer be resumed -- archived on claude.ai, expired, or never attached to a bridge in the first place -- a new one is started in its place automatically, and you can also ask for a brand-new session at any time with the button below.',
+    'Si la sesión que usaba una cuenta ya no se puede retomar -- archivada en claude.ai, caducada, o que nunca llegó a conectarse -- se arranca otra en su lugar automáticamente, y además puedes pedir una sesión nueva cuando quieras con el botón de abajo.'
 )?></p>
 <p><?=t(
     'If a session was archived on claude.ai (an action you take there, not something Claude does by itself) or otherwise can no longer be resumed, this is detected automatically after a few failed attempts and a new session starts in its place -- see the notice below when that happens.',
@@ -3852,6 +4110,17 @@ Tag="desktop"
 
 <form method="POST" action="/update.php" target="progressFrame">
 <input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh">
+<input type="hidden" name="#arg[0]" value="new">
+<input type="hidden" name="#arg[1]" value="<?=htmlspecialchars($rc['slug'])?>">
+<blockquote class="inline_help"><?=t(
+    'Start starts or resumes the session this account was last using. This starts a brand-new one instead: the account stops resuming the old session and opens an empty one, which is the way out when the old session can no longer be resumed. Nothing is deleted -- the old session stays in the list below and can be reconnected by its id.',
+    'Iniciar arranca o retoma la sesión que esta cuenta estaba usando. Esto arranca una nueva desde cero: la cuenta deja de retomar la sesión anterior y abre una vacía, que es la salida cuando la sesión anterior ya no se puede retomar. No se borra nada -- la sesión anterior sigue en la lista de abajo y puedes reconectarte a ella por su id.'
+)?></blockquote>
+<input type="submit" value="<?=t('Start a new session', 'Iniciar sesión nueva')?>">
+</form>
+
+<form method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh">
 <input type="hidden" name="#arg[0]" value="connect">
 <input type="hidden" name="#arg[1]" value="<?=htmlspecialchars($rc['slug'])?>">
 <dl>
@@ -3875,11 +4144,21 @@ Tag="desktop"
 <?php endforeach; ?>
 </datalist>
 
+<?php
+// The sessions an account is set to resume are not old sessions, whether or
+// not a bridge is connected to them right now. They are the ones a careless
+// Delete would hurt, so they get no button at all rather than a refusal after
+// the fact -- the script checks the same thing again anyway.
+$rc_in_use = [];
+foreach ($rc_accounts as $rc_a) {
+    if (!empty($rc_a['last_sid'])) $rc_in_use[$rc_a['last_sid']] = true;
+}
+?>
 <?php if (!empty($rc_history)): ?>
 <div class="claude-box">
 <h4><?=t('Session history', 'Histórico de sesiones')?></h4>
 <table class="claude-history">
-<tr><th><?=t('When', 'Cuándo')?></th><th><?=t('Session ID', 'ID de sesión')?></th><?php if ($multi_account): ?><th><?=t('Account', 'Cuenta')?></th><?php endif; ?><th><?=t('Directory', 'Directorio')?></th><th><?=t('State', 'Estado')?></th></tr>
+<tr><th><?=t('When', 'Cuándo')?></th><th><?=t('Session ID', 'ID de sesión')?></th><?php if ($multi_account): ?><th><?=t('Account', 'Cuenta')?></th><?php endif; ?><th><?=t('Directory', 'Directorio')?></th><th><?=t('State', 'Estado')?></th><th></th></tr>
 <?php foreach ($rc_history as $rc_sid => $rc_info): ?>
 <tr><td><?=htmlspecialchars($rc_info['time'])?></td><td><code><?=htmlspecialchars($rc_sid)?></code></td>
 <?php if ($multi_account): ?><td><?php
@@ -3894,13 +4173,54 @@ if ($rc_owner === '') {
 }
 ?></td><?php endif; ?>
 <td><?php if ($rc_info['dir_known'] ?? true): ?><?=htmlspecialchars($rc_info['dir'])?><?php else: ?><span class="dim-text" title="<?=t('This directory no longer exists; showing the folder name Claude stored it under.', 'Este directorio ya no existe; se muestra el nombre de carpeta con el que Claude lo guardó.')?>"><?=htmlspecialchars($rc_info['dir'])?></span><?php endif; ?></td>
-<td><?php if ($rc_info['live']): ?><span class="ok"><?=t('Connected', 'Conectada')?></span><?php else: ?><span class="dim-text"><?=t('Past', 'Anterior')?></span><?php endif; ?></td></tr>
+<td><?php if ($rc_info['live']): ?><span class="ok"><?=t('Connected', 'Conectada')?></span><?php elseif (isset($rc_in_use[$rc_sid])): ?><span class="warn"><?=t('In use', 'En uso')?></span><?php else: ?><span class="dim-text"><?=t('Past', 'Anterior')?></span><?php endif; ?></td>
+<td><?php if (!$rc_info['live'] && !isset($rc_in_use[$rc_sid])): ?>
+<input type="button" value="<?=t('Delete', 'Borrar')?>" onclick="claudeSessionForget('<?=htmlspecialchars($rc_sid, ENT_QUOTES)?>');">
+<?php else: ?>
+<span class="dim-text" title="<?=t('A session that is connected, or that an account is set to resume, is not an old session. Start a new session for that account first.', 'Una sesión conectada, o que una cuenta va a retomar, no es una sesión vieja. Inicia antes una sesión nueva para esa cuenta.')?>">&mdash;</span>
+<?php endif; ?></td></tr>
 <?php endforeach; ?>
 </table>
 <blockquote class="inline_help"><?=t(
     'Every session id this NAS knows about, most recent first: the ones this plugin connected to (kept on the flash share, so they survive reboots) plus the current session of every directory Claude has been used in, including sessions you started by hand from a terminal.',
     'Todos los IDs de sesión que conoce este NAS, más reciente primero: los que ha usado este plugin (guardados en el flash drive, así que sobreviven a reinicios) más la sesión actual de cada directorio donde se haya usado Claude, incluidas las que hayas iniciado a mano desde una terminal.'
 )?></blockquote>
+<blockquote class="inline_help"><?=t(
+    'Delete takes an old session off this list: its line in the plugin\'s own history, and the note Claude keeps about which session was last used in that directory. That is all it removes. The conversation transcript is not deleted, and neither is the agent memory stored beside it -- nothing on this page can delete that. A session that is connected, or that an account is still set to resume, cannot be deleted; start a new session for that account first.',
+    'Borrar quita una sesión vieja de esta lista: su línea en el histórico del propio plugin y la nota que guarda Claude sobre cuál fue la última sesión de ese directorio. Eso es todo lo que quita. No se borra la transcripción de la conversación, ni la memoria persistente que se guarda junto a ella -- nada de esta página puede borrar eso. Una sesión conectada, o que una cuenta todavía va a retomar, no se puede borrar; inicia antes una sesión nueva para esa cuenta.'
+)?></blockquote>
+<p id="claude-session-msg"></p>
+<script>
+(function () {
+  var L = <?=json_encode([
+      'working' => t('Working...', 'Trabajando...'),
+      'network' => t('Could not reach the server.', 'No se pudo contactar con el servidor.'),
+      'confirm' => t('Delete session %s from the list? Its transcript and the memory stored with it are not touched.',
+                     '¿Borrar la sesión %s de la lista? Ni su transcripción ni la memoria guardada con ella se tocan.'),
+  ])?>;
+  // Same reason as on the Accounts tab: a POST to a webGUI PHP file without
+  // this token is terminated with an empty body, which looks exactly like the
+  // server being unreachable.
+  var CSRF = <?=json_encode($var['csrf_token'] ?? '')?>;
+  var msg = document.getElementById('claude-session-msg');
+
+  window.claudeSessionForget = function (sid) {
+    if (!confirm(L.confirm.replace('%s', sid))) return;
+    msg.textContent = L.working;
+    msg.className = '';
+    var body = new URLSearchParams({ action: 'forget', sid: sid, csrf_token: CSRF });
+    fetch('/plugins/claude-code/include/claude-sessions.php',
+          { method: 'POST', cache: 'no-store', headers: { 'X-CSRF-TOKEN': CSRF }, body: body })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        msg.textContent = d.message || '';
+        msg.className = d.ok ? 'ok' : 'error';
+        if (d.ok) setTimeout(function () { location.reload(); }, 900);
+      })
+      .catch(function () { msg.textContent = L.network; msg.className = 'error'; });
+  };
+})();
+</script>
 </div>
 <?php endif; ?>
 ]]>
@@ -4613,7 +4933,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.09.06.2 has been installed!"
+    echo " Claude Code plugin v2026.09.07.2 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
