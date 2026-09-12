@@ -28,6 +28,28 @@ claim of authorship over the base plugin.
 
 ### ✨ What's new
 
+- Each account now has its own identity. Accounts used to share one config home, and the identity
+  lives in a file in it, so `claude` in a terminal reported whichever account signed in last no
+  matter which one was selected on the page. Every account gets its own config home now, and what
+  is genuinely shared — agent memory, session transcripts, `settings.json`, plugins, saved plans,
+  prompt history — comes back as symlinks into the main account's home: the same files, not
+  copies, so what one account learns every account has.
+- New sync panel on the Accounts tab for the settings that cannot be symlinked because they live
+  inside each account's own files: MCP servers, trusted directories, the tools allowed in them and
+  the permission rules. The main account leads by default — its changes reach the others on their
+  own, while a change made in another account keeps working there and waits to be ticked before it
+  becomes everyone's. A both-ways setting promotes those automatically. Nothing an account changed
+  is ever reverted behind your back.
+- Permission rules moved into each account with that split, on purpose: they used to sit in a
+  shared file where one account approving a command granted it to the main account too.
+- The Accounts tab asks each account's own token who it is, instead of asking the CLI — which
+  answered with the same cached email for every account.
+- 25 more settings in Claude Code Config, written in plain language: waiting for the usage limit to
+  reset and carrying on, push notifications when a session needs you, messages between sessions on
+  different machines, refusing reads outside the working folders, forbidding the no-questions
+  permission mode, automatic-mode controls, undo snapshots, commit and PR signatures, workflows and
+  skill locks. Fast mode and the effort ceiling carry a warning about what they cost.
+
 - Fixed a bug where the plugin could become permanently disabled after a reboot: the plugin icon
   was fetched over the network via a native `FILE`/`URL` directive processed synchronously during
   Unraid's boot-time plugin install pass — before the author's own network-readiness checks (used
@@ -207,6 +229,30 @@ repositorio original no declara ninguna licencia, así que este fork se publica 
 claro al autor original, sin reclamar autoría del plugin base.
 
 ### ✨ Novedades
+
+- Cada cuenta tiene ya su propia identidad. Antes todas compartían un mismo directorio de
+  configuración, y la identidad vive en un fichero de ahí dentro, así que `claude` en una terminal
+  decía la última cuenta que hubiera iniciado sesión, daba igual cuál estuviera elegida en la
+  página. Ahora cada cuenta tiene el suyo, y lo que de verdad se comparte —la memoria del agente,
+  las transcripciones, `settings.json`, los plugins, los planes guardados y el historial de
+  órdenes— vuelve como enlaces al directorio de la cuenta principal: los mismos ficheros, no
+  copias, así que lo que aprende una cuenta lo tienen todas.
+- Panel nuevo en la pestaña de Cuentas para los ajustes que no se pueden enlazar porque viven
+  dentro de los ficheros propios de cada cuenta: servidores MCP, directorios de confianza,
+  herramientas permitidas en ellos y reglas de permisos. Manda la cuenta principal: sus cambios
+  llegan solos a las demás, y un cambio hecho en otra cuenta sigue funcionando ahí y espera a que
+  lo marques antes de pasar a ser de todas. Hay un modo bidireccional que los sube automáticamente.
+  Un cambio hecho en una cuenta nunca se deshace a tus espaldas.
+- Las reglas de permisos pasan a ser de cada cuenta con ese cambio, y a propósito: antes estaban en
+  un fichero compartido donde una cuenta aprobando un comando se lo concedía también a la principal.
+- La pestaña de Cuentas le pregunta a la API con el token de cada cuenta quién es, en vez de
+  preguntárselo al CLI, que respondía el mismo email cacheado para todas.
+- 25 ajustes más en Config. de Claude, explicados en lenguaje llano: esperar a que se reinicie el
+  límite de uso y continuar, avisos al móvil cuando una sesión te necesita, mensajes entre sesiones
+  de máquinas distintas, no leer fuera de las carpetas de trabajo, prohibir el modo sin preguntas,
+  controles del nuevo modo automático, copias para deshacer, firmas en commits y PRs, flujos de
+  trabajo y cierres para las skills. El modo rápido y el tope de esfuerzo llevan aviso de lo que
+  cuestan.
 
 - Arreglado un bug por el que el plugin podía quedar deshabilitado de forma permanente tras un
   reinicio: el icono del plugin se descargaba por red mediante una directiva nativa `FILE`/`URL`

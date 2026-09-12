@@ -1,12 +1,59 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.09.08"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.09.12.2"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.09.12.2
+- Fixed the account you pick here not being the account you get. With several
+  accounts sharing one config home, the identity lived in a file they all
+  shared, so "claude" in a terminal reported whichever account signed in last,
+  no matter which one was selected. Every account now has its own config home
+  and its own identity.
+- Nothing that matters was lost by that split: agent memory, session
+  transcripts, settings.json, plugins, saved plans and the prompt history are
+  the same files as the main account's, linked into each account rather than
+  copied. What one account learns, every account has.
+- New panel on the Accounts tab for the few settings that cannot be linked
+  because they live inside each account's own files: MCP servers, the
+  directories already trusted, the tools allowed in them, and the permission
+  rules. The main account leads by default: its changes reach the others on
+  their own, and a change made in another account keeps working there and
+  waits for you to tick it before it becomes everyone's. There is a both-ways
+  setting for anyone who wants those promoted automatically. A change made in
+  another account is never undone behind your back.
+- Permission rules ("always allow") moved with that split, deliberately: they
+  used to sit in a shared file, where one account approving a command granted
+  it to the main account too, without passing through any of the above.
+- The Accounts tab no longer asks Claude Code who an account is signed in as.
+  It reported the same cached email for every account, which is the same bug
+  as above seen from the page; each account's own token is asked directly
+  instead.
+- Removing an account now unlinks what it borrowed before deleting anything,
+  so the shared memory is never reachable from a delete, and anything the
+  account genuinely owned is moved aside with a dated name rather than
+  removed.
+- Claude Code Config gained 25 settings that did not have a field before,
+  written for people who have not read Anthropic's reference: waiting for your
+  usage limit to reset and carrying on by itself, push notifications when a
+  session needs you or when Claude has something to say, messages between your
+  sessions on different machines, refusing reads outside the working folders,
+  forbidding the no-questions permission mode, controls for the new automatic
+  mode, undo snapshots, commit and pull request signatures, workflows, skill
+  locks, and more.
+- Two of those carry a warning rather than a bare field, because they are not
+  free: fast mode is the same intelligence at a premium price, and the effort
+  ceiling is a cap on capability, not a saving.
+- The folder holding automatic memory can now be set from the page, and is
+  refused if it points anywhere outside appdata, where it would not survive a
+  reboot.
+- An account moved into its own config home is handed the answers to the
+  questions Claude Code only asks once -- including "Enable Remote Control?",
+  which has no one to answer it when a supervisor starts a bridge, and which
+  otherwise leaves that account retrying for ever.
 ###2026.09.08
 - The Remote Control tab no longer says archiving is something only you do on
   claude.ai. That was wrong, and checking the Claude Code binary says so:
@@ -1132,7 +1179,7 @@ fi
      taken over as "most recent"; see the connect subcommand and the
      Settings page's Session ID field. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh" Mode="0755">
-<SHA256>c5167e7da6c4ef67a941cdb5bfbe5bb959520e92a78412ee3aa17960da9a5995</SHA256>
+<SHA256>b109a9b22467fa47309b06c840addf3518e410781adbe8b69ea30feca1cb50ac</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1382,6 +1429,14 @@ do_run() {
     rc_dir=$(get_rc_dir)
     mkdir -p "$rc_dir"
     echo "=== Remote Control supervisor started $(date) (dir: $rc_dir) ===" >> "$LOGFILE"
+    # With the bridge not yet running is the moment to fix this account's config
+    # home: the links to the shared memory and settings, and the MCP servers and
+    # rules the main account leads on. Doing it here rather than in the launcher
+    # keeps "claude" in a terminal instant, and means a change made on the page
+    # lands at the next start rather than under a live session.
+    if [ "$PROFILE" != "default" ] && [ -x "$PROFILES_SCRIPT" ]; then
+        "$PROFILES_SCRIPT" ensure "$PROFILE" >> "$LOGFILE" 2>&1
+    fi
     while [ -f "$ENABLED_FLAG" ]; do
         cd "$rc_dir" || break
 
@@ -1648,7 +1703,7 @@ esac
 <!-- Claude account profiles: several logins on one server, either sharing
      the agent memory and settings or fully isolated. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/profiles.sh" Mode="0755">
-<SHA256>aed5968b9b6c4fb917b047928f586334970e549434bb23afe36360fe54837549</SHA256>
+<SHA256>eda52350dc6da9e9b81c360cf67969c6c1b10e809049ae6a5bfaa0a5dbea1514</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1658,12 +1713,19 @@ esac
 # Lets this server hold several Claude logins at once. Which files a profile
 # owns depends on the mode the user picked:
 #
-#   shared   -- only the credentials move (CLAUDE_SECURESTORAGE_CONFIG_DIR).
-#               Agent memory, settings, MCP servers and session history stay in
-#               the one config home every account shares. This is the default,
-#               because losing the memory you already built up is the surprise
-#               nobody wants from "add a second account".
-#   isolated -- the whole config home moves (CLAUDE_CONFIG_DIR): every account
+#   shared   -- every account gets its own config home (CLAUDE_CONFIG_DIR), and
+#               what is genuinely shared comes back as SYMLINKS into the main
+#               account's home: agent memory and transcripts (projects/),
+#               settings.json, plugins, plans and the prompt history. This is
+#               the default, because losing the memory you already built up is
+#               the surprise nobody wants from "add a second account".
+#               It used to be one config home for everybody, with only the
+#               credentials moving. That shared a file that must never be
+#               shared: .claude.json holds the identity (oauthAccount), so the
+#               account the CLI reported was whichever one logged in last --
+#               "the terminal opens with the wrong account" was this, and no
+#               amount of picking an account on the page could fix it.
+#   isolated -- the config home moves too, with no symlinks back: every account
 #               gets its own memory, settings, MCPs and history.
 #
 # Both modes run several accounts at the same time; they differ only in what is
@@ -1678,6 +1740,9 @@ esac
 #   * No copying of .credentials.json between profiles. Each claude process
 #     refreshes its own file in place, so there is no moment where a freshly
 #     rotated refresh token can be lost.
+#   * No deleting of anything a profile directory already holds. If a name this
+#     script wants to symlink is already a real file or directory there, it is
+#     moved aside with a dated suffix and reported -- never removed.
 
 export PATH="/usr/local/bin:/root/.local/bin:$PATH"
 
@@ -1695,11 +1760,14 @@ load_cfg() {
     ACTIVE_PROFILE="default"
     PROFILES=""
     APPDATA_PATH=""
+    SYNC_MODE="oneway"
     [ -f "$PLUGIN_CFG" ] && source "$PLUGIN_CFG"
     [ -z "$APPDATA_PATH" ] && APPDATA_PATH="/mnt/user/appdata/claude-code"
     [ -z "$ACTIVE_PROFILE" ] && ACTIVE_PROFILE="default"
     [ -z "$ACCOUNT_MODE" ] && ACCOUNT_MODE="shared"
+    [ "$SYNC_MODE" = "both" ] || SYNC_MODE="oneway"
     PROFILES_DIR="$APPDATA_PATH/profiles"
+    MAIN_HOME="$APPDATA_PATH/.claude"
 }
 
 # Upsert KEY="value" without touching other keys -- the same format and the same
@@ -1734,10 +1802,125 @@ profile_dir() {
 profile_env() {
     local slug="$1" dir
     dir=$(profile_dir "$slug") || return 0
-    case "$ACCOUNT_MODE" in
-        isolated) echo "CLAUDE_CONFIG_DIR=$dir" ;;
-        *)        echo "CLAUDE_SECURESTORAGE_CONFIG_DIR=$dir" ;;
-    esac
+    # One variable for both modes now. The credentials were always in this
+    # directory; what changes is that .claude.json is too, which is what keeps
+    # one account's identity out of another's session.
+    echo "CLAUDE_CONFIG_DIR=$dir"
+}
+
+# What an extra account borrows from the main one in shared mode. Memory and
+# transcripts live in projects/; the rest is what makes two accounts feel like
+# the same workshop. settings.local.json is deliberately NOT here: it holds the
+# permission rules, and sharing the file would let an extra account grant
+# itself -- and the main account -- a rule without passing through the
+# one-way sync.
+SHARED_LINKS="projects settings.json plugins plans history.jsonl skills commands agents CLAUDE.md"
+
+SYNC_PHP="/usr/local/emhttp/plugins/claude-code/include/claude-sync.php"
+
+# Link one borrowed name into a profile, without ever destroying what is there.
+link_shared() {
+    local dir="$1" name="$2" target="$MAIN_HOME/$name" link="$dir/$name" stamp
+    [ -e "$target" ] || return 0
+    if [ -L "$link" ]; then
+        [ "$(readlink "$link")" = "$target" ] && return 0
+        rm -f "$link"
+    elif [ -e "$link" ]; then
+        # Something real is sitting on the name -- an isolated-mode account's
+        # own memory, most likely. Moved aside, never deleted, and said out loud.
+        stamp=$(date +%Y%m%d%H%M%S)
+        mv "$link" "$link.propio-$stamp" || return 1
+        echo "Kept the account's own $name as $name.propio-$stamp"
+    fi
+    ln -s "$target" "$link"
+}
+
+# Give an extra account the config home it needs: its own identity file, the
+# shared directories linked in, and the whitelisted settings synced from the
+# main account. Safe to run at every start -- it only ever fixes what is wrong.
+ensure_profile() {
+    local slug="$1" dir seed
+    dir=$(profile_dir "$slug") || return 0
+    [ -d "$dir" ] || mkdir -p "$dir" || { echo "Could not create $dir -- is the array started?"; return 1; }
+    chmod 700 "$dir" 2>/dev/null
+
+    # An account with no config file of its own would be walked through
+    # onboarding again on its first run. Seeded from the main account, minus
+    # everything that identifies it.
+    if [ ! -f "$dir/.claude.json" ]; then
+        seed='{"hasCompletedOnboarding":true}'
+        if [ -f "$APPDATA_PATH/.claude.json" ] && command -v php >/dev/null 2>&1; then
+            seed=$(php -r '$d=json_decode(@file_get_contents($argv[1]),true); $o=["hasCompletedOnboarding"=>true]; foreach(["lastOnboardingVersion","installMethod","autoUpdates"] as $k){ if(isset($d[$k])) $o[$k]=$d[$k]; } echo json_encode($o);' "$APPDATA_PATH/.claude.json" 2>/dev/null)
+            [ -z "$seed" ] && seed='{"hasCompletedOnboarding":true}'
+        fi
+        printf '%s\n' "$seed" > "$dir/.claude.json"
+        chmod 600 "$dir/.claude.json"
+    fi
+
+    if [ "$ACCOUNT_MODE" != "isolated" ]; then
+        # projects/ is the one that must exist even on a fresh server: it is
+        # where the memory lives, and both accounts have to end up in the same
+        # one.
+        [ -d "$MAIN_HOME/projects" ] || mkdir -p "$MAIN_HOME/projects"
+        local name
+        for name in $SHARED_LINKS; do link_shared "$dir" "$name"; done
+    fi
+
+    # The "have you seen this?" flags. A config home the CLI has never seen
+    # before asks its first-run questions again -- including "Enable Remote
+    # Control? (y/n)", which nobody is there to answer when the supervisor
+    # starts a bridge, so the bridge exits and retries forever. Copied from the
+    # main account, and only where the account does not have its own answer.
+    seed_flags "$slug"
+
+    # Ask the API who this account is and write it into its own file, so a
+    # terminal opened on it says the right name from the first second rather
+    # than waiting for the next sign-in.
+    refresh_profile "$slug" >/dev/null 2>&1
+
+    sync_profile "$slug"
+}
+
+# Questions the CLI only ever asks once per config home. Answering them again
+# is not a decision anybody wants to re-take per account, and one of them
+# blocks a bridge that has no terminal to answer it.
+SEED_FLAGS="hasCompletedOnboarding lastOnboardingVersion remoteDialogSeen hasUsedRemoteControl hasSeenAutoDefaultNotice installMethod autoUpdates firstStartTime"
+
+seed_flags() {
+    local slug="$1" dir
+    dir=$(profile_dir "$slug") || return 0
+    [ -f "$dir/.claude.json" ] || return 0
+    [ -f "$APPDATA_PATH/.claude.json" ] || return 0
+    command -v php >/dev/null 2>&1 || return 0
+    php -r '
+$main = json_decode((string)@file_get_contents($argv[1]), true);
+$prof = json_decode((string)@file_get_contents($argv[2]), true);
+if (!is_array($main) || !is_array($prof)) exit(0);
+$changed = false;
+foreach (explode(" ", $argv[3]) as $k) {
+    if ($k === "") continue;
+    // Never overwrite an answer this account already has.
+    if (array_key_exists($k, $prof)) continue;
+    if (!array_key_exists($k, $main)) continue;
+    $prof[$k] = $main[$k];
+    $changed = true;
+}
+if (!$changed) exit(0);
+$tmp = $argv[2] . ".tmp." . getmypid();
+if (@file_put_contents($tmp, json_encode($prof, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)) === false) exit(0);
+@chmod($tmp, 0600);
+@rename($tmp, $argv[2]);
+' "$APPDATA_PATH/.claude.json" "$dir/.claude.json" "$SEED_FLAGS" 2>/dev/null
+}
+
+# The whitelisted settings that cannot be symlinked: MCP servers, a directory's
+# trust, its allowed tools, the permission rules. One way by default, and never
+# in a way that reverts a change the extra account made on its own.
+sync_profile() {
+    local slug="$1"
+    [ -r "$SYNC_PHP" ] || return 0
+    command -v php >/dev/null 2>&1 || return 0
+    php "$SYNC_PHP" sync "$slug" 2>/dev/null
 }
 
 profile_exists() {
@@ -1754,37 +1937,95 @@ profile_label() {
     echo "$label"
 }
 
-# Ask the CLI who a profile is logged in as. This is the authoritative answer --
-# .claude.json's cached oauthAccount is shared between profiles in shared mode
-# and so cannot identify them -- but it costs a process spawn, so the result is
-# cached in the config and only refreshed on demand or after a login.
+# Who a profile is logged in as. Asked of the API with that account's own
+# token, never of "claude auth status": the CLI reports the email cached in
+# .claude.json, which used to be shared, so every account answered with
+# whichever one logged in last. /api/oauth/profile costs nothing, runs no
+# inference, and answers for the token that asked.
 refresh_profile() {
-    local slug="$1" envline status email plan logged
-    if ! command -v claude >/dev/null 2>&1; then
-        return 1
-    fi
-    # One quoted argument, not an unquoted expansion: an appdata path with a
-    # space in it would otherwise split into two broken arguments.
-    envline=$(profile_env "$slug")
-    if [ -n "$envline" ]; then
-        status=$(env "$envline" claude auth status --json 2>/dev/null)
+    local slug="$1" dir creds token body email plan conf
+    if [ "$slug" = "default" ]; then
+        creds="$MAIN_HOME/.credentials.json"
     else
-        status=$(claude auth status --json 2>/dev/null)
+        dir=$(profile_dir "$slug") || return 1
+        creds="$dir/.credentials.json"
     fi
-    [ -z "$status" ] && return 1
-    # Parsed with grep rather than a JSON tool: Unraid ships no jq, and this
-    # only ever reads three flat string fields.
-    logged=$(echo "$status" | grep -o '"loggedIn"[[:space:]]*:[[:space:]]*true')
-    email=$(echo "$status" | sed -n 's/.*"email"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-    plan=$(echo "$status" | sed -n 's/.*"subscriptionType"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-    if [ -n "$logged" ]; then
-        save_cfg_var "PROFILE_EMAIL_$slug" "$email"
-        save_cfg_var "PROFILE_PLAN_$slug" "$plan"
-    else
+    if [ ! -r "$creds" ]; then
         save_cfg_var "PROFILE_EMAIL_$slug" ""
         save_cfg_var "PROFILE_PLAN_$slug" ""
+        return 0
     fi
+    token=$(sed -n 's/.*"accessToken"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$creds" | head -1)
+    if [ -z "$token" ]; then
+        save_cfg_var "PROFILE_EMAIL_$slug" ""
+        save_cfg_var "PROFILE_PLAN_$slug" ""
+        return 0
+    fi
+    # The token goes in a 0600 config file rather than on the command line,
+    # where every other process on the box could read it out of ps.
+    conf=$(mktemp /tmp/claude-profile.XXXXXX) || return 1
+    chmod 600 "$conf"
+    printf 'header = "Authorization: Bearer %s"\nheader = "anthropic-beta: oauth-2025-04-20"\n' "$token" > "$conf"
+    body=$(curl -s -m 10 --config "$conf" https://api.anthropic.com/api/oauth/profile 2>/dev/null)
+    rm -f "$conf"
+    email=$(echo "$body" | sed -n 's/.*"email"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    plan=$(echo "$body" | sed -n 's/.*"organization_type"[[:space:]]*:[[:space:]]*"claude_\([a-z]*\)".*/\1/p' | head -1)
+    if [ -z "$email" ]; then
+        # A token that is merely expired should not wipe a name the page is
+        # already showing: the account is still there, the reading is not.
+        [ -z "$body" ] && return 1
+        save_cfg_var "PROFILE_EMAIL_$slug" ""
+        save_cfg_var "PROFILE_PLAN_$slug" ""
+        return 0
+    fi
+    save_cfg_var "PROFILE_EMAIL_$slug" "$email"
+    save_cfg_var "PROFILE_PLAN_$slug" "$plan"
+    stamp_identity "$slug" "$body"
     return 0
+}
+
+# Write the account's own identity into its own config file. The CLI fills this
+# in when someone signs in, and until it does, an account that was migrated
+# from the old shared home has no name to show in a terminal -- it would sit
+# there blank, or worse, look like it had no account at all. Only ever an extra
+# account's file: the main one is the CLI's to write.
+stamp_identity() {
+    local slug="$1" body="$2" dir
+    [ "$slug" = "default" ] && return 0
+    [ -z "$body" ] && return 0
+    command -v php >/dev/null 2>&1 || return 0
+    dir=$(profile_dir "$slug") || return 0
+    [ -f "$dir/.claude.json" ] || return 0
+    php -r '
+$file = $argv[1];
+$api  = json_decode($argv[2], true);
+if (!is_array($api) || empty($api["account"]["uuid"])) exit(0);
+$cfg = json_decode((string)@file_get_contents($file), true);
+if (!is_array($cfg)) exit(0);
+$a = $api["account"]; $o = isset($api["organization"]) ? $api["organization"] : [];
+$id = [
+    "accountUuid"      => $a["uuid"],
+    "emailAddress"     => isset($a["email"]) ? $a["email"] : "",
+    "organizationUuid" => isset($o["uuid"]) ? $o["uuid"] : "",
+    "displayName"      => isset($a["display_name"]) ? $a["display_name"] : "",
+    "fullName"         => isset($a["full_name"]) ? $a["full_name"] : "",
+    "accountCreatedAt" => isset($a["created_at"]) ? $a["created_at"] : null,
+    "organizationName" => isset($o["name"]) ? $o["name"] : "",
+    "organizationType" => isset($o["organization_type"]) ? $o["organization_type"] : "",
+    "billingType"      => isset($o["billing_type"]) ? $o["billing_type"] : null,
+    "subscriptionCreatedAt" => isset($o["subscription_created_at"]) ? $o["subscription_created_at"] : null,
+    "hasExtraUsageEnabled"  => isset($o["has_extra_usage_enabled"]) ? $o["has_extra_usage_enabled"] : false,
+    "organizationRateLimitTier" => isset($o["rate_limit_tier"]) ? $o["rate_limit_tier"] : null,
+    "profileFetchedAt" => (int)(microtime(true) * 1000),
+];
+// Merge, never replace: whatever else the CLI keeps in there stays.
+$cfg["oauthAccount"] = isset($cfg["oauthAccount"]) && is_array($cfg["oauthAccount"])
+    ? array_merge($cfg["oauthAccount"], $id) : $id;
+$tmp = $file . ".tmp." . getmypid();
+if (@file_put_contents($tmp, json_encode($cfg, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)) === false) exit(0);
+@chmod($tmp, 0600);
+@rename($tmp, $file);
+' "$dir/.claude.json" "$body" 2>/dev/null
 }
 
 rc_running() {
@@ -1868,6 +2109,10 @@ cmd_add() {
     chmod 700 "$dir"
     save_cfg_var "PROFILES" "$(echo $PROFILES $slug | xargs)"
     save_cfg_var "PROFILE_LABEL_$slug" "$label"
+    PROFILES="$(echo $PROFILES $slug | xargs)"
+    # Shared memory, settings and plugins from the first second, and the main
+    # account's MCP servers and rules copied in before anyone signs in.
+    ensure_profile "$slug"
     echo "Account '$label' created. Use Sign in to authenticate it."
 }
 
@@ -1917,10 +2162,18 @@ cmd_remove() {
                 # account deletes its credentials and settings and NOTHING else:
                 # memory is never destroyed by a delete on this page. Whoever
                 # touches this next: keep it that way.
+                # Borrowed names go first, and only the link itself: every one
+                # of them points into the main account's home, where the shared
+                # memory lives. Removing the link never reaches the target.
+                find "$dir" -mindepth 1 -maxdepth 1 -type l -delete 2>/dev/null
                 find "$dir" -mindepth 1 -maxdepth 1 ! -name projects -exec rm -rf {} + 2>/dev/null
                 if [ -d "$dir/projects" ]; then
                     echo "Account '$slug' removed. Its credentials and settings were deleted."
                     echo "Its memory and session history were kept, untouched, at $dir/projects."
+                elif [ "$ACCOUNT_MODE" != "isolated" ]; then
+                    rmdir "$dir" 2>/dev/null
+                    echo "Account '$slug' removed. Its credentials and settings were deleted."
+                    echo "Its memory and transcripts were the ones shared with the main account and are untouched."
                 else
                     rmdir "$dir" 2>/dev/null
                     echo "Account '$slug' removed and its data deleted."
@@ -1951,6 +2204,8 @@ cmd_activate() {
         [ -x "$RC_SCRIPT" ] && "$RC_SCRIPT" stop >/dev/null 2>&1
     fi
     save_cfg_var "ACTIVE_PROFILE" "$slug"
+    ACTIVE_PROFILE="$slug"
+    ensure_profile "$slug" >/dev/null
     echo "Now using account: $(profile_label "$slug")"
     if [ "$was_running" = yes ]; then
         echo "Starting Remote Control again..."
@@ -1963,6 +2218,7 @@ cmd_activate() {
 cmd_status() {
     echo "Multi-account: $MULTI_ACCOUNT"
     echo "Mode: $ACCOUNT_MODE"
+    echo "Settings sync: $SYNC_MODE"
     echo "Active account: $ACTIVE_PROFILE"
     echo "Accounts: default $PROFILES"
     local e
@@ -1990,8 +2246,24 @@ case "$1" in
         profile_env "${2:-$ACTIVE_PROFILE}"
         ;;
     status)   cmd_status ;;
+    ensure)
+        # Called by remote-control.sh before it starts a bridge, and safe to run
+        # by hand: it only fixes what is missing.
+        if [ -n "$2" ]; then
+            ensure_profile "$2"
+        else
+            for p in $PROFILES; do ensure_profile "$p"; done
+        fi
+        ;;
+    sync)
+        if [ -n "$2" ]; then
+            sync_profile "$2"
+        else
+            for p in $PROFILES; do sync_profile "$p"; done
+        fi
+        ;;
     *)
-        echo "Usage: $0 {list|add <name> [slug]|remove <slug> [purge]|activate <slug>|refresh [slug]|env [slug]|status}"
+        echo "Usage: $0 {list|add <name> [slug]|remove <slug> [purge]|activate <slug>|refresh [slug]|env [slug]|ensure [slug]|sync [slug]|status}"
         exit 1
         ;;
 esac
@@ -2002,7 +2274,7 @@ esac
 <!-- Installed as /usr/local/bin/claude so the account chosen in the web UI
      also applies to "claude" typed in a terminal. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/claude-launcher.sh" Mode="0755">
-<SHA256>df1436b7fbe51a12d1f9ae23875c702dbc7420078af3d2d5822e076cf85e08a8</SHA256>
+<SHA256>5fb22425c46694ccc0d4a8d5a0c0e2008ff98c9858e9f31b755f961e73c060d3</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -2040,15 +2312,17 @@ if [ -r "$CFG" ]; then
         # moved) must not send claude looking for credentials that aren't
         # there -- fall through to the original config instead.
         if [ -d "$PROFILE_DIR" ]; then
-            if [ "$ACCOUNT_MODE" = "isolated" ]; then
-                # Tested for being *set*, not for being non-empty: the CLI
-                # treats an empty CLAUDE_CONFIG_DIR/SECURESTORAGE var as a
-                # deliberate "use the home directory", so an empty value is a
-                # caller's choice to respect, not a gap to fill.
-                [ -z "${CLAUDE_CONFIG_DIR+set}" ] && export CLAUDE_CONFIG_DIR="$PROFILE_DIR"
-            else
-                [ -z "${CLAUDE_SECURESTORAGE_CONFIG_DIR+set}" ] && export CLAUDE_SECURESTORAGE_CONFIG_DIR="$PROFILE_DIR"
-            fi
+            # Both modes now point at the account's own config home. That is
+            # what makes a terminal open as the account picked on the page:
+            # the identity lives in .claude.json, and until this stopped being
+            # one shared file, "claude" reported whichever account had logged
+            # in last no matter what was selected.
+            #
+            # Tested for being *set*, not for being non-empty: the CLI treats
+            # an empty CLAUDE_CONFIG_DIR as a deliberate "use the home
+            # directory", so an empty value is a caller's choice to respect,
+            # not a gap to fill.
+            [ -z "${CLAUDE_CONFIG_DIR+set}" ] && export CLAUDE_CONFIG_DIR="$PROFILE_DIR"
         fi
     fi
 fi
@@ -3272,8 +3546,483 @@ switch ($action) {
 
 <!-- Reads and writes Claude Code's own settings.json for the Configuration
      tab: only paths this plugin built, one backup per save, unknown keys kept. -->
+<!-- Account synchronisation: the settings that cannot be shared by symlink -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-sync.php" Mode="0644">
+<SHA256>b110129396fbf42b69cb06f394bf1856d43551a7ec1fbceb0836b225d8c76ee1</SHA256>
+<INLINE>
+<![CDATA[
+<?php
+/*
+ * Account synchronisation.
+ *
+ * Every account now has its own config home, so its own .claude.json and its
+ * own settings.local.json. What is genuinely shared -- memory, transcripts,
+ * settings.json, plugins, plans, prompt history -- is shared by SYMLINK from
+ * each extra account into the main account's config home, so there is nothing
+ * to synchronise there and nothing that can drift.
+ *
+ * What cannot be symlinked is the handful of things that live inside those two
+ * per-account files and that the user does want kept in step: MCP servers, the
+ * trust already granted to a directory, the tools allowed in it, and the
+ * permission rules. Those are what this file syncs, and it does it the way git
+ * does a merge: against a baseline of what was last agreed, so it can tell
+ * "the main account changed this" from "the extra account changed this".
+ *
+ *   main changed, extra did not   -> pushed automatically (the main account leads)
+ *   extra changed, main did not   -> listed on the Accounts tab with a tick box;
+ *                                    in one-way mode it keeps working in that
+ *                                    account until the user promotes it, and is
+ *                                    never forced back. In both-ways mode it is
+ *                                    promoted on its own.
+ *   both changed                  -> a conflict: both values are shown and the
+ *                                    main account wins unless the user picks the
+ *                                    other one.
+ *
+ * Nothing outside the whitelist below is ever read or written, in either
+ * direction: identity (oauthAccount, userID), counters, caches and per-session
+ * metrics stay strictly per account.
+ *
+ * Runs both as a web endpoint (the Accounts tab) and from the command line
+ * (profiles.sh and remote-control.sh, which call it with php-cli).
+ */
+
+$CC_SYNC_CFG = '/boot/config/plugins/claude-code/claude-code.cfg';
+
+function sync_cfg() {
+    global $CC_SYNC_CFG;
+    $cfg = is_readable($CC_SYNC_CFG) ? @parse_ini_file($CC_SYNC_CFG) : [];
+    return is_array($cfg) ? $cfg : [];
+}
+
+function sync_appdata() {
+    $cfg = sync_cfg();
+    $p = isset($cfg['APPDATA_PATH']) ? rtrim($cfg['APPDATA_PATH'], '/') : '';
+    return $p !== '' ? $p : '/mnt/user/appdata/claude-code';
+}
+
+// One-way ("oneway", the default) or both ways ("both").
+function sync_mode() {
+    $cfg = sync_cfg();
+    return (isset($cfg['SYNC_MODE']) && $cfg['SYNC_MODE'] === 'both') ? 'both' : 'oneway';
+}
+
+function sync_profiles() {
+    $cfg = sync_cfg();
+    $list = isset($cfg['PROFILES']) ? preg_split('/\s+/', trim($cfg['PROFILES'])) : [];
+    return array_values(array_filter($list, function ($s) {
+        return $s !== '' && preg_match('/^[a-z][a-z0-9_]{0,23}$/', $s);
+    }));
+}
+
+// Where each account keeps the two files this code touches. The main account is
+// the config that was always there: $HOME/.claude.json plus $HOME/.claude/.
+function sync_paths($slug) {
+    $appdata = sync_appdata();
+    if ($slug === 'default') {
+        return [
+            'config'   => "$appdata/.claude.json",
+            'settings' => "$appdata/.claude/settings.local.json",
+            'base'     => null,
+        ];
+    }
+    if (!preg_match('/^[a-z][a-z0-9_]{0,23}$/', $slug)) return null;
+    $dir = "$appdata/profiles/$slug";
+    return [
+        'config'   => "$dir/.claude.json",
+        'settings' => "$dir/settings.local.json",
+        'base'     => "$dir/.sync-base.json",
+        'dir'      => $dir,
+    ];
+}
+
+function sync_read_json($path) {
+    if ($path === null || !is_readable($path)) return null;
+    $raw = @file_get_contents($path);
+    if ($raw === false || trim($raw) === '') return null;
+    $data = json_decode($raw, true);
+    // An unreadable document is never merged into: rewriting it would throw
+    // away whatever is in there. Callers treat null as "cannot sync".
+    return is_array($data) ? $data : null;
+}
+
+/*
+ * The whitelist, as a flat list of items. An item is one thing a person would
+ * tick: a single MCP server, one directory's trust, one permission rule.
+ *
+ * value === null means "not set here", which is a real state: it is how a rule
+ * that one account has and the other does not is represented.
+ */
+function sync_items_from($config, $settings) {
+    $items = [];
+    $add = function ($kind, $scope, $name, $value) use (&$items) {
+        $items[sync_item_id($kind, $scope, $name)] = [
+            'kind' => $kind, 'scope' => $scope, 'name' => $name, 'value' => $value,
+        ];
+    };
+
+    if (is_array($config)) {
+        if (isset($config['mcpServers']) && is_array($config['mcpServers'])) {
+            foreach ($config['mcpServers'] as $name => $def) $add('mcp', '', (string)$name, $def);
+        }
+        if (isset($config['projects']) && is_array($config['projects'])) {
+            foreach ($config['projects'] as $proj => $entry) {
+                if (!is_array($entry)) continue;
+                $proj = (string)$proj;
+                if (isset($entry['mcpServers']) && is_array($entry['mcpServers'])) {
+                    foreach ($entry['mcpServers'] as $name => $def) $add('mcp', $proj, (string)$name, $def);
+                }
+                foreach (['enabledMcpjsonServers' => 'mcpjson_on', 'disabledMcpjsonServers' => 'mcpjson_off'] as $key => $kind) {
+                    if (isset($entry[$key]) && is_array($entry[$key])) {
+                        foreach ($entry[$key] as $name) $add($kind, $proj, (string)$name, true);
+                    }
+                }
+                if (isset($entry['allowedTools']) && is_array($entry['allowedTools'])) {
+                    foreach ($entry['allowedTools'] as $rule) $add('tool', $proj, (string)$rule, true);
+                }
+                if (array_key_exists('hasTrustDialogAccepted', $entry)) {
+                    $add('trust', $proj, '', (bool)$entry['hasTrustDialogAccepted']);
+                }
+            }
+        }
+    }
+
+    if (is_array($settings) && isset($settings['permissions']) && is_array($settings['permissions'])) {
+        foreach (['allow', 'ask', 'deny'] as $bucket) {
+            if (isset($settings['permissions'][$bucket]) && is_array($settings['permissions'][$bucket])) {
+                foreach ($settings['permissions'][$bucket] as $rule) {
+                    $add('perm_' . $bucket, '', (string)$rule, true);
+                }
+            }
+        }
+    }
+    return $items;
+}
+
+// Stable across runs and safe in an HTML form field, which the raw name is not:
+// a permission rule can contain quotes, spaces and slashes.
+function sync_item_id($kind, $scope, $name) {
+    return substr(sha1($kind . "\x00" . $scope . "\x00" . $name), 0, 16);
+}
+
+function sync_state($slug) {
+    $p = sync_paths($slug);
+    if ($p === null) return null;
+    $config   = sync_read_json($p['config']);
+    $settings = sync_read_json($p['settings']);
+    return [
+        'items'    => sync_items_from($config, $settings),
+        'config'   => $config,
+        'settings' => $settings,
+        'paths'    => $p,
+    ];
+}
+
+function sync_base($slug) {
+    $p = sync_paths($slug);
+    if ($p === null || $p['base'] === null) return [];
+    $data = sync_read_json($p['base']);
+    return (is_array($data) && isset($data['items']) && is_array($data['items'])) ? $data['items'] : [];
+}
+
+function sync_same($a, $b) {
+    return json_encode($a) === json_encode($b);
+}
+
+function sync_label($item) {
+    $kind = $item['kind']; $scope = $item['scope']; $name = $item['name'];
+    switch ($kind) {
+        case 'mcp':         return 'MCP: ' . $name . ($scope !== '' ? " ($scope)" : ' (user)');
+        case 'mcpjson_on':  return 'MCP .mcp.json enabled: ' . $name . " ($scope)";
+        case 'mcpjson_off': return 'MCP .mcp.json disabled: ' . $name . " ($scope)";
+        case 'tool':        return 'Allowed tool: ' . $name . " ($scope)";
+        case 'trust':       return 'Directory trusted: ' . $scope;
+        case 'perm_allow':  return 'Permission allow: ' . $name;
+        case 'perm_ask':    return 'Permission ask: ' . $name;
+        case 'perm_deny':   return 'Permission deny: ' . $name;
+    }
+    return $kind . ' ' . $name;
+}
+
+/*
+ * The three-way comparison. Returns one entry per item that is not already in
+ * step, each tagged with what should happen to it.
+ */
+function sync_plan($slug) {
+    $main = sync_state('default');
+    $prof = sync_state($slug);
+    if ($main === null || $prof === null) return ['error' => 'unknown account'];
+    // Refuse to plan anything against a document that does not parse: every
+    // later step would be merging into a file it could not read.
+    if ($main['config'] === null && is_file($main['paths']['config'])) return ['error' => 'the main account config file could not be read'];
+    if ($prof['config'] === null && is_file($prof['paths']['config'])) return ['error' => 'the account config file could not be read'];
+
+    $base = sync_base($slug);
+    $ids = array_unique(array_merge(array_keys($main['items']), array_keys($prof['items']), array_keys($base)));
+    $plan = ['push' => [], 'promote' => [], 'conflict' => [], 'rebase' => []];
+    foreach ($ids as $id) {
+        $m = isset($main['items'][$id]) ? $main['items'][$id] : null;
+        $p = isset($prof['items'][$id]) ? $prof['items'][$id] : null;
+        $b = isset($base[$id]) ? $base[$id] : null;
+        $meta = $m ? $m : ($p ? $p : $b);
+        $mv = $m ? $m['value'] : null;
+        $pv = $p ? $p['value'] : null;
+        $bv = $b ? $b['value'] : null;
+        if (sync_same($mv, $pv)) { if (!sync_same($mv, $bv)) $plan['rebase'][] = sync_entry($id, $meta, $mv, $pv, $bv); continue; }
+        $main_moved = !sync_same($mv, $bv);
+        $prof_moved = !sync_same($pv, $bv);
+        $entry = sync_entry($id, $meta, $mv, $pv, $bv);
+        if ($main_moved && $prof_moved)      $plan['conflict'][] = $entry;
+        elseif ($main_moved)                 $plan['push'][]     = $entry;
+        else                                 $plan['promote'][]  = $entry;
+    }
+    return $plan;
+}
+
+function sync_entry($id, $meta, $mv, $pv, $bv) {
+    return [
+        'id'    => $id,
+        'kind'  => $meta['kind'],
+        'scope' => $meta['scope'],
+        'name'  => $meta['name'],
+        'label' => sync_label($meta),
+        'main'  => $mv,
+        'profile' => $pv,
+        'base'  => $bv,
+    ];
+}
+
+/* ---------- writing ---------- */
+
+// Same care as claude-config.php: a backup first, then a temporary file in the
+// same directory and a rename, so a reader never sees a half-written document.
+function sync_write_json($path, $data) {
+    $dir = dirname($path);
+    if (!is_dir($dir) && !@mkdir($dir, 0700, true)) return false;
+    if (is_file($path)) @copy($path, $path . '.bak');
+    $json = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($json === false) return false;
+    $tmp = $path . '.sync.' . getmypid();
+    if (@file_put_contents($tmp, $json) === false) { @unlink($tmp); return false; }
+    @chmod($tmp, 0600);
+    if (!@rename($tmp, $path)) { @unlink($tmp); return false; }
+    return true;
+}
+
+// Only one writer at a time across the page, profiles.sh and remote-control.sh.
+function sync_lock() {
+    $fh = @fopen('/var/run/claude-code-sync.lock', 'c');
+    if ($fh === false) return null;
+    if (!flock($fh, LOCK_EX)) { fclose($fh); return null; }
+    return $fh;
+}
+
+function sync_unlock($fh) {
+    if ($fh) { flock($fh, LOCK_UN); fclose($fh); }
+}
+
+// Put one item's value into a config/settings pair, or take it out when the
+// value is null. Only ever touches the whitelisted spot for that item.
+function sync_apply_value(&$config, &$settings, $item, $value) {
+    $kind = $item['kind']; $scope = $item['scope']; $name = $item['name'];
+    if (!is_array($config)) $config = [];
+    if (!is_array($settings)) $settings = [];
+
+    $list_put = function (&$arr, $name, $on) {
+        if (!is_array($arr)) $arr = [];
+        $arr = array_values(array_filter($arr, function ($v) use ($name) { return (string)$v !== $name; }));
+        if ($on) $arr[] = $name;
+    };
+
+    if ($kind === 'mcp' && $scope === '') {
+        if ($value === null) unset($config['mcpServers'][$name]);
+        else $config['mcpServers'][$name] = $value;
+        if (isset($config['mcpServers']) && $config['mcpServers'] === []) unset($config['mcpServers']);
+        return;
+    }
+    if (in_array($kind, ['mcp', 'mcpjson_on', 'mcpjson_off', 'tool', 'trust'], true)) {
+        if (!isset($config['projects']) || !is_array($config['projects'])) $config['projects'] = [];
+        if (!isset($config['projects'][$scope]) || !is_array($config['projects'][$scope])) {
+            if ($value === null) return;
+            $config['projects'][$scope] = [];
+        }
+        $entry =& $config['projects'][$scope];
+        if ($kind === 'mcp') {
+            if ($value === null) unset($entry['mcpServers'][$name]);
+            else $entry['mcpServers'][$name] = $value;
+        } elseif ($kind === 'mcpjson_on') {
+            $list_put($entry['enabledMcpjsonServers'], $name, $value !== null);
+        } elseif ($kind === 'mcpjson_off') {
+            $list_put($entry['disabledMcpjsonServers'], $name, $value !== null);
+        } elseif ($kind === 'tool') {
+            $list_put($entry['allowedTools'], $name, $value !== null);
+        } elseif ($kind === 'trust') {
+            if ($value === null) unset($entry['hasTrustDialogAccepted']);
+            else $entry['hasTrustDialogAccepted'] = (bool)$value;
+        }
+        unset($entry);
+        return;
+    }
+    if (strpos($kind, 'perm_') === 0) {
+        $bucket = substr($kind, 5);
+        if (!isset($settings['permissions']) || !is_array($settings['permissions'])) $settings['permissions'] = [];
+        $list_put($settings['permissions'][$bucket], $name, $value !== null);
+        if (isset($settings['permissions'][$bucket]) && $settings['permissions'][$bucket] === []) {
+            unset($settings['permissions'][$bucket]);
+        }
+        if ($settings['permissions'] === []) unset($settings['permissions']);
+    }
+}
+
+function sync_save_base($slug, $items) {
+    $p = sync_paths($slug);
+    if ($p === null || $p['base'] === null) return false;
+    return sync_write_json($p['base'], ['updated' => date('c'), 'items' => $items]);
+}
+
+/*
+ * Apply a plan. $promote_ids are the items the user ticked (or, in both-ways
+ * mode, every promotable item). Returns a report of what moved.
+ */
+function sync_apply($slug, $promote_ids = [], $take_profile_on_conflict = []) {
+    $plan = sync_plan($slug);
+    if (isset($plan['error'])) return $plan;
+    $lock = sync_lock();
+    $main = sync_state('default');
+    $prof = sync_state($slug);
+    if ($main === null || $prof === null) { sync_unlock($lock); return ['error' => 'unknown account']; }
+
+    $mcfg = $main['config']; $mset = $main['settings'];
+    $pcfg = $prof['config']; $pset = $prof['settings'];
+    $report = ['pushed' => 0, 'promoted' => 0, 'left' => 0, 'conflicts' => 0];
+    $both = sync_mode() === 'both';
+
+    foreach ($plan['push'] as $e) {
+        sync_apply_value($pcfg, $pset, $e, $e['main']);
+        $report['pushed']++;
+    }
+    foreach ($plan['promote'] as $e) {
+        if ($both || in_array($e['id'], $promote_ids, true)) {
+            sync_apply_value($mcfg, $mset, $e, $e['profile']);
+            $report['promoted']++;
+        } else {
+            // Left exactly as it is, working in that account only. This is the
+            // explicit choice: an unticked change is never reverted.
+            $report['left']++;
+        }
+    }
+    foreach ($plan['conflict'] as $e) {
+        if (in_array($e['id'], $take_profile_on_conflict, true)) {
+            sync_apply_value($mcfg, $mset, $e, $e['profile']);
+            $report['promoted']++;
+        } else {
+            sync_apply_value($pcfg, $pset, $e, $e['main']);
+            $report['pushed']++;
+        }
+        $report['conflicts']++;
+    }
+
+    $ok = true;
+    if (!sync_same($pcfg, $prof['config']) || !sync_same($pset, $prof['settings'])) {
+        if (!sync_same($pcfg, $prof['config']))     $ok = sync_write_json($prof['paths']['config'], $pcfg) && $ok;
+        if (!sync_same($pset, $prof['settings']))   $ok = sync_write_json($prof['paths']['settings'], $pset) && $ok;
+    }
+    if (!sync_same($mcfg, $main['config']) || !sync_same($mset, $main['settings'])) {
+        if (!sync_same($mcfg, $main['config']))     $ok = sync_write_json($main['paths']['config'], $mcfg) && $ok;
+        if (!sync_same($mset, $main['settings']))   $ok = sync_write_json($main['paths']['settings'], $mset) && $ok;
+    }
+
+    // The new baseline is what the two sides agree on now. Anything left alone
+    // keeps its old baseline, so it stays listed until it is dealt with.
+    $after_main = sync_items_from($mcfg, $mset);
+    $after_prof = sync_items_from($pcfg, $pset);
+    $base = sync_base($slug);
+    foreach (array_unique(array_merge(array_keys($after_main), array_keys($after_prof))) as $id) {
+        $m = isset($after_main[$id]) ? $after_main[$id] : null;
+        $p = isset($after_prof[$id]) ? $after_prof[$id] : null;
+        if ($m && $p && sync_same($m['value'], $p['value'])) $base[$id] = $m;
+    }
+    foreach (array_keys($base) as $id) {
+        if (!isset($after_main[$id]) && !isset($after_prof[$id])) unset($base[$id]);
+    }
+    sync_save_base($slug, $base);
+    sync_unlock($lock);
+    $report['ok'] = $ok;
+    return $report;
+}
+
+/* ---------- entry points ---------- */
+
+// The Accounts tab includes this file to render the pending list itself, so
+// everything above is a library and nothing below runs for it.
+if (defined('CC_SYNC_LIB')) return;
+
+if (php_sapi_name() === 'cli') {
+    $cmd  = isset($argv[1]) ? $argv[1] : '';
+    $slug = isset($argv[2]) ? $argv[2] : '';
+    if ($cmd === 'sync' || $cmd === 'apply') {
+        $slugs = $slug !== '' ? [$slug] : sync_profiles();
+        foreach ($slugs as $s) {
+            $r = sync_apply($s);
+            if (isset($r['error'])) { fwrite(STDERR, "sync $s: {$r['error']}\n"); continue; }
+            printf("sync %s: %d pushed, %d promoted, %d waiting for you, %d conflicts\n",
+                   $s, $r['pushed'], $r['promoted'], $r['left'], $r['conflicts']);
+        }
+        exit(0);
+    }
+    if ($cmd === 'promote') {
+        // The ids the Accounts tab shows. Same path the page takes, so what is
+        // testable from a terminal is exactly what the button does.
+        $ids = array_slice($argv, 3);
+        $r = sync_apply($slug, $ids, $ids);
+        echo json_encode($r), "\n";
+        exit(isset($r['error']) ? 1 : 0);
+    }
+    if ($cmd === 'plan') {
+        echo json_encode(sync_plan($slug), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), "\n";
+        exit(0);
+    }
+    fwrite(STDERR, "Usage: claude-sync.php {sync|plan|promote <account> <id...>} [account]\n");
+    exit(1);
+}
+
+// Web endpoint. Same shape as the other include/*.php here: JSON out, and the
+// script's own words as the message.
+header('Content-Type: application/json');
+$action = isset($_REQUEST['action']) ? $_REQUEST['action'] : 'plan';
+$slug   = isset($_REQUEST['profile']) ? preg_replace('/[^a-z0-9_]/', '', $_REQUEST['profile']) : '';
+
+if ($action === 'mode') {
+    $mode = (isset($_REQUEST['mode']) && $_REQUEST['mode'] === 'both') ? 'both' : 'oneway';
+    $file = $GLOBALS['CC_SYNC_CFG'];
+    $raw = is_readable($file) ? file_get_contents($file) : '';
+    if (preg_match('/^SYNC_MODE=/m', $raw)) $raw = preg_replace('/^SYNC_MODE=.*$/m', 'SYNC_MODE="' . $mode . '"', $raw);
+    else $raw = rtrim($raw, "\n") . "\nSYNC_MODE=\"$mode\"\n";
+    $ok = @file_put_contents($file, $raw) !== false;
+    echo json_encode(['ok' => $ok, 'mode' => $mode]);
+    exit;
+}
+
+if ($action === 'apply') {
+    $promote = isset($_REQUEST['promote']) ? (array)$_REQUEST['promote'] : [];
+    $keep    = isset($_REQUEST['keep_profile']) ? (array)$_REQUEST['keep_profile'] : [];
+    $promote = array_values(array_filter(array_map(function ($v) { return preg_replace('/[^a-f0-9]/', '', $v); }, $promote)));
+    $keep    = array_values(array_filter(array_map(function ($v) { return preg_replace('/[^a-f0-9]/', '', $v); }, $keep)));
+    echo json_encode(sync_apply($slug, $promote, $keep));
+    exit;
+}
+
+$out = ['mode' => sync_mode(), 'accounts' => []];
+foreach (sync_profiles() as $s) {
+    $plan = sync_plan($s);
+    $out['accounts'][$s] = $plan;
+}
+echo json_encode($out);
+]]>
+</INLINE>
+</FILE>
+
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-config.php" Mode="0644">
-<SHA256>19813d4fd381a59d1a9d74c89c8d6feb423b36844d72be87e6a600b627b92a22</SHA256>
+<SHA256>03ce850da047728b7bab3b219069cdd449abc8454b1aa25770f6592364333b5e</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -3437,6 +4186,15 @@ if (isset($_POST['raw'])) {
     $data = $cur['settings'];
     foreach ($values as $key => $value) {
         if (!is_string($key) || !preg_match('/^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/', $key)) continue;
+        // The one field that can move the agent's memory somewhere this plugin
+        // does not keep alive. Anywhere outside appdata is lost at the next
+        // reboot, so it is refused here rather than accepted and regretted.
+        if ($key === 'autoMemoryDirectory' && is_string($value) && trim($value) !== '') {
+            $wanted = rtrim(trim($value), '/');
+            if ($cc_appdata === '' || strpos($wanted . '/', $cc_appdata . '/') !== 0) {
+                cc_done(false, 'The memory folder has to be inside ' . ($cc_appdata !== '' ? $cc_appdata : 'the appdata folder') . ', or it would not survive a reboot.');
+            }
+        }
         cc_apply($data, $key, $value);
     }
 }
@@ -3783,7 +4541,7 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeAccounts.page">
-<SHA256>a17ea3b89a4578ab7a9be60131bb1f8b285f7b3543662d337fdcf6ecccc5a9ea</SHA256>
+<SHA256>dd42629fec86e6832c62774897c41d92346725e3152d40b1780b2087b819da91</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:2"
@@ -3794,8 +4552,8 @@ Tag="users"
 <div class="claude-box">
 <h4><?=t('Claude accounts', 'Cuentas de Claude')?></h4>
 <p><?=t(
-    'Lets this server hold more than one Claude login and choose which one it uses. Everything stays on this server: each account keeps its own credentials in a separate folder inside your appdata, and the account you pick here is the one used by Remote Control and by "claude" in the terminal.',
-    'Permite que este servidor tenga más de una sesión de Claude iniciada y elegir cuál usa. Todo se queda en este servidor: cada cuenta guarda sus credenciales en una carpeta aparte dentro de tu appdata, y la cuenta que elijas aquí es la que usan el Control Remoto y el comando "claude" de la terminal.'
+    'Lets this server hold more than one Claude login and choose which one it uses. Everything stays on this server: each account keeps its own credentials and its own identity in a separate folder inside your appdata, and the account you pick here is the one used by Remote Control and by "claude" in the terminal.',
+    'Permite que este servidor tenga más de una sesión de Claude iniciada y elegir cuál usa. Todo se queda en este servidor: cada cuenta guarda sus credenciales y su propia identidad en una carpeta aparte dentro de tu appdata, y la cuenta que elijas aquí es la que usan el Control Remoto y el comando "claude" de la terminal.'
 )?></p>
 
 <form method="POST" action="/update.php" target="progressFrame">
@@ -3820,8 +4578,8 @@ Tag="users"
 </dd>
 </dl>
 <blockquote class="inline_help"><?=t(
-    'Shared is the usual choice: every account works with the same agent memory, settings and MCP servers, and only the login itself changes. Separate gives each account its own memory, settings and history, which start out empty. Both let several accounts be used at the same time.',
-    'Compartidos es lo habitual: todas las cuentas trabajan con la misma memoria del agente, los mismos ajustes y los mismos servidores MCP, y lo único que cambia es la sesión iniciada. Separados le da a cada cuenta su propia memoria, ajustes e historial, que empiezan vacíos. En ambos casos se pueden usar varias cuentas a la vez.'
+    'Shared is the usual choice: every account works with the same agent memory, transcripts, settings and plugins -- the same files, linked into each account, not copies. What each account keeps to itself is who it is signed in as and its own permission rules and MCP servers, which are kept in step from the main account by the panel below. Separate gives each account its own memory, settings and history, which start out empty. Both let several accounts be used at the same time.',
+    'Compartidos es lo habitual: todas las cuentas trabajan con la misma memoria del agente, las mismas transcripciones, los mismos ajustes y los mismos plugins -- los mismos ficheros, enlazados dentro de cada cuenta, no copias. Lo que cada cuenta guarda para sí es con qué cuenta ha iniciado sesión, y sus propias reglas de permisos y servidores MCP, que se mantienen en línea con la principal desde el panel de abajo. Separados le da a cada cuenta su propia memoria, ajustes e historial, que empiezan vacíos. En ambos casos se pueden usar varias cuentas a la vez.'
 )?></blockquote>
 <?php if ($mode_locked): ?>
 <blockquote class="inline_help"><span class="dim-text"><?=t(
@@ -3944,8 +4702,158 @@ Tag="users"
   };
 })();
 </script>
+
 <?php endif; ?>
 </div>
+
+<?php
+// The sync panel: its own box, below the accounts one. claude-sync.php is
+// included as a library (the define) so the endpoint code at the bottom of it
+// does not run inside this page.
+$cc_sync_plans = [];
+$cc_sync_mode  = 'oneway';
+if ($multi_account) {
+    define('CC_SYNC_LIB', 1);
+    require_once "/usr/local/emhttp/plugins/claude-code/include/claude-sync.php";
+    $cc_sync_mode = sync_mode();
+    // From the config rather than from $profiles: the list above comes from
+    // running profiles.sh, and if that ever fails this panel should still be
+    // able to say what is waiting.
+    foreach (sync_profiles() as $cc_slug_i) {
+        $cc_label = (string)($cfg['PROFILE_LABEL_' . $cc_slug_i] ?? $cc_slug_i);
+        $cc_sync_plans[$cc_slug_i] = ['label' => $cc_label, 'plan' => sync_plan($cc_slug_i)];
+    }
+}
+// One short line per value, so a person can tell what they are ticking without
+// reading JSON: a rule is its own text, a server is its command.
+function cc_sync_value($v) {
+    if ($v === null) return t('not set', 'sin poner');
+    if ($v === true) return t('set', 'puesta');
+    if (is_array($v)) {
+        if (isset($v['command'])) return (string)$v['command'];
+        return json_encode($v, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    }
+    return (string)$v;
+}
+?>
+<?php if ($multi_account && $cc_sync_plans): ?>
+<div class="claude-box">
+<h4><?=t('Sharing between accounts', 'Qué comparten las cuentas')?></h4>
+<p><?=t(
+    'The main account leads. Agent memory, session transcripts, settings.json, plugins, saved plans and the prompt history are not copied to the other accounts: they are the same files, linked into each account, so what one learns every account has. What cannot be linked, because it lives inside each account\'s own files, is synchronised here: MCP servers, the directories already trusted, the tools allowed in them, and the permission rules.',
+    'La cuenta principal es la que manda. La memoria del agente, las transcripciones, settings.json, los plugins, los planes guardados y el historial de órdenes no se copian a las demás cuentas: son los mismos ficheros, enlazados dentro de cada cuenta, así que lo que aprende una lo tienen todas. Lo que no se puede enlazar, porque vive dentro de los ficheros propios de cada cuenta, se sincroniza aquí: los servidores MCP, los directorios en los que ya has dado tu confianza, las herramientas permitidas en ellos y las reglas de permisos.'
+)?></p>
+
+<dl>
+<dt><?=t('Direction:', 'Sentido:')?></dt>
+<dd>
+<select id="cc-sync-mode" onchange="ccSyncMode(this.value);">
+<option value="oneway"<?=$cc_sync_mode === 'oneway' ? ' selected' : ''?>><?=t('One way: main account to the others', 'Unidireccional: de la principal a las demás')?></option>
+<option value="both"<?=$cc_sync_mode === 'both' ? ' selected' : ''?>><?=t('Both ways', 'Bidireccional')?></option>
+</select>
+</dd>
+</dl>
+<blockquote class="inline_help"><?=t(
+    'One way is the safe default: a change you make in the main account reaches every other account on its own, and a change made in another account stays working there and waits for you below. Both ways promotes those changes on its own, without asking. Either way, a change made in another account is never undone behind your back.',
+    'Unidireccional es lo prudente y viene puesto de fábrica: un cambio que hagas en la cuenta principal llega solo a las demás, y un cambio hecho en otra cuenta se queda funcionando ahí y te espera abajo. Bidireccional sube esos cambios solo, sin preguntar. En los dos casos, un cambio hecho en otra cuenta nunca se deshace a tus espaldas.'
+)?></blockquote>
+
+<?php foreach ($cc_sync_plans as $cc_slug => $cc_info): $cc_plan = $cc_info['plan']; ?>
+<dl>
+<dt><?=htmlspecialchars($cc_info['label'])?>:</dt>
+<dd>
+<?php if (isset($cc_plan['error'])): ?>
+<span class="warn"><?=htmlspecialchars($cc_plan['error'])?></span>
+<?php elseif (!$cc_plan['promote'] && !$cc_plan['conflict']): ?>
+<span class="dim-text"><?=t('Nothing waiting: this account matches the main one.', 'Nada pendiente: esta cuenta va igual que la principal.')?></span>
+<?php else: ?>
+<table class="claude-history">
+<tr><th></th><th><?=t('Change', 'Cambio')?></th><th><?=t('In this account', 'En esta cuenta')?></th><th><?=t('In the main account', 'En la principal')?></th></tr>
+<?php foreach ($cc_plan['promote'] as $cc_e): ?>
+<tr>
+<td><input type="checkbox" class="cc-sync-item" data-profile="<?=htmlspecialchars($cc_slug, ENT_QUOTES)?>" value="<?=htmlspecialchars($cc_e['id'], ENT_QUOTES)?>"></td>
+<td><?=htmlspecialchars($cc_e['label'])?></td>
+<td><?=htmlspecialchars(cc_sync_value($cc_e['profile']))?></td>
+<td><span class="dim-text"><?=htmlspecialchars(cc_sync_value($cc_e['main']))?></span></td>
+</tr>
+<?php endforeach; ?>
+<?php foreach ($cc_plan['conflict'] as $cc_e): ?>
+<tr>
+<td><input type="checkbox" class="cc-sync-item" data-profile="<?=htmlspecialchars($cc_slug, ENT_QUOTES)?>" value="<?=htmlspecialchars($cc_e['id'], ENT_QUOTES)?>"></td>
+<td><span class="warn"><?=t('Both changed:', 'Cambiado en las dos:')?></span> <?=htmlspecialchars($cc_e['label'])?></td>
+<td><?=htmlspecialchars(cc_sync_value($cc_e['profile']))?></td>
+<td><?=htmlspecialchars(cc_sync_value($cc_e['main']))?></td>
+</tr>
+<?php endforeach; ?>
+</table>
+<input type="button" value="<?=t('Apply ticked to the main account', 'Aplicar lo marcado a la cuenta principal')?>" onclick="ccSyncApply('<?=htmlspecialchars($cc_slug, ENT_QUOTES)?>');">
+<?php endif; ?>
+</dd>
+</dl>
+<?php endforeach; ?>
+<blockquote class="inline_help"><?=t(
+    'Tick a change to make it the main account\'s too, which also hands it to every other account. Leave it unticked and it keeps working in that account alone. A row marked "both changed" is one each side moved: leaving it unticked keeps the main account\'s value.',
+    'Marca un cambio para que pase a ser también el de la cuenta principal, lo que además se lo entrega a todas las demás. Déjalo sin marcar y seguirá funcionando solo en esa cuenta. Una fila con "cambiado en las dos" es un valor que movieron ambas partes: dejarla sin marcar conserva el de la cuenta principal.'
+)?></blockquote>
+<input type="button" value="<?=t('Sync now', 'Sincronizar ahora')?>" onclick="ccSyncApply('');">
+<p id="cc-sync-msg"></p>
+
+<script>
+(function () {
+  var CSRF = <?=json_encode($var['csrf_token'] ?? '')?>;
+  var out = document.getElementById('cc-sync-msg');
+  var L = <?=json_encode([
+      'working' => t('Working...', 'Trabajando...'),
+      'network' => t('Could not reach the server.', 'No se pudo contactar con el servidor.'),
+      'done'    => t('Done: %p sent to the other accounts, %r promoted to the main one.',
+                     'Hecho: %p enviados a las otras cuentas, %r subidos a la principal.'),
+  ])?>;
+
+  function post(params) {
+    out.textContent = L.working; out.className = '';
+    var body = new URLSearchParams();
+    Object.keys(params).forEach(function (k) {
+      if (Array.isArray(params[k])) params[k].forEach(function (v) { body.append(k + '[]', v); });
+      else body.set(k, params[k]);
+    });
+    body.set('csrf_token', CSRF);
+    return fetch('/plugins/claude-code/include/claude-sync.php',
+                 { method: 'POST', cache: 'no-store', headers: { 'X-CSRF-TOKEN': CSRF }, body: body })
+      .then(function (r) { return r.json(); });
+  }
+
+  window.ccSyncMode = function (mode) {
+    post({ action: 'mode', mode: mode })
+      .then(function () { location.reload(); })
+      .catch(function () { out.textContent = L.network; out.className = 'error'; });
+  };
+
+  // An empty account means "every account": the plain Sync now button, which
+  // only ever pushes what the main account leads on.
+  window.ccSyncApply = function (slug) {
+    var ids = [];
+    document.querySelectorAll('.cc-sync-item:checked').forEach(function (el) {
+      if (!slug || el.getAttribute('data-profile') === slug) ids.push(el.value);
+    });
+    var accounts = slug ? [slug] : <?=json_encode(array_keys($cc_sync_plans))?>;
+    var pushed = 0, promoted = 0;
+    var chain = Promise.resolve();
+    accounts.forEach(function (a) {
+      chain = chain.then(function () {
+        return post({ action: 'apply', profile: a, promote: ids, keep_profile: ids })
+          .then(function (d) { pushed += (d.pushed || 0); promoted += (d.promoted || 0); });
+      });
+    });
+    chain.then(function () {
+      out.textContent = L.done.replace('%p', pushed).replace('%r', promoted);
+      out.className = 'ok';
+      setTimeout(function () { location.reload(); }, 900);
+    }).catch(function () { out.textContent = L.network; out.className = 'error'; });
+  };
+})();
+</script>
+</div>
+<?php endif; ?>
 
 <?php if (!$multi_account): ?>
 <!-- With one account there is no list to manage, but there still has to be a
@@ -4288,7 +5196,7 @@ if ($rc_owner === '') {
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeConfig.page">
-<SHA256>f37402808a09b75a5ef7513c093aa6db15a5c41bbd1c154e4a76a81cd6dfb2db</SHA256>
+<SHA256>023de51f9f3af54f2ab523830cb52400c287289a7abc6f0dfce4fbfb1acd7b59</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:4"
@@ -4363,6 +5271,34 @@ $cc_fields = [
        'label' => t('Tips while working', 'Consejos mientras trabaja'),
        'help'  => t('The little tips that appear next to the "working" spinner while you wait. Switched on by default.',
                     'Los consejos que van apareciendo junto al indicador de «trabajando» mientras esperas. Activado de fábrica.')],
+      ['key' => 'autoContinueAtUsageLimit', 'type' => 'bool',
+       'label' => t('Wait for the limit to reset', 'Esperar a que se reinicie el límite'),
+       'help'  => t('When you run out of plan usage in the middle of a job, Claude waits until your limit resets and carries on by itself instead of stopping there. Useful on a server you are not sitting in front of.',
+                    'Cuando te quedas sin uso del plan a mitad de una tarea, Claude espera a que se reinicie tu límite y continúa por su cuenta en vez de quedarse parado. Útil en un servidor que no tienes delante.')],
+      ['key' => 'autoCompactWindow', 'type' => 'number',
+       'label' => t('When to compact', 'Cuándo compactar'),
+       'help'  => t('How full the conversation gets before Claude summarises the older part of it. Leave it empty unless you have a reason: compacting sooner means doing it more often and with a coarser summary.',
+                    'Cuánto se llena la conversación antes de que Claude resuma la parte más antigua. Déjalo vacío salvo que tengas un motivo: compactar antes significa hacerlo más veces y con un resumen más basto.')],
+      ['key' => 'showThinkingSummaries', 'type' => 'bool',
+       'label' => t('Show what it is thinking', 'Mostrar lo que va pensando'),
+       'help'  => t('Shows a readable summary of Claude\'s reasoning while it works, instead of a collapsed line. It changes nothing about how it thinks, only what you get to see.',
+                    'Muestra un resumen legible del razonamiento de Claude mientras trabaja, en vez de una línea plegada. No cambia nada de cómo piensa, solo lo que ves.')],
+      ['key' => 'showTurnDuration', 'type' => 'bool',
+       'label' => t('Show how long it took', 'Mostrar cuánto ha tardado'),
+       'help'  => t('The duration shown under each answer. Set it to No to hide it.',
+                    'El tiempo que aparece debajo de cada respuesta. Ponlo en No para ocultarlo.')],
+      ['key' => 'maxEffortLevel', 'type' => 'select', 'options' => ['low', 'medium', 'high', 'xhigh'],
+       'label' => t('Effort ceiling', 'Tope de esfuerzo'),
+       'help'  => t('A hard cap on how hard Claude may think, whatever the session asks for. Careful with this one: it is not a saving, it is a limit on capability -- a hard problem that needed more thinking will simply be answered with less. Leave it empty unless you are deliberately capping spend and accept worse answers on hard steps.',
+                    'Un techo fijo a cuánto puede pensar Claude, pida lo que pida la sesión. Cuidado con este: no es un ahorro, es un límite de capacidad -- un problema difícil que necesitaba pensar más simplemente se responderá pensando menos. Déjalo vacío salvo que estés limitando el gasto a propósito y aceptes peores respuestas en los pasos difíciles.')],
+      ['key' => 'fastMode', 'type' => 'bool',
+       'label' => t('Fast mode', 'Modo rápido'),
+       'help'  => t('Runs the same model noticeably faster where it is available (Opus 5 and 4.8). It is the same intelligence, not less -- what changes is the price: fast mode is charged at a premium rate, so it eats through your plan faster. Leave it unset unless speed is worth that to you.',
+                    'Ejecuta el mismo modelo bastante más rápido donde está disponible (Opus 5 y 4.8). Es la misma inteligencia, no menos -- lo que cambia es el precio: el modo rápido se cobra a tarifa premium, así que consume tu plan más deprisa. Déjalo sin definir salvo que la velocidad te compense.')],
+      ['key' => 'fastModePerSessionOptIn', 'type' => 'bool',
+       'label' => t('Ask for fast mode each session', 'Pedir el modo rápido en cada sesión'),
+       'help'  => t('Makes fast mode something you turn on session by session instead of it being on by default. A sensible companion to the setting above if you only want it now and then.',
+                    'Hace que el modo rápido sea algo que enciendes sesión a sesión en vez de estar puesto siempre. Buen acompañante del ajuste de arriba si solo lo quieres de vez en cuando.')],
     ],
   ],
   [
@@ -4391,6 +5327,22 @@ $cc_fields = [
        'label' => t('Additional directories', 'Directorios adicionales'),
        'help'  => t('One folder path per line. Places Claude may work in besides the folder the session was started from -- for example /mnt/user/appdata.',
                     'Una ruta por línea. Carpetas donde Claude puede trabajar además de la carpeta desde la que arrancaste la sesión -- por ejemplo, /mnt/user/appdata.')],
+      ['key' => 'permissions.blockReadsOutsideWorkingDirectories', 'type' => 'bool',
+       'label' => t('Do not read outside the working folders', 'No leer fuera de las carpetas de trabajo'),
+       'help'  => t('Makes Claude refuse to read files outside the folder it is working in and the extra ones listed above. Worth turning on when sessions start from the root of the server, where everything is within reach by default.',
+                    'Hace que Claude se niegue a leer archivos fuera de la carpeta en la que trabaja y de las adicionales de arriba. Merece la pena activarlo cuando las sesiones arrancan desde la raíz del servidor, donde por defecto todo queda a su alcance.')],
+      ['key' => 'permissions.disableBypassPermissionsMode', 'type' => 'bool',
+       'label' => t('Forbid the no-questions mode', 'Prohibir el modo sin preguntas'),
+       'help'  => t('Stops anyone from putting a session into the mode where Claude stops asking for permission at all. On a server that runs as root this is a reasonable thing to forbid.',
+                    'Impide que nadie ponga una sesión en el modo en el que Claude deja de pedir permiso para todo. En un servidor que corre como root, es razonable prohibirlo.')],
+      ['key' => 'disableAutoMode', 'type' => 'bool',
+       'label' => t('Remove automatic mode', 'Quitar el modo automático'),
+       'help'  => t('Automatic mode lets Claude decide by itself which ordinary actions are safe enough not to ask about. Setting this to Yes takes that mode off the list entirely.',
+                    'El modo automático deja que Claude decida por su cuenta qué acciones corrientes son lo bastante seguras como para no preguntar. Ponerlo en Sí quita ese modo de la lista por completo.')],
+      ['key' => 'autoMode.classifyAllShell', 'type' => 'bool',
+       'label' => t('Check every command in automatic mode', 'Revisar todos los comandos en modo automático'),
+       'help'  => t('In automatic mode, sends every single shell command to be judged, instead of only the ones that are not obviously harmless. Slower, and stricter.',
+                    'En modo automático, manda a revisar absolutamente todos los comandos de terminal, en vez de solo los que no son obviamente inofensivos. Más lento, y más estricto.')],
     ],
   ],
   [
@@ -4406,6 +5358,30 @@ $cc_fields = [
        'label' => t('Disable Remote Control', 'Desactivar Control Remoto'),
        'help'  => t('Setting this to Yes switches Remote Control off completely, including the one this plugin manages. Leave it unset unless you want it off entirely.',
                     'Ponerlo en Sí desactiva el Control Remoto por completo, incluido el que gestiona este plugin. Déjalo sin definir salvo que quieras apagarlo del todo.')],
+      ['key' => 'inputNeededNotifEnabled', 'type' => 'bool',
+       'label' => t('Tell me when it needs me', 'Avisarme cuando me necesite'),
+       'help'  => t('Sends a notification to your phone when the session is waiting for an answer from you. This is the one that makes driving a session from the app practical: you find out it stopped without having to look.',
+                    'Manda un aviso a tu móvil cuando la sesión está esperando una respuesta tuya. Es el que hace práctico llevar una sesión desde la app: te enteras de que se ha parado sin tener que mirar.')],
+      ['key' => 'agentPushNotifEnabled', 'type' => 'bool',
+       'label' => t('Let Claude notify me on its own', 'Dejar que Claude avise por su cuenta'),
+       'help'  => t('Lets Claude send you a notification when it decides something is worth telling you, not only when it is blocked.',
+                    'Deja que Claude te mande un aviso cuando considere que algo merece contártelo, no solo cuando está bloqueado.')],
+      ['key' => 'awaySummaryEnabled', 'type' => 'bool',
+       'label' => t('Recap when you come back', 'Resumen al volver'),
+       'help'  => t('The summary of what happened while you were away, shown when you return to the session. Set it to No to skip it.',
+                    'El resumen de lo que ha pasado mientras no estabas, que se muestra al volver a la sesión. Ponlo en No para saltártelo.')],
+      ['key' => 'crossSessionInbound', 'type' => 'select', 'options' => ['accept', 'notice', 'refuse'],
+       'label' => t('Messages from your other sessions', 'Mensajes de tus otras sesiones'),
+       'help'  => t('Whether a session here accepts messages sent by your other Claude sessions: accept delivers them, notice only tells you one arrived, refuse turns it off. Worth thinking about when you have sessions running on more than one machine.',
+                    'Si una sesión de aquí acepta mensajes enviados por tus otras sesiones de Claude: accept los entrega, notice solo te avisa de que ha llegado uno, refuse lo desactiva. Merece pensarlo cuando tienes sesiones en más de una máquina.')],
+      ['key' => 'isolatePeerMachines', 'type' => 'bool',
+       'label' => t('Ask before writing to another machine', 'Preguntar antes de escribir a otra máquina'),
+       'help'  => t('Makes Claude ask you first before messaging one of your sessions running on a different machine.',
+                    'Hace que Claude te pregunte antes de escribir a una de tus sesiones que corre en otra máquina.')],
+      ['key' => 'askUserQuestionTimeout', 'type' => 'number',
+       'label' => t('Carry on after waiting (seconds)', 'Continuar tras esperar (segundos)'),
+       'help'  => t('How long a question waits for you before Claude carries on with its best guess. Leave it empty and it waits for you indefinitely.',
+                    'Cuánto espera una pregunta a que contestes antes de que Claude siga con su mejor suposición. Si lo dejas vacío, espera indefinidamente.')],
     ],
   ],
   [
@@ -4445,6 +5421,46 @@ $cc_fields = [
        'label' => t('Command output limit', 'Límite de salida de comandos'),
        'help'  => t('How much text from a command\'s output Claude sees right away, before it has to go and look for the rest. Some commands print a huge amount of text that rarely matters (long installs, big log files); a lower number stops that from piling up in the conversation for nothing, and Claude can still read the full output afterwards from a file if it genuinely needs to. Default is 30000, and the highest you can set is 128000.',
                     'Cuánto texto de la salida de un comando puede ver Claude de golpe, antes de tener que ir a buscar el resto. Algunos comandos escriben muchísimo texto que casi nunca hace falta entero (instalaciones largas, archivos de registro grandes); un número más bajo evita que ese texto se acumule sin necesidad en la conversación, y si de verdad hace falta más, Claude puede leerlo después desde un archivo. Por defecto son 30000, y el máximo que se puede poner es 128000.')],
+      ['key' => 'fileCheckpointingEnabled', 'type' => 'bool',
+       'label' => t('Snapshots for undo', 'Copias para deshacer'),
+       'help'  => t('The file snapshots that let you undo a set of changes with /rewind. They take up room on the server; set it to No if you would rather not keep them.',
+                    'Las copias de archivos que permiten deshacer un conjunto de cambios con /rewind. Ocupan sitio en el servidor; ponlo en No si prefieres no guardarlas.')],
+      ['key' => 'autoMemoryDirectory', 'type' => 'text',
+       'label' => t('Where automatic memory is kept', 'Dónde se guarda la memoria automática'),
+       'help'  => t('The folder holding what Claude remembers about you between sessions. It has to stay inside this plugin\'s appdata folder, which is what makes it survive a reboot -- anything else is refused when you save.',
+                    'La carpeta donde está lo que Claude recuerda de ti entre sesiones. Tiene que quedarse dentro de la carpeta appdata de este plugin, que es lo que hace que sobreviva a un reinicio -- cualquier otra cosa se rechaza al guardar.')],
+      ['key' => 'attribution.commit', 'type' => 'text',
+       'label' => t('Signature on commits', 'Firma en los commits'),
+       'help'  => t('The trailer Claude Code adds at the end of a commit it writes. Write your own text, or leave it as the word none to add nothing.',
+                    'La línea que Claude Code añade al final de un commit que escribe. Pon tu propio texto, o escribe none para que no añada nada.')],
+      ['key' => 'attribution.pr', 'type' => 'text',
+       'label' => t('Signature on pull requests', 'Firma en los pull requests'),
+       'help'  => t('The same thing for the description of a pull request. The word none removes it.',
+                    'Lo mismo para la descripción de un pull request. La palabra none la quita.')],
+      ['key' => 'attribution.sessionUrl', 'type' => 'bool',
+       'label' => t('Include the session link', 'Incluir el enlace de la sesión'),
+       'help'  => t('Whether commits made from Remote Control carry a link back to the claude.ai session that produced them. Set it to No to keep that out of a public repository.',
+                    'Si los commits hechos desde el Control Remoto llevan un enlace a la sesión de claude.ai que los produjo. Ponlo en No para que eso no acabe en un repositorio público.')],
+      ['key' => 'statusLine', 'type' => 'text',
+       'label' => t('Status line command', 'Comando de la línea de estado'),
+       'help'  => t('A command of your own whose output is shown as a status line under the prompt. For advanced setups; leave it empty if you do not have one.',
+                    'Un comando tuyo cuya salida se muestra como línea de estado bajo el cursor. Para configuraciones avanzadas; déjalo vacío si no tienes ninguno.')],
+      ['key' => 'enableWorkflows', 'type' => 'bool',
+       'label' => t('Workflows', 'Flujos de trabajo'),
+       'help'  => t('Lets Claude orchestrate several agents at once for a big job. It can use a lot of your plan in one go, so it is worth deciding on purpose.',
+                    'Permite que Claude organice varios agentes a la vez para un trabajo grande. Puede gastar bastante plan de golpe, así que conviene decidirlo a propósito.')],
+      ['key' => 'disableSkillShellExecution', 'type' => 'bool',
+       'label' => t('Stop skills running commands', 'Impedir que las skills ejecuten comandos'),
+       'help'  => t('Stops skills and custom commands from running shell commands inline. A sensible lock if you install skills you did not write.',
+                    'Impide que las skills y los comandos personalizados ejecuten comandos de terminal por su cuenta. Un cierre razonable si instalas skills que no has escrito tú.')],
+      ['key' => 'disableBundledSkills', 'type' => 'bool',
+       'label' => t('Turn off built-in skills', 'Desactivar las skills de fábrica'),
+       'help'  => t('Turns off the skills and workflows that come with Claude Code.',
+                    'Desactiva las skills y flujos de trabajo que vienen incluidos con Claude Code.')],
+      ['key' => 'feedbackDrafts', 'type' => 'select', 'options' => ['queue', 'discard'],
+       'label' => t('Feedback drafts', 'Borradores de comentarios'),
+       'help'  => t('What happens to the feedback Claude drafts about itself: queue keeps it for you to review, discard throws it away. Nothing is ever sent without you approving it.',
+                    'Qué pasa con los comentarios que Claude redacta sobre sí mismo: queue los guarda para que los revises, discard los tira. Nunca se envía nada sin que tú lo apruebes.')],
     ],
   ],
 ];
@@ -4993,7 +6009,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.09.08 has been installed!"
+    echo " Claude Code plugin v2026.09.12.2 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
