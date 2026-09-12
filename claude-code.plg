@@ -1,12 +1,28 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.09.12.4"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.09.12.5"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.09.12.5
+- Remote Control now writes the events that matter to the system log, tagged
+  "claude-code": a bridge starting, stopping, dying and being restarted, a
+  session that could not be resumed, an account added, removed or switched to,
+  and an account whose details could not be read. Until now none of this left
+  a trace anywhere except the plugin's own log, which only someone who already
+  suspects this plugin ever opens -- so a bridge could go down, or an account
+  lose its name on the page, with the system log saying nothing at all.
+- Removing the plugin now clears every account's leftover state, not just the
+  main one. An extra account's "still enabled" marker used to survive, and a
+  later reinstall would have taken it as an account asking to be running.
+- Asking the sync panel about the main account now says that it is the one
+  that leads, instead of reporting it as an unknown account. And a name that
+  merely looks like an account is refused: it used to produce a full list of
+  everything waiting to be pushed, and applying that would have created a
+  profile folder, with real files in it, for an account never added.
 ###2026.09.12.4
 - Fixed the two things that run on a schedule -- the usage sampler and the new
   Remote Control watchdog -- being installed and then never scheduled. Two
@@ -1421,7 +1437,7 @@ prune_versions
      taken over as "most recent"; see the connect subcommand and the
      Settings page's Session ID field. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh" Mode="0755">
-<SHA256>dc0c1287e827cc6e02b45885ec4a81dc48a008c1de155648f77026315f516879</SHA256>
+<SHA256>43cd4547409c1afdce42063ea4fa075a2da6327785f1768225a753f57d593673</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1675,6 +1691,7 @@ do_run() {
     rc_dir=$(get_rc_dir)
     mkdir -p "$rc_dir"
     echo "=== Remote Control supervisor started $(date) (dir: $rc_dir) ===" >> "$LOGFILE"
+    cc_log "Remote Control supervisor started for account '$PROFILE' (directory: $rc_dir)"
     # With the bridge not yet running is the moment to fix this account's config
     # home: the links to the shared memory and settings, and the MCP servers and
     # rules the main account leads on. Doing it here rather than in the launcher
@@ -1736,6 +1753,7 @@ do_run() {
             # infinite loop the archived-session check was added to prevent.
             if echo "$output" | grep -q "already being served by another"; then
                 echo "=== The session in $rc_dir is already held by another instance${own_id:+ (}${own_id}${own_id:+)} -- starting a new session for account '$PROFILE': $(date) ===" >> "$LOGFILE"
+                cc_log "The session in $rc_dir is already held by another instance; starting a new session for account '$PROFILE'"
                 fail_count=0
                 [ -n "$own_id" ] && save_cfg_var "$SESSION_ID_KEY" ""
                 run_fresh "$rc_dir"
@@ -1743,6 +1761,7 @@ do_run() {
             # out either -- the CLI has told us the id itself is unusable.
             elif session_is_gone "$output"; then
                 echo "=== ARCHIVED_SESSION_FALLBACK: session ${own_id:-in $rc_dir} can no longer be resumed because $(session_gone_reason "$output") -- starting a new session for account '$PROFILE': $(date) ===" >> "$LOGFILE"
+                cc_log "Session ${own_id:-in $rc_dir} can no longer be resumed; starting a new session for account '$PROFILE'"
                 fail_count=0
                 [ -n "$own_id" ] && save_cfg_var "$SESSION_ID_KEY" ""
                 run_fresh "$rc_dir"
@@ -1770,9 +1789,11 @@ do_run() {
 
         [ -f "$ENABLED_FLAG" ] || break
         echo "=== Remote Control exited, restarting in 5s: $(date) ===" >> "$LOGFILE"
+        cc_log "Remote Control for account '$PROFILE' exited; restarting it in 5s"
         sleep 5
     done
     echo "=== Remote Control supervisor stopped $(date) ===" >> "$LOGFILE"
+    cc_log "Remote Control supervisor stopped for account '$PROFILE'"
     rm -f "$PIDFILE"
 }
 
@@ -1829,6 +1850,18 @@ forget_session() {
         echo "Session $sid was not in any list this plugin keeps."
         return 1
     fi
+}
+
+# The plugin's own log says everything, but only someone who already suspects
+# this plugin ever opens it. The system log is the first place an Unraid admin
+# looks, and until now nothing here wrote a line in it: the day both bridges
+# were killed from outside and an account lost its name, the syslog had nothing
+# to say about either. So the handful of events that matter operationally --
+# a bridge starting, stopping, dying, being revived -- go there too, tagged the
+# way Unraid's own plugin manager tags its lines.
+cc_log() {
+    command -v logger >/dev/null 2>&1 || return 0
+    logger -t claude-code "$*"
 }
 
 stop_running() {
@@ -1891,6 +1924,7 @@ case "$CMD" in
         touch "$ENABLED_FLAG"
         spawn_supervisor
         echo "Remote Control starting for account '$PROFILE' in directory: $(get_rc_dir)"
+        cc_log "Remote Control asked to start for account '$PROFILE' (directory: $(get_rc_dir))"
         echo "Use 'View live logs' below for the session URL / QR code."
         ;;
     _run)
@@ -1936,6 +1970,7 @@ case "$CMD" in
             rm -f "$PINFILE" "$FRESHFILE"
             echo "=== Remote Control stopped by user $(date) ===" >> "$LOGFILE"
             echo "Remote Control stopped for account '$PROFILE'."
+            cc_log "Remote Control stopped for account '$PROFILE' from the web page"
         else
             # No account named: stop all of them, so an uninstall or a blanket
             # "stop" cannot leave another account's supervisor respawning.
@@ -1975,6 +2010,7 @@ case "$CMD" in
             [ -f "$ENABLED_FLAG" ] || continue
             [ -f "$PIDFILE" ] && [ -d "/proc/$(cat "$PIDFILE" 2>/dev/null)" ] && continue
             echo "=== Remote Control was enabled but its supervisor was not running -- the watchdog is starting it again: $(date) ===" >> "$LOGFILE"
+            cc_log "Remote Control for account '$PROFILE' was enabled but not running; the watchdog is starting it again"
             spawn_supervisor
             echo "Remote Control restarted for account '$PROFILE' (it was enabled but not running)."
         done
@@ -1991,7 +2027,7 @@ esac
 <!-- Claude account profiles: several logins on one server, either sharing
      the agent memory and settings or fully isolated. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/profiles.sh" Mode="0755">
-<SHA256>6b6ba0979ca472262cf192d68f4ba2b74125ed98815fbbbd2100ce4256aafb16</SHA256>
+<SHA256>3d75f61f14438b327dd75e27154ab0af0137e8fe8c361fa27262d2e6c6aaebc7</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -2061,6 +2097,15 @@ load_cfg() {
 # Upsert KEY="value" without touching other keys -- the same format and the same
 # care as remote-control.sh's helper, because this file also holds APPDATA_PATH,
 # REMOTE_CONTROL_DIR and LAST_SESSION_ID.
+# Account changes and failed account readings go to the system log as well as
+# to whatever log the caller keeps. See the same helper in remote-control.sh
+# for why: the plugin's own logs are only read by someone who already suspects
+# the plugin.
+cc_log() {
+    command -v logger >/dev/null 2>&1 || return 0
+    logger -t claude-code "$*"
+}
+
 save_cfg_var() {
     local key="$1" value="$2"
     mkdir -p "$(dirname "$PLUGIN_CFG")"
@@ -2252,11 +2297,13 @@ refresh_profile() {
     # clears these keys now.
     if [ ! -r "$creds" ]; then
         echo "refresh_profile $slug: no readable credentials file at $creds -- keeping the name already on record" >&2
+        cc_log "Account '$slug': no readable credentials file at $creds; keeping the name already on record"
         return 1
     fi
     token=$(sed -n 's/.*"accessToken"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$creds" | head -1)
     if [ -z "$token" ]; then
         echo "refresh_profile $slug: no access token in $creds -- signed out, or the CLI is rewriting the file right now; keeping the name already on record" >&2
+        cc_log "Account '$slug': no access token in $creds (signed out, or the file was being rewritten); keeping the name already on record"
         return 1
     fi
     # The token goes in a 0600 config file rather than on the command line,
@@ -2275,6 +2322,7 @@ refresh_profile() {
             # An expired or already-rotated access token answers 401 with an
             # error document. The account is still there; the reading is not.
             echo "refresh_profile $slug: the profile endpoint answered without an account, most likely an expired token -- keeping the name already on record" >&2
+            cc_log "Account '$slug': the profile endpoint answered without an account (most likely an expired token); keeping the name already on record"
         fi
         return 1
     fi
@@ -2414,6 +2462,7 @@ cmd_add() {
     # account's MCP servers and rules copied in before anyone signs in.
     ensure_profile "$slug"
     echo "Account '$label' created. Use Sign in to authenticate it."
+    cc_log "Account '$label' created (slug $slug)"
 }
 
 cmd_remove() {
@@ -2469,20 +2518,24 @@ cmd_remove() {
                 find "$dir" -mindepth 1 -maxdepth 1 ! -name projects -exec rm -rf {} + 2>/dev/null
                 if [ -d "$dir/projects" ]; then
                     echo "Account '$slug' removed. Its credentials and settings were deleted."
+                    cc_log "Account '$slug' removed; its own files were dealt with and projects/ (the memory) was left untouched"
                     echo "Its memory and session history were kept, untouched, at $dir/projects."
                 elif [ "$ACCOUNT_MODE" != "isolated" ]; then
                     rmdir "$dir" 2>/dev/null
                     echo "Account '$slug' removed. Its credentials and settings were deleted."
+                    cc_log "Account '$slug' removed; its own files were dealt with and projects/ (the memory) was left untouched"
                     echo "Its memory and transcripts were the ones shared with the main account and are untouched."
                 else
                     rmdir "$dir" 2>/dev/null
                     echo "Account '$slug' removed and its data deleted."
+                    cc_log "Account '$slug' removed; its own files were dealt with and projects/ (the memory) was left untouched"
                 fi
                 ;;
             *) echo "Refusing to delete an unexpected path: $dir"; return 1 ;;
         esac
     else
         echo "Account '$slug' removed from the list. Its data is still at $dir."
+        cc_log "Account '$slug' removed from the list; its data is still at $dir"
     fi
 }
 
@@ -2507,6 +2560,7 @@ cmd_activate() {
     ACTIVE_PROFILE="$slug"
     ensure_profile "$slug" >/dev/null
     echo "Now using account: $(profile_label "$slug")"
+    cc_log "Now using account '$slug'"
     if [ "$was_running" = yes ]; then
         echo "Starting Remote Control again..."
         [ -x "$RC_SCRIPT" ] && "$RC_SCRIPT" start >/dev/null 2>&1
@@ -4240,7 +4294,7 @@ switch ($action) {
      tab: only paths this plugin built, one backup per save, unknown keys kept. -->
 <!-- Account synchronisation: the settings that cannot be shared by symlink -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-sync.php" Mode="0644">
-<SHA256>b110129396fbf42b69cb06f394bf1856d43551a7ec1fbceb0836b225d8c76ee1</SHA256>
+<SHA256>9d4bfe473becc12031aa5857e101451209bc20a43841c00cc8cbcb4a5065a4f9</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -4440,6 +4494,21 @@ function sync_label($item) {
  * step, each tagged with what should happen to it.
  */
 function sync_plan($slug) {
+    // The main account is the one that leads, so it has no plan of its own and
+    // asking for one is a question with no answer rather than a mistake. Saying
+    // "unknown account" for it sent whoever asked looking for a typo.
+    if ($slug === '' || $slug === 'default') {
+        return ['error' => 'the main account is the one that leads; ask for one of the other accounts'];
+    }
+    // Checked against the accounts that exist, not just against the name
+    // pattern. A name that merely looks like an account used to produce a full
+    // plan -- everything the main account has, waiting to be pushed -- and
+    // applying it would have created a profile directory for an account that
+    // was never added, with real files in it. sync_apply() starts here, so one
+    // check covers the page and the command line both.
+    if (!in_array($slug, sync_profiles(), true)) {
+        return ['error' => 'unknown account'];
+    }
     $main = sync_state('default');
     $prof = sync_state($slug);
     if ($main === null || $prof === null) return ['error' => 'unknown account'];
@@ -6728,7 +6797,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.09.12.4 has been installed!"
+    echo " Claude Code plugin v2026.09.12.5 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
@@ -6769,13 +6838,19 @@ if [ -x "$RC_SCRIPT" ]; then
     "$RC_SCRIPT" stop 2>/dev/null || true
 fi
 # Same teardown inline, in case the plugin tree was already gone (a failed or
-# repeated removal) and the branch above never ran. All of these live in
-# /var/run -- nothing here touches config or appdata.
-rm -f /var/run/claude-remote-control.enabled /var/run/claude-remote-control.pin
-if [ -f /var/run/claude-remote-control.pid ]; then
-    kill "$(cat /var/run/claude-remote-control.pid)" 2>/dev/null || true
-    rm -f /var/run/claude-remote-control.pid
-fi
+# repeated removal) and the branch above never ran. Globs, not the bare names:
+# these files exist once per account, and covering only the main one left an
+# extra account's "enabled" flag behind -- which a later reinstall's watchdog
+# would read as an account asking to be running, and start a bridge the user
+# had stopped. All of these live in /var/run; nothing here touches config or
+# appdata.
+for pidfile in /var/run/claude-remote-control*.pid; do
+    [ -f "$pidfile" ] || continue
+    kill "$(cat "$pidfile")" 2>/dev/null || true
+    rm -f "$pidfile"
+done
+rm -f /var/run/claude-remote-control*.enabled /var/run/claude-remote-control*.pin /var/run/claude-remote-control*.fresh
+rm -f /var/run/claude-code-sync.lock
 # The supervisor runs as "bash .../remote-control.sh _run" and forks subshells
 # and a session watcher under it, none of which the pidfile covers.
 pkill -f "remote-control.sh _run" 2>/dev/null || true

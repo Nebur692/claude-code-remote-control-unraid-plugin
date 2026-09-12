@@ -28,6 +28,10 @@ claim of authorship over the base plugin.
 
 ### ✨ What's new
 
+- Remote Control now writes what matters to the **system log**, tagged `claude-code`: a bridge
+  starting, stopping, dying and being restarted, a session that could not be resumed, an account
+  added, removed or switched to, and an account whose details could not be read. None of it used
+  to leave a trace outside the plugin's own log.
 - Fixed both scheduled jobs — the usage sampler and the watchdog above — being installed and then
   never scheduled: the schedule file went to the wrong place, and updating the plugin did not run
   the step that writes it.
@@ -253,6 +257,10 @@ claro al autor original, sin reclamar autoría del plugin base.
 
 ### ✨ Novedades
 
+- El Control Remoto ya escribe lo que importa en el **syslog**, con la etiqueta `claude-code`: un
+  puente que arranca, se para, se muere o se reinicia, una sesión que no se pudo retomar, una
+  cuenta añadida, eliminada o seleccionada, y una cuenta cuyos datos no se pudieron leer. Nada de
+  esto dejaba rastro fuera del log del propio plugin.
 - Arreglado que las dos tareas programadas —el muestreo de uso y el vigilante de arriba— se
   instalaran y luego no quedaran programadas: el fichero del horario iba a un sitio equivocado, y
   actualizar el plugin no ejecutaba el paso que lo escribe.
