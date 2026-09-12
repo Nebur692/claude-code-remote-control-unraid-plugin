@@ -570,7 +570,7 @@ fi
 
 <!-- Install/setup script -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh" Mode="0755">
-<SHA256>5d014137612e0eb1f2cb1ef8c867db0fc6f56d481e784e64bab0f4954ed4307f</SHA256>
+<SHA256>855c4bab9641eb0bd55ce3e27dbfff6e66dc23d230f7a28f8212db82a25e9c3e</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1029,6 +1029,26 @@ $base" ;;
     fi
 }
 
+# The usage sampler runs on a schedule, not on a page view: the whole point of
+# it is to notice the plan percentage moving while nobody is looking, and to
+# see that this server was idle when it did. Unraid builds root's crontab from
+# the .cron files of installed plugins, so dropping ours next to the config and
+# calling update_cron is the whole mechanism.
+setup_cron() {
+    local dir="/boot/config/plugins/claude-code" cron="$dir/claude-code.cron"
+    local php_bin; php_bin=$(command -v php 2>/dev/null)
+    [ -z "$php_bin" ] && return 0
+    mkdir -p "$dir" || return 0
+    cat > "$cron" <<CRONEOF
+# Generated Claude Code usage sampling schedule:
+*/5 * * * * $php_bin /usr/local/emhttp/plugins/claude-code/scripts/usage-sampler.php &> /dev/null
+CRONEOF
+    if command -v update_cron >/dev/null 2>&1; then
+        update_cron
+        echo "Usage sampling scheduled every 5 minutes."
+    fi
+}
+
 if ! install_claude_code; then
     echo "WARNING: Failed to install Claude Code"
     echo "You can retry manually: /usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh"
@@ -1047,6 +1067,11 @@ fi
 # Boot is the safest moment there is for this: nothing is running yet, so the
 # only versions kept are the ones the checks insist on.
 prune_versions
+
+# Reads the plan percentage every few minutes so the Dashboard can say how much
+# of it was spent here. Costs nothing: the endpoint is free and runs no
+# inference.
+setup_cron
 
 echo ""
 if command -v claude &> /dev/null; then
@@ -2489,6 +2514,388 @@ exec "$REAL" "$@"
 </INLINE>
 </FILE>
 
+<!-- Usage sampler: reads the plan percentage on a schedule so the Dashboard can say how much of it was spent here -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/usage-sampler.php" Mode="0644">
+<SHA256>f4215626a709211901a7ead638cd5a07057e64ea247ef23d35bd722869b43dc9</SHA256>
+<INLINE>
+<![CDATA[
+<?php
+/*
+ * Usage sampler.
+ *
+ * Answers a question the API cannot: of the percentage of your plan that this
+ * week has consumed, how much was spent by sessions running ON THIS SERVER.
+ *
+ * Anthropic reports a single utilisation percentage per account, plus a
+ * breakdown by product (Claude Code / Chats / Cowork) -- never by machine or
+ * by session. And the plan limit is not published in money, so a local token
+ * count cannot be converted into plan points directly.
+ *
+ * What can be done is to watch the percentage move and see what this machine
+ * was doing at the time:
+ *
+ *   the percentage went up and this account was working here -> ours
+ *   the percentage went up and this account was idle here     -> somewhere else
+ *
+ * That is what this script records, every few minutes, into one file per
+ * account. It is a measurement, not an accounting: the percentage moves in
+ * whole points, and an interval where the account worked here AND elsewhere
+ * cannot be split. Both limits are reported alongside the figure rather than
+ * hidden.
+ *
+ * Nothing here runs inference: the usage endpoint is free, and the local side
+ * is read from transcripts that are already on disk.
+ */
+
+$CFG_FILE = '/boot/config/plugins/claude-code/claude-code.cfg';
+
+function s_cfg() {
+    global $CFG_FILE;
+    $c = is_readable($CFG_FILE) ? @parse_ini_file($CFG_FILE) : [];
+    return is_array($c) ? $c : [];
+}
+
+function s_appdata() {
+    $c = s_cfg();
+    $p = isset($c['APPDATA_PATH']) ? rtrim($c['APPDATA_PATH'], '/') : '';
+    return $p !== '' ? $p : '/mnt/user/appdata/claude-code';
+}
+
+function s_accounts() {
+    $c = s_cfg();
+    $list = ['default'];
+    if (($c['MULTI_ACCOUNT'] ?? 'no') === 'yes') {
+        foreach (preg_split('/\s+/', trim((string)($c['PROFILES'] ?? ''))) as $slug) {
+            if ($slug !== '' && preg_match('/^[a-z][a-z0-9_]{0,23}$/', $slug)) $list[] = $slug;
+        }
+    }
+    return $list;
+}
+
+// Where each account keeps its credentials and its live-session files. The main
+// account is the config home that was always there; the others are their own.
+function s_home($slug) {
+    $a = s_appdata();
+    return $slug === 'default' ? "$a/.claude" : "$a/profiles/$slug";
+}
+
+function s_hist_dir() {
+    $d = s_appdata() . '/usage-history';
+    if (!is_dir($d)) @mkdir($d, 0700, true);
+    return $d;
+}
+
+function s_read_json($path, $default = []) {
+    if (!is_readable($path)) return $default;
+    $d = json_decode((string)@file_get_contents($path), true);
+    return is_array($d) ? $d : $default;
+}
+
+function s_write_json($path, $data) {
+    $tmp = $path . '.tmp.' . getmypid();
+    if (@file_put_contents($tmp, json_encode($data, JSON_UNESCAPED_SLASHES)) === false) { @unlink($tmp); return false; }
+    @chmod($tmp, 0600);
+    return @rename($tmp, $path);
+}
+
+/* ---------- the API side ---------- */
+
+function s_token($slug) {
+    $creds = s_read_json(s_home($slug) . '/.credentials.json');
+    $t = $creds['claudeAiOauth']['accessToken'] ?? '';
+    return is_string($t) && $t !== '' ? $t : null;
+}
+
+function s_usage($token) {
+    // Nothing to sample without curl, and a cron job that fatals every five
+    // minutes is worse than one that quietly does nothing.
+    if (!function_exists('curl_init')) return null;
+    $ch = curl_init('https://api.anthropic.com/api/oauth/usage');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 10,
+        CURLOPT_HTTPHEADER     => [
+            'Authorization: Bearer ' . $token,
+            'anthropic-beta: oauth-2025-04-20',
+            'Content-Type: application/json',
+        ],
+    ]);
+    $body = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    if ($code !== 200 || !is_string($body)) return null;
+    $d = json_decode($body, true);
+    return is_array($d) ? $d : null;
+}
+
+/* ---------- the local side ---------- */
+
+// Public per-million-token prices, only ever used to weigh one local session
+// against another. The plan is not billed this way and this script never
+// pretends otherwise -- what matters is that a costly turn counts for more
+// than a cheap one.
+function s_price($model) {
+    $table = [
+        'claude-opus-5'    => ['in' => 5.0,  'out' => 25.0, 'cw' => 6.25,  'cr' => 0.50],
+        'claude-opus-4-8'  => ['in' => 5.0,  'out' => 25.0, 'cw' => 6.25,  'cr' => 0.50],
+        'claude-fable-5-1' => ['in' => 10.0, 'out' => 50.0, 'cw' => 12.50, 'cr' => 1.00],
+        'claude-fable-5'   => ['in' => 10.0, 'out' => 50.0, 'cw' => 12.50, 'cr' => 1.00],
+        'claude-sonnet-5'  => ['in' => 2.0,  'out' => 10.0, 'cw' => 2.50,  'cr' => 0.20],
+        'claude-haiku-4-5' => ['in' => 1.0,  'out' => 5.0,  'cw' => 1.25,  'cr' => 0.10],
+    ];
+    if (isset($table[$model])) return $table[$model];
+    foreach ($table as $k => $v) if (strpos($model, $k) === 0) return $v;
+    return $table['claude-opus-5'];
+}
+
+// Which account a transcript belongs to. <config home>/sessions/<pid>.json ties
+// the transcript's own id to the bridge session the plugin started, and since
+// each account has its own config home, the directory it sits in already names
+// the owner. Live files only, so what is seen is remembered: a session that
+// ended before the next sample would otherwise become unattributable.
+function s_update_owners($accounts, $owners) {
+    foreach ($accounts as $slug) {
+        foreach (glob(s_home($slug) . '/sessions/*.json') ?: [] as $f) {
+            $d = s_read_json($f);
+            if (!empty($d['sessionId'])) $owners[$d['sessionId']] = $slug;
+        }
+    }
+    return $owners;
+}
+
+/*
+ * Cost per session since the last run, reading only the bytes that are new.
+ * The transcripts are hundreds of megabytes; re-reading them every five
+ * minutes would be the most expensive thing on the server.
+ */
+function s_scan(&$state) {
+    $root = s_appdata() . '/.claude/projects';
+    $per_session = [];
+    if (!is_dir($root)) return $per_session;
+    $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS));
+    foreach ($it as $f) {
+        $path = (string)$f;
+        if (substr($path, -6) !== '.jsonl') continue;
+        $size = @filesize($path);
+        if ($size === false) continue;
+        $seen = $state[$path]['offset'] ?? 0;
+        // A file that shrank was rotated or replaced: start again rather than
+        // reading from a meaningless offset.
+        if ($size < $seen) $seen = 0;
+        if ($size === $seen) continue;
+        $fh = @fopen($path, 'r');
+        if (!$fh) continue;
+        if ($seen > 0) fseek($fh, $seen);
+        while (($line = fgets($fh)) !== false) {
+            $d = json_decode($line, true);
+            if (!is_array($d) || ($d['type'] ?? '') !== 'assistant') continue;
+            $u = $d['message']['usage'] ?? null;
+            if (!is_array($u)) continue;
+            $model = $d['message']['model'] ?? '';
+            if ($model === '' || $model === '<synthetic>') continue;
+            $p = s_price($model);
+            $cost = ($u['input_tokens'] ?? 0) / 1e6 * $p['in']
+                  + ($u['output_tokens'] ?? 0) / 1e6 * $p['out']
+                  + ($u['cache_creation_input_tokens'] ?? 0) / 1e6 * $p['cw']
+                  + ($u['cache_read_input_tokens'] ?? 0) / 1e6 * $p['cr'];
+            $sid = $d['sessionId'] ?? '?';
+            $per_session[$sid] = ($per_session[$sid] ?? 0) + $cost;
+        }
+        $state[$path] = ['offset' => ftell($fh), 'at' => time()];
+        fclose($fh);
+    }
+    // Files that no longer exist should not keep growing the state file. Keys
+    // starting with "_" are this script's own bookkeeping, not paths.
+    foreach (array_keys($state) as $path) {
+        if (substr((string)$path, 0, 1) === '_') continue;
+        if (!is_file($path)) unset($state[$path]);
+    }
+    return $per_session;
+}
+
+/* ---------- one round ---------- */
+
+$hist = s_hist_dir();
+$state_file  = "$hist/scan-state.json";
+$owners_file = "$hist/session-owners.json";
+
+$accounts = s_accounts();
+$owners = s_update_owners($accounts, s_read_json($owners_file));
+$state  = s_read_json($state_file);
+$per_session = s_scan($state);
+s_write_json($owners_file, $owners);
+
+// Split what was spent here since the last sample between the accounts that
+// own the sessions. A session nobody claims is reported separately rather than
+// guessed at: it did run here, but saying whose it was would be inventing it.
+$by_account = []; $unknown = 0.0;
+foreach ($per_session as $sid => $cost) {
+    $slug = $owners[$sid] ?? null;
+    if ($slug === null) { $unknown += $cost; continue; }
+    $by_account[$slug] = ($by_account[$slug] ?? 0) + $cost;
+}
+
+// A scan consumes the new bytes of every transcript, so whatever it found has
+// to survive an account whose sample cannot be written this round (expired
+// token, network down). Otherwise that work would silently become "spent
+// somewhere else" on the next sample that does get written.
+$pending = isset($state['_pending']) && is_array($state['_pending']) ? $state['_pending'] : [];
+foreach ($by_account as $slug => $c) $pending[$slug] = ($pending[$slug] ?? 0) + $c;
+$pending['_unknown'] = ($pending['_unknown'] ?? 0) + $unknown;
+
+$now = time();
+foreach ($accounts as $slug) {
+    $token = s_token($slug);
+    if ($token === null) continue;
+    $u = s_usage($token);
+    if ($u === null) continue;
+
+    $sample = [
+        'ts'       => $now,
+        'five'     => isset($u['five_hour']['utilization']) ? (float)$u['five_hour']['utilization'] : null,
+        'five_rst' => $u['five_hour']['resets_at'] ?? null,
+        'week'     => isset($u['seven_day']['utilization']) ? (float)$u['seven_day']['utilization'] : null,
+        'week_rst' => $u['seven_day']['resets_at'] ?? null,
+        'week_from'=> $u['seven_day_breakdown']['window_started_at'] ?? null,
+        'local'    => round($pending[$slug] ?? 0, 4),
+        'local_unknown' => round($pending['_unknown'] ?? 0, 4),
+    ];
+    // Written, so it is accounted for: start the next interval at zero.
+    $pending[$slug] = 0;
+    $wrote_any = true;
+
+    $file = "$hist/$slug.jsonl";
+    @file_put_contents($file, json_encode($sample, JSON_UNESCAPED_SLASHES) . "\n", FILE_APPEND);
+    @chmod($file, 0600);
+
+    // Keep a month. Long enough for several weekly windows, short enough that
+    // the file stays a few hundred kilobytes.
+    if (@filesize($file) > 2 * 1024 * 1024) {
+        $cut = $now - 30 * 86400;
+        $kept = [];
+        foreach (file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
+            $d = json_decode($line, true);
+            if (is_array($d) && ($d['ts'] ?? 0) >= $cut) $kept[] = $line;
+        }
+        @file_put_contents($file . '.tmp', implode("\n", $kept) . "\n");
+        @rename($file . '.tmp', $file);
+    }
+}
+
+// The unknown bucket belongs to whichever samples were written; clearing it
+// only when at least one account reported keeps it from being counted twice.
+if (!empty($wrote_any)) $pending['_unknown'] = 0;
+$state['_pending'] = $pending;
+s_write_json($state_file, $state);
+]]>
+</INLINE>
+</FILE>
+
+<!-- Turns the sampler history into "this many points were spent on this server" -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-attribution.php" Mode="0644">
+<SHA256>dea510aa60c8017a34028d29d637feff212ae8d03d3fd2bc250353a9939eba63</SHA256>
+<INLINE>
+<![CDATA[
+<?php
+/*
+ * How much of an account's plan usage was spent on this server.
+ *
+ * Reads what scripts/usage-sampler.php records and turns it into three
+ * numbers, in plan points:
+ *
+ *   here        the percentage moved while this account was working on this
+ *               machine
+ *   elsewhere   the percentage moved while it was not -- by definition,
+ *               somewhere else
+ *   unmeasured  the rest of the window: what was already spent before the
+ *               sampler started, or while it could not read the figure
+ *
+ * The API gives a single number per account and no split by machine, so this
+ * is the only honest way to answer "how much of this is mine": watch the
+ * number move and look at what was running here at that moment. It is a
+ * measurement with known limits, not accounting -- see attribution_caveats().
+ */
+
+function attr_history_file($appdata, $slug) {
+    if (!preg_match('/^[a-z][a-z0-9_]{0,23}$/', $slug) && $slug !== 'default') return null;
+    return rtrim($appdata, '/') . '/usage-history/' . $slug . '.jsonl';
+}
+
+/*
+ * $window is 'week' or 'five'. Returns null when there is nothing to say yet,
+ * which is the normal state for the first few hours after installing.
+ */
+function attribution_for($appdata, $slug, $window = 'week') {
+    $file = attr_history_file($appdata, $slug);
+    if ($file === null || !is_readable($file)) return null;
+
+    $samples = [];
+    $fh = @fopen($file, 'r');
+    if (!$fh) return null;
+    while (($line = fgets($fh)) !== false) {
+        $d = json_decode($line, true);
+        if (is_array($d) && isset($d['ts'])) $samples[] = $d;
+    }
+    fclose($fh);
+    if (count($samples) < 2) return null;
+
+    usort($samples, function ($a, $b) { return $a['ts'] <=> $b['ts']; });
+    $last = end($samples);
+    if (!isset($last[$window]) || $last[$window] === null) return null;
+
+    // Only this window counts. The weekly one says where it began; the
+    // five-hour one does not, so it is derived from when it next resets.
+    if ($window === 'week') {
+        $start = !empty($last['week_from']) ? strtotime($last['week_from']) : 0;
+    } else {
+        $reset = !empty($last['five_rst']) ? strtotime($last['five_rst']) : 0;
+        $start = $reset ? $reset - 5 * 3600 : 0;
+    }
+    if (!$start) return null;
+
+    $here = 0.0; $elsewhere = 0.0; $unclear = 0.0; $used = 0; $prev = null;
+    foreach ($samples as $s) {
+        if ($s['ts'] < $start) { $prev = $s; continue; }
+        if ($prev === null || !isset($prev[$window]) || $prev[$window] === null) { $prev = $s; continue; }
+        // A sample from before the window began cannot be the other end of an
+        // interval inside it.
+        if ($prev['ts'] < $start) { $prev = $s; continue; }
+        $delta = (float)$s[$window] - (float)$prev[$window];
+        $prev_ts = $prev['ts'];
+        $prev = $s;
+        // Negative means the window reset between the two samples; zero means
+        // nothing was spent, and there is nothing to attribute either way.
+        if ($delta <= 0) continue;
+        $used++;
+        $local   = (float)($s['local'] ?? 0);
+        $unknown = (float)($s['local_unknown'] ?? 0);
+        if ($local > 0.01)        $here      += $delta;
+        elseif ($unknown > 0.01)  $unclear   += $delta;   // ran here, owner unproven
+        else                      $elsewhere += $delta;
+        unset($prev_ts);
+    }
+
+    $total = (float)$last[$window];
+    $accounted = $here + $elsewhere + $unclear;
+    $unmeasured = $total - $accounted;
+    if ($unmeasured < 0) $unmeasured = 0.0;
+
+    return [
+        'window'     => $window,
+        'total'      => round($total, 1),
+        'here'       => round($here, 1),
+        'elsewhere'  => round($elsewhere, 1),
+        'unclear'    => round($unclear, 1),
+        'unmeasured' => round($unmeasured, 1),
+        'intervals'  => $used,
+        'since'      => $start,
+        'samples'    => count($samples),
+    ];
+}
+]]>
+</INLINE>
+</FILE>
+
 <!-- Live CPU/RAM stats endpoint, polled by the Settings page -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-stats.php" Mode="0644">
 <SHA256>9c53eb776ce1a74ad697fba73cd26db78a5bd1aaece75486b383e7e3944f563a</SHA256>
@@ -2648,7 +3055,7 @@ echo json_encode([
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-usage.php" Mode="0644">
-<SHA256>dff74d3b93d5735c58e040bc31a3de864c9869eb52c2660f0ecd8cfffad422a8</SHA256>
+<SHA256>af4243415b0b8b323487a4e1449c9c991eac944fc9274256401dfacb4bc8e738</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -2752,6 +3159,16 @@ function respond($payload, $cache_file, $ttl, $last_file = null, $prof_file = nu
     if ($prof_file !== null && !isset($payload['subscription'])) {
         $prof = read_json_file($prof_file);
         if ($prof && !empty($prof['subscription'])) $payload['subscription'] = $prof['subscription'];
+    }
+
+    // How much of this account's percentage was spent on this server. Comes
+    // from the sampler's history, so it is absent until that has been running
+    // for a while -- the page simply does not show the line until then.
+    global $appdata, $slug;
+    if (!empty($appdata) && !empty($slug)) {
+        require_once __DIR__ . '/claude-attribution.php';
+        $attr = attribution_for($appdata, $slug, 'week');
+        if ($attr !== null) $payload['attribution'] = $attr;
     }
 
     $json = json_encode($payload);
@@ -4388,7 +4805,7 @@ Tabs="true"
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeDashboard.page">
-<SHA256>554457b2146d1b93d07d0b0bfc44b5287c0dcfe229b6bcc73521a3f7609e7ad2</SHA256>
+<SHA256>904dfcbb5ddc5c8c79e29037b8f3c62da84dabb7f2f67e088b539e7d79e0fac1</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:1"
@@ -4440,6 +4857,13 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
       'min'       => t('min', 'min'),
       'nodata'    => t('not signed in', 'sin iniciar sesión'),
       'plan'      => t('Plan usage', 'Uso del plan'),
+      'from_here' => t('from this server', 'de este servidor'),
+      'from_else' => t('elsewhere', 'de otros sitios'),
+      'attr_help' => t(
+          'Anthropic reports one percentage per account and never says which machine spent it, so this is measured rather than asked for: the percentage is read every few minutes, and a rise while this account was working here is counted as this server, a rise while it was idle here as somewhere else. Two things it cannot do: the percentage moves in whole points, so small amounts round away, and an interval where the account worked here and elsewhere at the same time cannot be split. "Not measured" is the part of the window that was already spent before the sampling started.',
+          'Anthropic informa de un solo porcentaje por cuenta y nunca dice qué máquina lo ha gastado, así que esto se mide en vez de preguntarse: se lee el porcentaje cada pocos minutos, y una subida mientras esta cuenta trabajaba aquí se cuenta como este servidor, y una subida mientras estaba parada aquí como otro sitio. Dos cosas que no puede hacer: el porcentaje va de punto en punto, así que lo pequeño se pierde en el redondeo, y un intervalo en el que la cuenta trabajó aquí y fuera a la vez no se puede repartir. «Sin medir» es la parte de la ventana que ya estaba gastada antes de empezar a muestrear.'),
+      'attr_unclear' => t('ran here, account unproven', 'corrió aquí, cuenta sin confirmar'),
+      'attr_unmeasured' => t('not measured', 'sin medir'),
       // Shown with the figures whenever they are the last reading rather than
       // a current one, so a number on this line is never mistaken for live.
       'last'      => t('last reading', 'última lectura'),
@@ -4512,6 +4936,18 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
                  (rel ? ' <span class="dim-text">(' + esc(L.resets) + ' ' + esc(rel) +
                         (abs ? ' &mdash; ' + esc(abs) : '') + ')</span>' : ''));
     }
+    // Where the weekly percentage was spent. Only shown once the sampler has
+    // enough history to say anything, and always with its own explanation on
+    // hover: a number like this invites more trust than it has earned.
+    var a = d.attribution;
+    if (a && (a.here > 0 || a.elsewhere > 0 || a.unclear > 0)) {
+      var bits = ['<span class="ok">' + a.here + ' pts</span> ' + esc(L.from_here),
+                  '<span class="dim-text">' + a.elsewhere + ' pts ' + esc(L.from_else) + '</span>'];
+      if (a.unclear > 0)    bits.push('<span class="dim-text">' + a.unclear + ' pts ' + esc(L.attr_unclear) + '</span>');
+      if (a.unmeasured > 0) bits.push('<span class="dim-text">' + a.unmeasured + ' pts ' + esc(L.attr_unmeasured) + '</span>');
+      parts.push('<b title="' + esc(L.attr_help) + '">' + esc(L.seven_day) + ' &rarr;</b> ' + bits.join(' <span class="sep">&middot;</span> '));
+    }
+
     // Only present when the account actually has extra usage enabled.
     if (d.spend) {
       if (d.spend.balance !== null) parts.push('<b>' + esc(L.balance) + ':</b> ' + money(d.spend.balance, d.spend.currency));
@@ -6221,6 +6657,11 @@ fi
 # and a session watcher under it, none of which the pidfile covers.
 pkill -f "remote-control.sh _run" 2>/dev/null || true
 pkill -f "claude remote-control" 2>/dev/null || true
+
+# The sampling schedule is ours, and root's crontab is rebuilt from what is
+# left. Config and appdata (including the usage history) stay where they are.
+rm -f /boot/config/plugins/claude-code/claude-code.cron 2>/dev/null || true
+if command -v update_cron >/dev/null 2>&1; then update_cron; fi
 
 # Remove startup entry from go file
 sed -i '/# Start Claude Code/d' /boot/config/go 2>/dev/null || true
