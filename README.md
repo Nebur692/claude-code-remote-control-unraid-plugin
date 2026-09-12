@@ -28,6 +28,9 @@ claim of authorship over the base plugin.
 
 ### ✨ What's new
 
+- Fixed both scheduled jobs — the usage sampler and the watchdog above — being installed and then
+  never scheduled: the schedule file went to the wrong place, and updating the plugin did not run
+  the step that writes it.
 - Remote Control no longer dies with the page that started it. A bridge started from the web —
   including the restart an update performs by itself — belonged to the web request that asked for
   it, so closing the update popup took every account's bridge down with it, and silently: nothing
@@ -250,6 +253,9 @@ claro al autor original, sin reclamar autoría del plugin base.
 
 ### ✨ Novedades
 
+- Arreglado que las dos tareas programadas —el muestreo de uso y el vigilante de arriba— se
+  instalaran y luego no quedaran programadas: el fichero del horario iba a un sitio equivocado, y
+  actualizar el plugin no ejecutaba el paso que lo escribe.
 - El Control Remoto ya no se muere con la página que lo arrancó. Un puente arrancado desde la web
   —incluido el reinicio que hace la propia actualización— pertenecía a la petición web que lo había
   pedido, así que al cerrar la ventana de la actualización se llevaba por delante los puentes de

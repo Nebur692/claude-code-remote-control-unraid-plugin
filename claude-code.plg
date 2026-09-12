@@ -1,12 +1,18 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.09.12.3"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.09.12.4"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.09.12.4
+- Fixed the two things that run on a schedule -- the usage sampler and the new
+  Remote Control watchdog -- being installed and then never scheduled. Two
+  separate mistakes, both silent: the schedule file was written to the wrong
+  place, and updating the plugin did not run the step that writes it at all,
+  so it would not have been picked up before the next reboot either.
 ###2026.09.12.3
 - Fixed Remote Control dying along with the page that started it. A bridge
   started from the web -- including the restart an update does by itself --
@@ -597,7 +603,7 @@ fi
 
 <!-- Install/setup script -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh" Mode="0755">
-<SHA256>7bf84684b45b1c713b45be5c621aefb4012784c06776ad632db2bc05f37ea2bf</SHA256>
+<SHA256>3df5b9a31d0f8595fedea956b03d75f78f8473818485b236213eb935327d49a4</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -967,6 +973,52 @@ setup_claude_json() {
 # entry. That left /usr/local/bin/claude stale until the next reboot. This
 # entry point exists so the post-install block can refresh the launcher on
 # every install and update; it is cheap and idempotent.
+# Two things run on a schedule rather than on a page view. The usage sampler,
+# because the whole point of it is to notice the plan percentage moving while
+# nobody is looking, and to see that this server was idle when it did. And the
+# Remote Control watchdog, because a supervisor killed from outside leaves its
+# enabled flag behind and nothing to act on it, so the bridge stayed down in
+# silence until somebody opened the page. Unraid builds root's crontab from the
+# .cron files of installed plugins, so dropping ours next to the config and
+# calling update_cron is the whole mechanism.
+setup_cron() {
+    # Two statements on purpose. "local a=x b=$a" expands $a before local
+    # assigns anything, so writing both on one line put this file in / --
+    # where update_cron never looks, and neither schedule below ever ran.
+    local dir="/boot/config/plugins/claude-code"
+    local cron="$dir/claude-code.cron"
+    local rc="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh"
+    local php_bin; php_bin=$(command -v php 2>/dev/null)
+    mkdir -p "$dir" || return 0
+    : > "$cron"
+    if [ -n "$php_bin" ]; then
+        cat >> "$cron" <<CRONEOF
+# Generated Claude Code usage sampling schedule:
+*/5 * * * * $php_bin /usr/local/emhttp/plugins/claude-code/scripts/usage-sampler.php &> /dev/null
+CRONEOF
+    fi
+    cat >> "$cron" <<CRONEOF
+# Bring Remote Control back if it was enabled and its supervisor is gone:
+*/5 * * * * $rc watchdog &> /dev/null
+CRONEOF
+    if command -v update_cron >/dev/null 2>&1; then
+        update_cron
+        [ -n "$php_bin" ] && echo "Usage sampling scheduled every 5 minutes."
+        echo "Remote Control watchdog scheduled every 5 minutes."
+    fi
+}
+
+# Same reasoning as the "launcher" entry point right below: the post-install
+# block runs on every install and update, while the body of this script only
+# runs at boot or on a Reinstall. Without an entry point of its own, a new or
+# changed schedule was not picked up until the next reboot -- which is how the
+# usage sampler and the Remote Control watchdog came to be installed but never
+# scheduled. Cheap and idempotent.
+if [ "$1" = "cron" ]; then
+    setup_cron
+    exit 0
+fi
+
 if [ "$1" = "launcher" ]; then
     if ensure_symlink; then
         exit 0
@@ -1056,36 +1108,6 @@ $base" ;;
     fi
 }
 
-# Two things run on a schedule rather than on a page view. The usage sampler,
-# because the whole point of it is to notice the plan percentage moving while
-# nobody is looking, and to see that this server was idle when it did. And the
-# Remote Control watchdog, because a supervisor killed from outside leaves its
-# enabled flag behind and nothing to act on it, so the bridge stayed down in
-# silence until somebody opened the page. Unraid builds root's crontab from the
-# .cron files of installed plugins, so dropping ours next to the config and
-# calling update_cron is the whole mechanism.
-setup_cron() {
-    local dir="/boot/config/plugins/claude-code" cron="$dir/claude-code.cron"
-    local rc="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh"
-    local php_bin; php_bin=$(command -v php 2>/dev/null)
-    mkdir -p "$dir" || return 0
-    : > "$cron"
-    if [ -n "$php_bin" ]; then
-        cat >> "$cron" <<CRONEOF
-# Generated Claude Code usage sampling schedule:
-*/5 * * * * $php_bin /usr/local/emhttp/plugins/claude-code/scripts/usage-sampler.php &> /dev/null
-CRONEOF
-    fi
-    cat >> "$cron" <<CRONEOF
-# Bring Remote Control back if it was enabled and its supervisor is gone:
-*/5 * * * * $rc watchdog &> /dev/null
-CRONEOF
-    if command -v update_cron >/dev/null 2>&1; then
-        update_cron
-        [ -n "$php_bin" ] && echo "Usage sampling scheduled every 5 minutes."
-        echo "Remote Control watchdog scheduled every 5 minutes."
-    fi
-}
 
 if ! install_claude_code; then
     echo "WARNING: Failed to install Claude Code"
@@ -6706,7 +6728,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.09.12.3 has been installed!"
+    echo " Claude Code plugin v2026.09.12.4 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
@@ -6718,6 +6740,11 @@ fi
 # pointing at the current launcher so a new version takes effect without
 # waiting for a reboot.
 /usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh launcher
+
+# Same reason: the body of the install script only runs at boot or on a
+# Reinstall, so without this an update installs a new schedule and never
+# actually schedules it.
+/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh cron
 
 # Unraid parses a translation file once and caches the result beside it,
 # rebuilding that cache only when it is missing. Without this, a version that
