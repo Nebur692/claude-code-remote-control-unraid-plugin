@@ -570,7 +570,7 @@ fi
 
 <!-- Install/setup script -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh" Mode="0755">
-<SHA256>6559bae075fa9fa4660a9498bb2dd29b3a71d89f22f595a68c9560a38ea97ca0</SHA256>
+<SHA256>5d014137612e0eb1f2cb1ef8c867db0fc6f56d481e784e64bab0f4954ed4307f</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -953,6 +953,82 @@ fi
 setup_persistence
 setup_claude_json
 
+# Old versions pile up, and on Unraid that is RAM. "claude update" downloads
+# every new version into $VERSIONS_DIR and the installer's own cleanup is
+# disabled on this plugin, deliberately and permanently: it only prunes when
+# the launcher is a symlink it manages, and here the launcher is a copy (see
+# apply_binary above for why it has to be). Six versions had reached 1.4 GB of
+# a 32 GB root filesystem that lives entirely in memory.
+#
+# What is never deleted, whatever the count says: the version the live binary
+# actually reports, any file byte-identical to the live binary, and any file a
+# running process is executing. Those three checks are the whole safety of
+# this function -- a wrong deletion here takes out the Claude that Remote
+# Control is running.
+#
+# KEEP_CLI_VERSIONS can be set in claude-code.cfg; 2 keeps the running one and
+# the next one down as a way back. Duplicated from update-claude.sh, like
+# apply_binary and restart_running_remote_control before it: these scripts have
+# no shared file to include, and a wrong copy here is caught by the same three
+# safety checks.
+prune_versions() {
+    local dry="$1" RUNTIME_BIN="/root/.local/bin/claude" VERSIONS_DIR="/root/.local/share/claude/versions" keep="${KEEP_CLI_VERSIONS:-2}" running_ver keep_list f p exe base freed=0 removed=0
+    [ -d "$VERSIONS_DIR" ] || return 0
+    case "$keep" in ''|*[!0-9]*) keep=2 ;; esac
+    [ "$keep" -lt 1 ] && keep=1
+
+    running_ver=$("$RUNTIME_BIN" --version 2>/dev/null)
+    running_ver="${running_ver%% *}"
+
+    # The newest $keep, by version order rather than by date: a file's mtime is
+    # when it was downloaded, which is not the same thing.
+    keep_list=$(ls -1 "$VERSIONS_DIR" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n "$keep")
+    [ -n "$running_ver" ] && keep_list="$keep_list
+$running_ver"
+
+    # Anything a live process is executing, by name. Covers the case where the
+    # launcher was pointed straight at a versions/ file rather than a copy.
+    for p in /proc/[0-9]*; do
+        exe=$(readlink "$p/exe" 2>/dev/null) || continue
+        case "$exe" in
+            "$VERSIONS_DIR"/*) base=$(basename "${exe% (deleted)}"); keep_list="$keep_list
+$base" ;;
+        esac
+    done
+
+    for f in "$VERSIONS_DIR"/*; do
+        [ -f "$f" ] || continue
+        base=$(basename "$f")
+        # Only ever a plain version number inside this one directory.
+        echo "$base" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || continue
+        if echo "$keep_list" | grep -qxF "$base"; then continue; fi
+        # Identical to what is running, under a different name. Belt and braces
+        # with the version check above, and cheap next to the cost of getting
+        # this wrong.
+        # -f, not -x: if the live binary somehow lost its permission bit this
+        # check still has to run. Keeping one version too many is free;
+        # deleting the one that is running is not.
+        if [ -f "$RUNTIME_BIN" ] && cmp -s "$f" "$RUNTIME_BIN"; then continue; fi
+        if [ "$dry" = "dry" ]; then
+            echo "  would remove $base"
+            removed=$((removed + 1))
+            continue
+        fi
+        freed=$((freed + $(stat -c %s "$f" 2>/dev/null || echo 0)))
+        if rm -f "$f"; then
+            removed=$((removed + 1))
+        else
+            echo "WARNING: could not remove the old version $base."
+        fi
+    done
+
+    if [ "$removed" -gt 0 ] && [ "$dry" != "dry" ]; then
+        echo "Removed $removed old version(s) of Claude Code, freeing $((freed / 1024 / 1024)) MB."
+        echo "Kept: $(ls -1 "$VERSIONS_DIR" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tr '\n' ' ')"
+        echo "On Unraid this space is RAM, not disk."
+    fi
+}
+
 if ! install_claude_code; then
     echo "WARNING: Failed to install Claude Code"
     echo "You can retry manually: /usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh"
@@ -967,6 +1043,10 @@ if [ "$binary_changed" = "yes" ] && command -v claude &> /dev/null; then
     echo
     restart_running_remote_control "$(claude --version 2>/dev/null | awk '{print $1}')"
 fi
+
+# Boot is the safest moment there is for this: nothing is running yet, so the
+# only versions kept are the ones the checks insist on.
+prune_versions
 
 echo ""
 if command -v claude &> /dev/null; then
@@ -1009,7 +1089,7 @@ echo "=== Manual Reinstall $(date) ===" >> "$LOGFILE"
      restore_cached_binary() restores from on every boot, so without
      re-caching here, any update would silently be reverted on next reboot. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/update-claude.sh" Mode="0755">
-<SHA256>1b0c639c3040e7cc05c019c4e3a9c42a8abdf76377498bc6cf9016aa408a0592</SHA256>
+<SHA256>5f484bae10e773ae0d2e9c7725a3e6f5eda3a8bbd92823badd800f1e84c39b63</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1093,6 +1173,79 @@ echo "Current version: $before"
 echo "Checking for updates..."
 claude update
 
+# Old versions pile up, and on Unraid that is RAM. "claude update" downloads
+# every new version into $VERSIONS_DIR and the installer's own cleanup is
+# disabled on this plugin, deliberately and permanently: it only prunes when
+# the launcher is a symlink it manages, and here the launcher is a copy (see
+# apply_binary above for why it has to be). Six versions had reached 1.4 GB of
+# a 32 GB root filesystem that lives entirely in memory.
+#
+# What is never deleted, whatever the count says: the version the live binary
+# actually reports, any file byte-identical to the live binary, and any file a
+# running process is executing. Those three checks are the whole safety of
+# this function -- a wrong deletion here takes out the Claude that Remote
+# Control is running.
+#
+# KEEP_CLI_VERSIONS can be set in claude-code.cfg; 2 keeps the running one and
+# the next one down as a way back.
+prune_versions() {
+    local dry="$1" keep="${KEEP_CLI_VERSIONS:-2}" running_ver keep_list f p exe base freed=0 removed=0
+    [ -d "$VERSIONS_DIR" ] || return 0
+    case "$keep" in ''|*[!0-9]*) keep=2 ;; esac
+    [ "$keep" -lt 1 ] && keep=1
+
+    running_ver=$("$RUNTIME_BIN" --version 2>/dev/null)
+    running_ver="${running_ver%% *}"
+
+    # The newest $keep, by version order rather than by date: a file's mtime is
+    # when it was downloaded, which is not the same thing.
+    keep_list=$(ls -1 "$VERSIONS_DIR" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n "$keep")
+    [ -n "$running_ver" ] && keep_list="$keep_list
+$running_ver"
+
+    # Anything a live process is executing, by name. Covers the case where the
+    # launcher was pointed straight at a versions/ file rather than a copy.
+    for p in /proc/[0-9]*; do
+        exe=$(readlink "$p/exe" 2>/dev/null) || continue
+        case "$exe" in
+            "$VERSIONS_DIR"/*) base=$(basename "${exe% (deleted)}"); keep_list="$keep_list
+$base" ;;
+        esac
+    done
+
+    for f in "$VERSIONS_DIR"/*; do
+        [ -f "$f" ] || continue
+        base=$(basename "$f")
+        # Only ever a plain version number inside this one directory.
+        echo "$base" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || continue
+        if echo "$keep_list" | grep -qxF "$base"; then continue; fi
+        # Identical to what is running, under a different name. Belt and braces
+        # with the version check above, and cheap next to the cost of getting
+        # this wrong.
+        # -f, not -x: if the live binary somehow lost its permission bit this
+        # check still has to run. Keeping one version too many is free;
+        # deleting the one that is running is not.
+        if [ -f "$RUNTIME_BIN" ] && cmp -s "$f" "$RUNTIME_BIN"; then continue; fi
+        if [ "$dry" = "dry" ]; then
+            echo "  would remove $base"
+            removed=$((removed + 1))
+            continue
+        fi
+        freed=$((freed + $(stat -c %s "$f" 2>/dev/null || echo 0)))
+        if rm -f "$f"; then
+            removed=$((removed + 1))
+        else
+            echo "WARNING: could not remove the old version $base."
+        fi
+    done
+
+    if [ "$removed" -gt 0 ] && [ "$dry" != "dry" ]; then
+        echo "Removed $removed old version(s) of Claude Code, freeing $((freed / 1024 / 1024)) MB."
+        echo "Kept: $(ls -1 "$VERSIONS_DIR" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tr '\n' ' ')"
+        echo "On Unraid this space is RAM, not disk."
+    fi
+}
+
 # `claude update` downloads new versions into $VERSIONS_DIR, but only
 # repoints RUNTIME_BIN at the newest one if RUNTIME_BIN is a symlink it
 # manages itself. On this plugin RUNTIME_BIN is a plain copy (restored
@@ -1150,6 +1303,10 @@ if [ -n "$applied" ] && [ -n "$now" ] && [ "$before" != "$now" ]; then
     echo
     restart_running_remote_control "${now%% *}"
 fi
+
+# Last, once the new version is applied, cached and running: the old ones are
+# only safe to remove when nothing is about to need them.
+prune_versions
 ]]>
 </INLINE>
 </FILE>
@@ -5819,7 +5976,7 @@ foreach ($cc_fields as $cc_g) foreach ($cc_g['fields'] as $cc_fd) $cc_types[$cc_
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeSettings.page">
-<SHA256>f7d08e02a223c93ce35ed86b3aed9e7d86669744bd266af387754506c2440d54</SHA256>
+<SHA256>f531338ffeff8008e6b949fe002441205e3f9b0d6df3172445d859bca5c78ec1</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:5"
@@ -5837,6 +5994,14 @@ Tag="cog"
 <dd><input type="text" name="APPDATA_PATH" value="<?=htmlspecialchars($appdata_path)?>" class="narrow"></dd>
 </dl>
 <blockquote class="inline_help"><?=t('Store Claude config on your array to avoid flash wear.', 'Guarda la configuración de Claude en tu array para no desgastar el flash drive.')?></blockquote>
+<dl>
+<dt><?=t('Versions to keep:', 'Versiones a conservar:')?></dt>
+<dd><input type="number" name="KEEP_CLI_VERSIONS" min="1" max="20" value="<?=htmlspecialchars((string)($cfg['KEEP_CLI_VERSIONS'] ?? '2'))?>" class="narrow"></dd>
+</dl>
+<blockquote class="inline_help"><?=t(
+    'Every update downloads a new copy of Claude Code, around 200 MB each, and they pile up in a folder that on Unraid lives in RAM. Updating and rebooting now delete the old ones, keeping this many. The version actually running is always kept, whatever you put here.',
+    'Cada actualización se descarga una copia nueva de Claude Code, unos 200 MB cada una, y se van acumulando en una carpeta que en Unraid vive en la RAM. Al actualizar y al arrancar se borran las viejas, conservando estas. La versión que está funcionando se conserva siempre, pongas lo que pongas aquí.'
+)?></blockquote>
 <input type="submit" value="<?=t('Apply', 'Aplicar')?>">
 </form>
 </div>
