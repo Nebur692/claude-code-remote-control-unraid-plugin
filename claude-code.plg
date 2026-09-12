@@ -5789,7 +5789,7 @@ if ($rc_owner === '') {
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeConfig.page">
-<SHA256>023de51f9f3af54f2ab523830cb52400c287289a7abc6f0dfce4fbfb1acd7b59</SHA256>
+<SHA256>a82963309d767fc2bd430e6bcadb977c37330840f42f8a1af13dd1571f784cb9</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:4"
@@ -5992,8 +5992,8 @@ $cc_fields = [
                     'Cuántos días guarda Claude Code el registro de tus conversaciones antes de borrarlo automáticamente. Por defecto son 30 días. Esto no afecta a la memoria que Claude guarda sobre ti y tus proyectos, que se conserva aparte.')],
       ['key' => 'autoMemoryEnabled', 'type' => 'bool',
        'label' => t('Auto memory', 'Memoria automática'),
-       'help'  => t('Whether Claude can automatically save and read notes about what it learns about you and your projects, from one session to the next. Switched on by default.',
-                    'Si Claude puede guardar y leer, de forma automática, notas sobre lo que va aprendiendo de ti y de tus proyectos, de una sesión a otra. Activada de fábrica.')],
+       'help'  => t('Whether Claude writes itself notes about what it learns from you -- your preferences, the corrections you give it, decisions it could not work out from the code -- and reads them back at the start of later sessions. "Later sessions" means sessions on THIS server, in the same working folder: the notes are files on this machine, and they are not shared with other computers, with claude.ai or with the phone app, even when you sign in with the same account there. Every account on this server does share them, because they are the same files. Switched on by default.',
+                    'Si Claude se escribe notas sobre lo que aprende de ti -- tus preferencias, las correcciones que le haces, decisiones que no podría deducir del código -- y las vuelve a leer al empezar sesiones posteriores. «Sesiones posteriores» quiere decir sesiones de ESTE servidor y en la misma carpeta de trabajo: las notas son ficheros de esta máquina, y no se comparten con otros ordenadores, ni con claude.ai, ni con la app del móvil, aunque inicies sesión allí con la misma cuenta. Entre las cuentas de este servidor sí se comparten, porque son los mismos ficheros. Activada de fábrica.')],
       ['key' => 'respectGitignore', 'type' => 'bool',
        'label' => t('Respect .gitignore', 'Respetar .gitignore'),
        'help'  => t('When you type @ to search for a file, do not suggest the ones a project normally excludes (the ones listed in its .gitignore file, if it has one). Switched on by default.',
@@ -6020,8 +6020,8 @@ $cc_fields = [
                     'Las copias de archivos que permiten deshacer un conjunto de cambios con /rewind. Ocupan sitio en el servidor; ponlo en No si prefieres no guardarlas.')],
       ['key' => 'autoMemoryDirectory', 'type' => 'text',
        'label' => t('Where automatic memory is kept', 'Dónde se guarda la memoria automática'),
-       'help'  => t('The folder holding what Claude remembers about you between sessions. It has to stay inside this plugin\'s appdata folder, which is what makes it survive a reboot -- anything else is refused when you save.',
-                    'La carpeta donde está lo que Claude recuerda de ti entre sesiones. Tiene que quedarse dentro de la carpeta appdata de este plugin, que es lo que hace que sobreviva a un reinicio -- cualquier otra cosa se rechaza al guardar.')],
+       'help'  => t('The folder holding those notes. There is normally one folder per working directory; setting this puts every session\'s notes in the same place instead. It has to stay inside this plugin\'s appdata folder, which is what makes it survive a reboot -- anything else is refused when you save.',
+                    'La carpeta donde están esas notas. Normalmente hay una por carpeta de trabajo; si pones esto, las notas de todas las sesiones van al mismo sitio. Tiene que quedarse dentro de la carpeta appdata de este plugin, que es lo que hace que sobreviva a un reinicio -- cualquier otra cosa se rechaza al guardar.')],
       ['key' => 'attribution.commit', 'type' => 'text',
        'label' => t('Signature on commits', 'Firma en los commits'),
        'help'  => t('The trailer Claude Code adds at the end of a commit it writes. Write your own text, or leave it as the word none to add nothing.',
