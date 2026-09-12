@@ -28,6 +28,26 @@ claim of authorship over the base plugin.
 
 ### ✨ What's new
 
+- Remote Control no longer dies with the page that started it. A bridge started from the web —
+  including the restart an update performs by itself — belonged to the web request that asked for
+  it, so closing the update popup took every account's bridge down with it, and silently: nothing
+  was left running to write a line about it. Bridges now run in a session of their own.
+- A watchdog every five minutes covers the other half of that: Remote Control marked as on with
+  nothing actually running is started again, instead of staying down until somebody opens the page.
+  An account stopped on purpose is left stopped.
+- An account no longer loses its name and plan when a reading fails. An expired token, or a
+  credentials file caught in the second the CLI was rewriting it, used to empty both — which on the
+  Accounts and Dashboard tabs looks exactly like the account having vanished, while it was sitting
+  there logged in and working. A failed reading keeps what is already on record and says in the log
+  why it could not do better; only removing an account clears it.
+- The Dashboard says how much of the plan percentage was spent on this server, measured every five
+  minutes rather than guessed, and says plainly when the figure covers only part of the week.
+- Old Claude Code versions are deleted instead of hoarded. On Unraid they sit in RAM, where five of
+  them was well over a gigabyte; the running one and the most recent are kept.
+- The help for automatic memory says where it actually lives: sessions on this server, in the same
+  working folder. It does not travel to other machines or to claude.ai even on the same account, and
+  the accounts on this server do share it, because for them it is the same files.
+
 - Each account now has its own identity. Accounts used to share one config home, and the identity
   lives in a file in it, so `claude` in a terminal reported whichever account signed in last no
   matter which one was selected on the page. Every account gets its own config home now, and what
@@ -229,6 +249,27 @@ repositorio original no declara ninguna licencia, así que este fork se publica 
 claro al autor original, sin reclamar autoría del plugin base.
 
 ### ✨ Novedades
+
+- El Control Remoto ya no se muere con la página que lo arrancó. Un puente arrancado desde la web
+  —incluido el reinicio que hace la propia actualización— pertenecía a la petición web que lo había
+  pedido, así que al cerrar la ventana de la actualización se llevaba por delante los puentes de
+  todas las cuentas, y en silencio: no quedaba nada vivo que lo escribiera en el log. Ahora cada
+  puente corre en una sesión propia.
+- Un vigilante cada cinco minutos cubre la otra mitad del problema: un Control Remoto marcado como
+  encendido sin nada corriendo de verdad se vuelve a arrancar, en vez de quedarse caído hasta que
+  alguien abra la página. Una cuenta parada a propósito se queda parada.
+- Una cuenta ya no pierde su nombre ni su plan cuando falla la lectura. Un token caducado, o un
+  fichero de credenciales pillado en el segundo en que el CLI lo estaba reescribiendo, vaciaba los
+  dos —y en las pestañas de Cuentas y Panel eso se ve igual que si la cuenta hubiera desaparecido,
+  mientras seguía ahí con la sesión iniciada y funcionando—. Una lectura fallida conserva lo que ya
+  había y explica en el log por qué no pudo hacer más; sólo al eliminar una cuenta se borra.
+- El Panel dice cuánto del porcentaje del plan se ha gastado en este servidor, medido cada cinco
+  minutos en vez de estimado, y avisa con claridad cuando la cifra sólo cubre parte de la semana.
+- Las versiones viejas de Claude Code se borran en vez de acumularse. En Unraid viven en RAM, donde
+  cinco de ellas pasaban del gigabyte de largo; se conservan la que está corriendo y la más nueva.
+- La ayuda de la memoria automática dice dónde vive de verdad: las sesiones de este servidor y de la
+  misma carpeta de trabajo. No viaja a otras máquinas ni a claude.ai aunque sea la misma cuenta, y
+  las cuentas de este servidor sí la comparten, porque para ellas son los mismos ficheros.
 
 - Cada cuenta tiene ya su propia identidad. Antes todas compartían un mismo directorio de
   configuración, y la identidad vive en un fichero de ahí dentro, así que `claude` en una terminal

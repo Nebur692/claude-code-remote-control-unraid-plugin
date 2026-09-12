@@ -1,12 +1,39 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.09.12.2"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.09.12.3"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.09.12.3
+- Fixed Remote Control dying along with the page that started it. A bridge
+  started from the web -- including the restart an update does by itself --
+  belonged to the web request that asked for it, so closing the update popup
+  took both accounts' bridges down with it. Silently: nothing was left running
+  to write a line about it. Bridges now run in a session of their own, where
+  nothing but the Remote Control tab can reach them.
+- Added a watchdog, every five minutes, for the other half of that problem:
+  Remote Control marked as on with nothing actually running is now started
+  again instead of staying down until somebody opens the page. An account you
+  stopped on purpose is left stopped.
+- Fixed an account losing its name and plan whenever the reading failed. An
+  expired token, or a credentials file caught in the second the CLI was
+  rewriting it, emptied both -- which on the Accounts and Dashboard tabs looks
+  exactly like the account having disappeared, while it sat there logged in and
+  working. A failed reading now keeps what was already on record and says in
+  the log why it could not do better; only removing an account clears it.
+- The Dashboard says how much of the plan percentage was spent on this server,
+  measured every five minutes rather than guessed, and says so plainly when the
+  figure covers only part of the week.
+- Old Claude Code versions are deleted instead of being hoarded. On Unraid they
+  sit in RAM, where five of them was well over a gigabyte; the running one and
+  the most recent are kept.
+- The help for automatic memory now says where it actually lives: sessions on
+  this server, in the same working folder. It does not travel to other machines
+  or to claude.ai, even on the same account, and the accounts on this server do
+  share it, because for them it is the same files.
 ###2026.09.12.2
 - Fixed the account you pick here not being the account you get. With several
   accounts sharing one config home, the identity lived in a file they all
@@ -570,7 +597,7 @@ fi
 
 <!-- Install/setup script -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh" Mode="0755">
-<SHA256>855c4bab9641eb0bd55ce3e27dbfff6e66dc23d230f7a28f8212db82a25e9c3e</SHA256>
+<SHA256>7bf84684b45b1c713b45be5c621aefb4012784c06776ad632db2bc05f37ea2bf</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1029,23 +1056,34 @@ $base" ;;
     fi
 }
 
-# The usage sampler runs on a schedule, not on a page view: the whole point of
-# it is to notice the plan percentage moving while nobody is looking, and to
-# see that this server was idle when it did. Unraid builds root's crontab from
-# the .cron files of installed plugins, so dropping ours next to the config and
+# Two things run on a schedule rather than on a page view. The usage sampler,
+# because the whole point of it is to notice the plan percentage moving while
+# nobody is looking, and to see that this server was idle when it did. And the
+# Remote Control watchdog, because a supervisor killed from outside leaves its
+# enabled flag behind and nothing to act on it, so the bridge stayed down in
+# silence until somebody opened the page. Unraid builds root's crontab from the
+# .cron files of installed plugins, so dropping ours next to the config and
 # calling update_cron is the whole mechanism.
 setup_cron() {
     local dir="/boot/config/plugins/claude-code" cron="$dir/claude-code.cron"
+    local rc="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh"
     local php_bin; php_bin=$(command -v php 2>/dev/null)
-    [ -z "$php_bin" ] && return 0
     mkdir -p "$dir" || return 0
-    cat > "$cron" <<CRONEOF
+    : > "$cron"
+    if [ -n "$php_bin" ]; then
+        cat >> "$cron" <<CRONEOF
 # Generated Claude Code usage sampling schedule:
 */5 * * * * $php_bin /usr/local/emhttp/plugins/claude-code/scripts/usage-sampler.php &> /dev/null
 CRONEOF
+    fi
+    cat >> "$cron" <<CRONEOF
+# Bring Remote Control back if it was enabled and its supervisor is gone:
+*/5 * * * * $rc watchdog &> /dev/null
+CRONEOF
     if command -v update_cron >/dev/null 2>&1; then
         update_cron
-        echo "Usage sampling scheduled every 5 minutes."
+        [ -n "$php_bin" ] && echo "Usage sampling scheduled every 5 minutes."
+        echo "Remote Control watchdog scheduled every 5 minutes."
     fi
 }
 
@@ -1361,7 +1399,7 @@ prune_versions
      taken over as "most recent"; see the connect subcommand and the
      Settings page's Session ID field. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh" Mode="0755">
-<SHA256>b109a9b22467fa47309b06c840addf3518e410781adbe8b69ea30feca1cb50ac</SHA256>
+<SHA256>dc0c1287e827cc6e02b45885ec4a81dc48a008c1de155648f77026315f516879</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1608,6 +1646,10 @@ run_fresh() {
 
 do_run() {
     local rc_dir output pinned_id own_id fail_count=0
+    # The pid the page, the update script and the watchdog all look for. Written
+    # here, by the supervisor itself: whoever launched it only knows the pid of
+    # what it backgrounded, and with setsid in front that is not this shell.
+    echo $$ > "$PIDFILE"
     rc_dir=$(get_rc_dir)
     mkdir -p "$rc_dir"
     echo "=== Remote Control supervisor started $(date) (dir: $rc_dir) ===" >> "$LOGFILE"
@@ -1782,6 +1824,27 @@ stop_running() {
     pkill -f "remote-control-session-name-prefix $NAME_PREFIX\$" 2>/dev/null
 }
 
+# Start the supervisor in a session of its own, detached from whoever asked for
+# it. "nohup" alone was not enough: it ignores SIGHUP, and that is not what
+# kills these. A bridge started from the web page inherits the process group of
+# the PHP request that started it, so when that request ends -- the update
+# popup closed, the page navigated away -- the whole group is signalled and the
+# supervisor dies without managing to write a line in its own log. Seen for
+# real after the update of 2026-09-12: both accounts' bridges gone, their
+# enabled flag still in place, and nothing left running to notice. setsid puts
+# the supervisor where no other process group can reach it.
+spawn_supervisor() {
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "$0" _run "$PROFILE" > /dev/null 2>&1 &
+    else
+        nohup "$0" _run "$PROFILE" > /dev/null 2>&1 &
+    fi
+    # Only a first guess: with setsid in front, this can be the pid of setsid
+    # rather than of the shell that matters. The supervisor overwrites it with
+    # its own pid as its first act, which is the one everything else looks for.
+    echo $! > "$PIDFILE"
+}
+
 # Subcommands take the account as their first argument. Without one they act on
 # the account in use, except "stop", which with no account stops every one of
 # them: the uninstall path calls it that way and must leave nothing running.
@@ -1804,8 +1867,7 @@ case "$CMD" in
         fi
         rm -f "$PINFILE" "$FRESHFILE"
         touch "$ENABLED_FLAG"
-        nohup "$0" _run "$PROFILE" > /dev/null 2>&1 &
-        echo $! > "$PIDFILE"
+        spawn_supervisor
         echo "Remote Control starting for account '$PROFILE' in directory: $(get_rc_dir)"
         echo "Use 'View live logs' below for the session URL / QR code."
         ;;
@@ -1821,8 +1883,7 @@ case "$CMD" in
         save_cfg_var "$SESSION_ID_KEY" ""
         touch "$FRESHFILE"
         touch "$ENABLED_FLAG"
-        nohup "$0" _run "$PROFILE" > /dev/null 2>&1 &
-        echo $! > "$PIDFILE"
+        spawn_supervisor
         echo "Starting a brand-new session for account '$PROFILE' in directory: $(get_rc_dir)"
         echo "The previous session is not deleted: it stays in the list below and can still be reconnected by its id."
         echo "Use 'View live log' for the new session URL."
@@ -1843,8 +1904,7 @@ case "$CMD" in
         stop_running
         echo "$SID" > "$PINFILE"
         touch "$ENABLED_FLAG"
-        nohup "$0" _run "$PROFILE" > /dev/null 2>&1 &
-        echo $! > "$PIDFILE"
+        spawn_supervisor
         echo "Remote Control connecting account '$PROFILE' to session: $SID"
         echo "Use 'View live logs' below for status."
         ;;
@@ -1869,9 +1929,33 @@ case "$CMD" in
     status)
         if [ -f "$PIDFILE" ] && [ -d "/proc/$(cat "$PIDFILE")" ]; then
             echo "running"
+        elif [ -f "$ENABLED_FLAG" ]; then
+            # Enabled, and yet no supervisor: this did not stop, it died. Worth
+            # a word of its own, because "stopped" reads as though somebody
+            # meant it, and this is the state the watchdog below exists for.
+            echo "crashed"
         else
             echo "stopped"
         fi
+        ;;
+
+    watchdog)
+        # Whatever kills a supervisor from the outside -- the process group of a
+        # web request going away, the kernel reclaiming memory -- leaves the
+        # enabled flag behind and nobody to act on it, so Remote Control stays
+        # down in silence until someone happens to look at the page. Run from
+        # cron every few minutes. It starts an account only when that account
+        # asked to be running and is not; anything stopped on purpose has no
+        # enabled flag and is left alone. A pending "connect" or "new session"
+        # request is left where it is, so the supervisor still honours it.
+        for p in $(all_profiles); do
+            set_profile "$p"
+            [ -f "$ENABLED_FLAG" ] || continue
+            [ -f "$PIDFILE" ] && [ -d "/proc/$(cat "$PIDFILE" 2>/dev/null)" ] && continue
+            echo "=== Remote Control was enabled but its supervisor was not running -- the watchdog is starting it again: $(date) ===" >> "$LOGFILE"
+            spawn_supervisor
+            echo "Remote Control restarted for account '$PROFILE' (it was enabled but not running)."
+        done
         ;;
     *)
         echo "Usage: $0 {start [account]|new [account]|stop [account]|status [account]|connect [account] <session_id>|forget <session_id>}"
@@ -1885,7 +1969,7 @@ esac
 <!-- Claude account profiles: several logins on one server, either sharing
      the agent memory and settings or fully isolated. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/profiles.sh" Mode="0755">
-<SHA256>eda52350dc6da9e9b81c360cf67969c6c1b10e809049ae6a5bfaa0a5dbea1514</SHA256>
+<SHA256>6b6ba0979ca472262cf192d68f4ba2b74125ed98815fbbbd2100ce4256aafb16</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -2058,7 +2142,9 @@ ensure_profile() {
     # Ask the API who this account is and write it into its own file, so a
     # terminal opened on it says the right name from the first second rather
     # than waiting for the next sign-in.
-    refresh_profile "$slug" >/dev/null 2>&1
+    # stdout stays quiet, stderr does not: when this cannot read the account it
+    # says so, and the caller's log is where that belongs.
+    refresh_profile "$slug" >/dev/null
 
     sync_profile "$slug"
 }
@@ -2132,16 +2218,24 @@ refresh_profile() {
         dir=$(profile_dir "$slug") || return 1
         creds="$dir/.credentials.json"
     fi
+    # Every way out of this function short of an answer from the API leaves the
+    # name and plan already on record exactly as they are, and says on stderr
+    # why it could not do better. None of these failures mean the account is
+    # gone -- they mean this one reading did not work -- and blanking those two
+    # keys is precisely how an account vanishes from the page. It happened for
+    # real on 2026-09-12: an update restarted a bridge, this ran in the second
+    # before the CLI rotated that account's token, a 401 came back, and the
+    # account's name was wiped out of the config while the account itself sat
+    # there logged in and working. Removing an account is the only thing that
+    # clears these keys now.
     if [ ! -r "$creds" ]; then
-        save_cfg_var "PROFILE_EMAIL_$slug" ""
-        save_cfg_var "PROFILE_PLAN_$slug" ""
-        return 0
+        echo "refresh_profile $slug: no readable credentials file at $creds -- keeping the name already on record" >&2
+        return 1
     fi
     token=$(sed -n 's/.*"accessToken"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$creds" | head -1)
     if [ -z "$token" ]; then
-        save_cfg_var "PROFILE_EMAIL_$slug" ""
-        save_cfg_var "PROFILE_PLAN_$slug" ""
-        return 0
+        echo "refresh_profile $slug: no access token in $creds -- signed out, or the CLI is rewriting the file right now; keeping the name already on record" >&2
+        return 1
     fi
     # The token goes in a 0600 config file rather than on the command line,
     # where every other process on the box could read it out of ps.
@@ -2153,12 +2247,14 @@ refresh_profile() {
     email=$(echo "$body" | sed -n 's/.*"email"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
     plan=$(echo "$body" | sed -n 's/.*"organization_type"[[:space:]]*:[[:space:]]*"claude_\([a-z]*\)".*/\1/p' | head -1)
     if [ -z "$email" ]; then
-        # A token that is merely expired should not wipe a name the page is
-        # already showing: the account is still there, the reading is not.
-        [ -z "$body" ] && return 1
-        save_cfg_var "PROFILE_EMAIL_$slug" ""
-        save_cfg_var "PROFILE_PLAN_$slug" ""
-        return 0
+        if [ -z "$body" ]; then
+            echo "refresh_profile $slug: the profile endpoint did not answer -- keeping the name already on record" >&2
+        else
+            # An expired or already-rotated access token answers 401 with an
+            # error document. The account is still there; the reading is not.
+            echo "refresh_profile $slug: the profile endpoint answered without an account, most likely an expired token -- keeping the name already on record" >&2
+        fi
+        return 1
     fi
     save_cfg_var "PROFILE_EMAIL_$slug" "$email"
     save_cfg_var "PROFILE_PLAN_$slug" "$plan"
@@ -6610,7 +6706,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.09.12.2 has been installed!"
+    echo " Claude Code plugin v2026.09.12.3 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
