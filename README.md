@@ -218,6 +218,10 @@ claude
 Authentication and settings persist across reboots automatically. Configure the appdata path via
 **Settings → Utilities → Claude Code**.
 
+This covers the permission rules too. Claude Code keeps them per working directory, and Remote
+Control works in `/`, which on Unraid is a filesystem held in RAM — so that list is moved into
+appdata and linked back at boot, instead of being lost and asked for again after every reboot.
+
 ### 🩹 Troubleshooting
 
 Check the install log:
@@ -461,6 +465,11 @@ claude
 
 La autenticación y la configuración persisten automáticamente entre reinicios. Puedes configurar
 la ruta de appdata desde **Settings → Utilities → Claude Code**.
+
+Los permisos concedidos también. Claude Code los guarda por carpeta de trabajo, y Control Remoto
+trabaja en `/`, que en Unraid es un sistema de ficheros que vive en RAM: por eso esa lista se
+traslada a appdata y se enlaza de vuelta en cada arranque, en lugar de perderse y volver a
+pedirse tras cada reinicio.
 
 ### 🩹 Solución de problemas
 

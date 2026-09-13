@@ -1,12 +1,24 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.09.12.5"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.09.13"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.09.13
+- The permission rules granted to sessions that run in "/" now survive a
+  reboot. Remote Control starts its sessions there, and Claude Code records
+  every rule it has been granted for a working directory inside that
+  directory, in /.claude; on Unraid "/" is a filesystem that lives in RAM, so
+  the whole list was discarded on every reboot and each rule had to be
+  approved again by hand. It is now kept in appdata, next to the
+  configuration and the logins, and linked back into place at boot. An
+  existing list is moved across on update, before the next reboot can take
+  it: every file is compared against its source before the original is let
+  go, and if anything does not match, nothing is moved and the original stays
+  exactly where it is.
 ###2026.09.12.5
 - Remote Control now writes the events that matter to the system log, tagged
   "claude-code": a bridge starting, stopping, dying and being restarted, a
@@ -619,7 +631,7 @@ fi
 
 <!-- Install/setup script -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh" Mode="0755">
-<SHA256>3df5b9a31d0f8595fedea956b03d75f78f8473818485b236213eb935327d49a4</SHA256>
+<SHA256>315b97e544dd24545c956b463f1958221b334d3d0a2020c1676bc1b7abba9e31</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -636,6 +648,7 @@ export PATH="/usr/local/bin:/root/.local/bin:$PATH"
 
 PLUGIN_CFG="/boot/config/plugins/claude-code/claude-code.cfg"
 CLAUDE_CONFIG_RUNTIME="/root/.claude"
+SLASH_PROJECT_RUNTIME="/.claude"
 
 # Load config
 if [ -f "$PLUGIN_CFG" ]; then
@@ -982,6 +995,69 @@ setup_claude_json() {
     fi
 }
 
+# Remote Control sessions, and anything else launched from the web UI, run with
+# "/" as their working directory, and Claude Code keeps per-project state in
+# <cwd>/.claude: the permission rules it has been granted (settings.local.json)
+# and the scheduled-task lock. On Unraid "/" is rootfs, which is RAM, so that
+# directory is discarded on every reboot and every rule the user approved by
+# hand has to be approved again. Neither the config home nor .claude.json
+# covers it: it is a third location, addressed by working directory instead of
+# by profile, and therefore shared by every account that runs there.
+setup_slash_project() {
+    local src="$SLASH_PROJECT_RUNTIME" dest="$APPDATA_PATH/project-slash" f base aside missing=0
+
+    # No appdata, nothing to persist into. Said once, without failing the
+    # install: the boot path calls this again on the next start.
+    [ -d "$APPDATA_PATH" ] || return 0
+
+    [ -L "$src" ] && [ "$(readlink "$src")" = "$dest" ] && return 0
+
+    mkdir -p "$dest"
+
+    # A real directory here is either the one that predates this function or
+    # what a session wrote after a reboot got there first. Merge it in, with
+    # what is already in appdata winning: that copy is the accumulated history,
+    # while anything on tmpfs was written in the few seconds between a reboot
+    # and this call.
+    #
+    # Every file that does get copied is then compared against its source,
+    # because the two cheaper checks are both wrong here. The exit status of
+    # cp -n is non-zero on some coreutils versions merely for skipping a file
+    # that already existed, and the existence of the destination proves
+    # nothing: a share that fills up mid-copy leaves a truncated file behind,
+    # which is exactly the case that must not be taken for success, because
+    # what follows deletes the source.
+    if [ -d "$src" ] && [ ! -L "$src" ]; then
+        shopt -s dotglob nullglob
+        for f in "$src"/*; do
+            base=$(basename "$f")
+            if [ -e "$dest/$base" ]; then
+                echo "Keeping the copy already in appdata: $base"
+                continue
+            fi
+            cp -a "$f" "$dest/" 2>/dev/null
+            diff -r "$f" "$dest/$base" >/dev/null 2>&1 || missing=1
+        done
+        shopt -u dotglob nullglob
+        if [ "$missing" -ne 0 ]; then
+            echo "WARNING: could not copy every file from $src into $dest."
+            echo "Nothing was moved -- your permission rules are untouched at $src."
+            return 1
+        fi
+        # Renamed, not deleted: this is the only copy of rules the user granted
+        # one prompt at a time, and the rename costs nothing because it stays on
+        # the same RAM filesystem that clears itself on the next reboot.
+        aside="$src.superseded.$(date +%s)"
+        if ! mv "$src" "$aside"; then
+            echo "WARNING: could not move $src aside; leaving it as it is."
+            return 1
+        fi
+    fi
+
+    ln -sf "$dest" "$src"
+    echo "Persistence configured: $src -> $dest"
+}
+
 # Main
 
 # A plugin update deploys the new files but does not re-run this script: the
@@ -1035,6 +1111,15 @@ if [ "$1" = "cron" ]; then
     exit 0
 fi
 
+# Same entry-point reasoning, with a deadline attached: the directory this
+# persists lives in RAM, so waiting for the body of this script to run at the
+# next boot would mean running after the very reboot that destroys what is
+# being rescued.
+if [ "$1" = "slash-project" ]; then
+    setup_slash_project
+    exit 0
+fi
+
 if [ "$1" = "launcher" ]; then
     if ensure_symlink; then
         exit 0
@@ -1047,6 +1132,7 @@ fi
 # (the installer writes to ~/.claude/local/ which follows our symlink)
 setup_persistence
 setup_claude_json
+setup_slash_project
 
 # Old versions pile up, and on Unraid that is RAM. "claude update" downloads
 # every new version into $VERSIONS_DIR and the installer's own cleanup is
@@ -6797,7 +6883,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.09.12.5 has been installed!"
+    echo " Claude Code plugin v2026.09.13 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
@@ -6814,6 +6900,11 @@ fi
 # Reinstall, so without this an update installs a new schedule and never
 # actually schedules it.
 /usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh cron
+
+# And again for the working directory the bridge runs in: "/" is RAM, so the
+# permission rules recorded in /.claude only survive if they are moved into
+# appdata before the next reboot, not after it.
+/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh slash-project
 
 # Unraid parses a translation file once and caches the result beside it,
 # rebuilding that cache only when it is missing. Without this, a version that
