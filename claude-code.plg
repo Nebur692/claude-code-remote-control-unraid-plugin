@@ -5062,6 +5062,295 @@ cc_done(true, 'Saved to ' . $cc_path, [
 
 <!-- Web UI. The page itself is only the tab container: it carries no body,
      so it does not become a tab of its own. The four pages below fill it. -->
+<!-- Permission rules: reads and writes settings.local.json, the file that records
+     what has been granted for a working directory -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-permissions.php" Mode="0644">
+<SHA256>096f1b84b9381931b3a4c59f1ab9bf282b042e00437cc8ffbca1050a77c792e9</SHA256>
+<INLINE>
+<![CDATA[
+<?php
+// Claude Code's settings.local.json, read and written from the Permissions tab.
+//
+// This is a different file from the one the Configuration tab edits, and the
+// difference is the whole reason this tab exists. settings.json holds the
+// user's own settings for an account. settings.local.json holds what has been
+// granted for a *working directory*: the permission rules Claude Code records
+// every time a prompt is answered with "yes, and don't ask again". So there is
+// not one of these files but several, addressed by directory rather than by
+// account, and until now the only way to read or prune one was to open a
+// terminal and edit JSON by hand.
+//
+// Three rules, the same ones claude-config.php follows:
+//
+//   1. It never rewrites a key it was not asked about. The form sends the
+//      permission rules; everything else in the document is read, kept and
+//      written back untouched.
+//   2. It only ever writes a path built here from the plugin's own config. The
+//      key in the request selects one of those paths; it never becomes part of
+//      one.
+//   3. It keeps the previous version beside the file as settings.local.json.bak
+//      before every write, and validates the JSON before replacing anything.
+//
+// Loaded two ways: required by the Permissions tab to build its list, and
+// fetched directly by the browser as an endpoint. Only the second runs the
+// request handling at the bottom.
+
+function ccp_cfg() {
+    $cfg = @parse_ini_file('/boot/config/plugins/claude-code/claude-code.cfg');
+    return is_array($cfg) ? $cfg : [];
+}
+
+function ccp_appdata($cfg) {
+    $p = rtrim((string)($cfg['APPDATA_PATH'] ?? ''), '/');
+    return $p !== '' ? $p : '/mnt/user/appdata/claude-code';
+}
+
+// The accounts this plugin knows about. The slug pattern is the one profiles.sh
+// enforces when creating one: anything else is not an account this plugin made,
+// and is not going to name a directory here.
+function ccp_slugs($cfg) {
+    $slugs = ['default'];
+    if (($cfg['MULTI_ACCOUNT'] ?? 'no') === 'yes') {
+        foreach (preg_split('/\s+/', trim((string)($cfg['PROFILES'] ?? ''))) as $slug) {
+            if ($slug !== '' && preg_match('/^[a-z][a-z0-9_]{0,23}$/', $slug)) $slugs[] = $slug;
+        }
+    }
+    return $slugs;
+}
+
+// An account's working directory, resolved exactly as common.php resolves it
+// for the Remote Control tab, so both tabs always name the same directory.
+function ccp_account_dir($cfg, $slug) {
+    $key = $slug === 'default' ? 'REMOTE_CONTROL_DIR' : "REMOTE_CONTROL_DIR_$slug";
+    $own = (string)($cfg[$key] ?? '');
+    if ($own !== '') return $own;
+    $main = (string)($cfg['REMOTE_CONTROL_DIR'] ?? '');
+    if ($slug === 'default') return '/root/claude-remote-control';
+    return $main !== '' ? $main : "/root/claude-remote-control-$slug";
+}
+
+// Every settings.local.json this endpoint may touch, keyed by an opaque name
+// the browser sends back.
+//
+// Two kinds, because Claude Code reads two of these files and merges them:
+//
+//   dir:<slug>      the working directory a session runs in. This is where a
+//                   rule granted during a session lands. Several accounts
+//                   normally share one directory, so these are deduplicated by
+//                   path and the entry lists every account that uses it.
+//   account:<slug>  the account's own config home. Each account has one of its
+//                   own, and it is the file the Accounts tab keeps in step
+//                   between accounts.
+function ccp_targets() {
+    $cfg = ccp_cfg();
+    $appdata = ccp_appdata($cfg);
+    $targets = [];
+
+    foreach (ccp_slugs($cfg) as $slug) {
+        $dir = rtrim(ccp_account_dir($cfg, $slug), '/');
+        $path = "$dir/.claude/settings.local.json";
+        $found = '';
+        foreach ($targets as $k => $t) {
+            if ($t['kind'] === 'dir' && $t['path'] === $path) { $found = $k; break; }
+        }
+        if ($found !== '') { $targets[$found]['slugs'][] = $slug; continue; }
+        $targets["dir:$slug"] = [
+            'key'   => "dir:$slug",
+            'kind'  => 'dir',
+            'slug'  => $slug,
+            'slugs' => [$slug],
+            'dir'   => $dir === '' ? '/' : $dir,
+            'path'  => $path,
+        ];
+    }
+
+    foreach (ccp_slugs($cfg) as $slug) {
+        $home = $slug === 'default' ? "$appdata/.claude" : "$appdata/profiles/$slug";
+        $targets["account:$slug"] = [
+            'key'   => "account:$slug",
+            'kind'  => 'account',
+            'slug'  => $slug,
+            'slugs' => [$slug],
+            'dir'   => $home,
+            'path'  => "$home/settings.local.json",
+        ];
+    }
+
+    return $targets;
+}
+
+// A missing file is not an error: it means nothing has been granted for that
+// directory yet, which is the normal state for a directory never used.
+function ccp_read($path) {
+    if (!is_readable($path)) return ['exists' => false, 'raw' => '', 'settings' => [], 'valid' => true];
+    $raw = (string)@file_get_contents($path);
+    $parsed = json_decode($raw, true);
+    return [
+        'exists'   => true,
+        'raw'      => $raw,
+        'settings' => is_array($parsed) ? $parsed : [],
+        'valid'    => is_array($parsed),
+    ];
+}
+
+// The four rule lists and the default mode, pulled out of a parsed document.
+// Anything of an unexpected shape comes back empty rather than being flattened
+// into a field that could not save it back; the JSON editor covers those.
+function ccp_rules($settings) {
+    $perm = isset($settings['permissions']) && is_array($settings['permissions']) ? $settings['permissions'] : [];
+    $out = ['defaultMode' => ''];
+    foreach (['allow', 'ask', 'deny', 'additionalDirectories'] as $list) {
+        $vals = [];
+        if (isset($perm[$list]) && is_array($perm[$list])) {
+            foreach ($perm[$list] as $v) if (is_string($v)) $vals[] = $v;
+        }
+        $out[$list] = $vals;
+    }
+    if (isset($perm['defaultMode']) && is_string($perm['defaultMode'])) $out['defaultMode'] = $perm['defaultMode'];
+    return $out;
+}
+
+// PHP encodes an empty array as [], and a settings file whose top level is an
+// array is one Claude Code refuses to load. An empty document stays an object.
+function ccp_encode($data) {
+    if (!$data) return "{}\n";
+    return json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
+}
+
+function ccp_write($path, $text) {
+    $dir = dirname($path);
+    if (!is_dir($dir) && !@mkdir($dir, 0755, true)) return 'could not create ' . $dir;
+    // Keep the version being replaced, so a bad save is one file copy away
+    // from being undone.
+    if (is_file($path)) @copy($path, "$path.bak");
+    $tmp = "$path.tmp." . getmypid();
+    if (@file_put_contents($tmp, $text) === false) { @unlink($tmp); return "could not write $tmp"; }
+    @chmod($tmp, 0644);
+    // Rename rather than write in place: a reader never sees half a file, and
+    // Claude Code rereads this path as soon as it changes.
+    if (!@rename($tmp, $path)) { @unlink($tmp); return "could not replace $path"; }
+    return '';
+}
+
+// Puts the rule lists back into a document, leaving every other key alone. An
+// empty list removes the key, and an empty "permissions" object goes with it:
+// that is noise in a file people read.
+function ccp_apply_rules(&$data, $rules) {
+    $perm = isset($data['permissions']) && is_array($data['permissions']) ? $data['permissions'] : [];
+    foreach (['allow', 'ask', 'deny', 'additionalDirectories'] as $list) {
+        if (!array_key_exists($list, $rules)) continue;
+        if ($rules[$list]) $perm[$list] = $rules[$list]; else unset($perm[$list]);
+    }
+    if (array_key_exists('defaultMode', $rules)) {
+        if ($rules['defaultMode'] !== '') $perm['defaultMode'] = $rules['defaultMode']; else unset($perm['defaultMode']);
+    }
+    if ($perm) $data['permissions'] = $perm; else unset($data['permissions']);
+}
+
+function ccp_done($ok, $message, $extra = []) {
+    echo json_encode(array_merge(['ok' => $ok, 'message' => $message], $extra));
+    exit;
+}
+
+// Checks what arrived in "rules" before any of it reaches the file. The caps
+// are not about security -- the file is only ever read by Claude Code -- but
+// about not writing a document that no longer loads, or that nothing can
+// display afterwards.
+function ccp_clean_rules($raw) {
+    $modes = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
+    if (!is_array($raw)) return 'No rules received';
+    $out = [];
+    foreach (['allow', 'ask', 'deny', 'additionalDirectories'] as $list) {
+        if (!array_key_exists($list, $raw)) continue;
+        if (!is_array($raw[$list])) return "$list must be a list";
+        if (count($raw[$list]) > 5000) return "$list has more than 5000 entries";
+        $vals = [];
+        foreach ($raw[$list] as $v) {
+            if (!is_string($v)) return "$list must contain only text";
+            $v = trim($v);
+            if ($v === '') continue;
+            if (strlen($v) > 4000) return "$list has an entry longer than 4000 characters";
+            // Duplicates are not an error anywhere, they are just dead weight:
+            // Claude Code matches the first one and the rest never apply.
+            if (!in_array($v, $vals, true)) $vals[] = $v;
+        }
+        $out[$list] = $vals;
+    }
+    if (array_key_exists('defaultMode', $raw)) {
+        $mode = is_string($raw['defaultMode']) ? trim($raw['defaultMode']) : '';
+        if ($mode !== '' && !in_array($mode, $modes, true)) return 'Unknown default mode: ' . $mode;
+        $out['defaultMode'] = $mode;
+    }
+    if (!$out) return 'No rules received';
+    return $out;
+}
+
+function ccp_handle() {
+    header('Content-Type: application/json');
+    header('Cache-Control: no-store');
+
+    $targets = ccp_targets();
+    $key = (string)($_REQUEST['target'] ?? '');
+    if (!isset($targets[$key])) ccp_done(false, 'Unknown target');
+    $path = $targets[$key]['path'];
+
+    $action = (string)($_REQUEST['action'] ?? 'read');
+    $cur = ccp_read($path);
+
+    if ($action === 'read') {
+        ccp_done(true, '', [
+            'target' => $key,
+            'path'   => $path,
+            'exists' => $cur['exists'],
+            'valid'  => $cur['valid'],
+            'raw'    => $cur['raw'],
+            'rules'  => ccp_rules($cur['settings']),
+        ]);
+    }
+
+    if ($action !== 'save' || $_SERVER['REQUEST_METHOD'] !== 'POST') ccp_done(false, 'unknown action');
+
+    // Two ways in, deliberately different. "rules" edits the permission lists
+    // and leaves the rest of the document alone; "raw" replaces the whole
+    // document, which is what the JSON editor is for.
+    if (isset($_POST['raw'])) {
+        $text = trim((string)$_POST['raw']);
+        if ($text === '') $text = '{}';
+        $parsed = json_decode($text, true);
+        if (!is_array($parsed)) ccp_done(false, 'Invalid JSON: ' . json_last_error_msg());
+        if ($parsed && array_values($parsed) === $parsed) {
+            ccp_done(false, 'The document must be a JSON object, e.g. { "permissions": { "allow": [] } }');
+        }
+        $data = $parsed;
+    } else {
+        if ($cur['exists'] && !$cur['valid']) {
+            // Merging into a file that could not be parsed would silently
+            // discard whatever is in it. Refuse, and point at the editor.
+            ccp_done(false, 'This file is not valid JSON, so the rules cannot be edited one by one. Fix it in the JSON editor first.');
+        }
+        $rules = ccp_clean_rules(json_decode((string)($_POST['rules'] ?? ''), true));
+        if (is_string($rules)) ccp_done(false, $rules);
+        $data = $cur['settings'];
+        ccp_apply_rules($data, $rules);
+    }
+
+    $err = ccp_write($path, ccp_encode($data));
+    if ($err !== '') ccp_done(false, $err);
+
+    $after = ccp_read($path);
+    ccp_done(true, 'Saved to ' . $path, [
+        'target' => $key,
+        'path'   => $path,
+        'raw'    => $after['raw'],
+        'rules'  => ccp_rules($after['settings']),
+    ]);
+}
+
+if (basename((string)($_SERVER['SCRIPT_FILENAME'] ?? '')) === 'claude-permissions.php') ccp_handle();
+]]>
+</INLINE>
+</FILE>
+
 <FILE Name="/usr/local/emhttp/plugins/claude-code/claude-code.page">
 <SHA256>aea368083fa387214a31e308648cd91915ad62288a4269910772fc0d2500438c</SHA256>
 <INLINE>
@@ -6684,11 +6973,288 @@ foreach ($cc_fields as $cc_g) foreach ($cc_g['fields'] as $cc_fd) $cc_types[$cc_
 </INLINE>
 </FILE>
 
-<FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeSettings.page">
-<SHA256>f531338ffeff8008e6b949fe002441205e3f9b0d6df3172445d859bca5c78ec1</SHA256>
+<FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodePermissions.page">
+<SHA256>aaad0ae137cd841b9477841638dbcd905716b05e58738c3d3ab5902049fabada</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:5"
+Title="Permissions"
+Tag="unlock-alt"
+---
+<?php require_once "/usr/local/emhttp/plugins/claude-code/include/common.php"; ?>
+<?php require_once "/usr/local/emhttp/plugins/claude-code/include/claude-permissions.php"; ?>
+<?php
+// The permission rules Claude Code has been granted: settings.local.json.
+//
+// Not the same file as the Configuration tab, which edits settings.json -- the
+// account's own settings. This one is per working directory, and it is where a
+// "yes, and don't ask again" ends up. It grows quietly, nobody ever sees it,
+// and pruning a rule used to mean opening a terminal.
+//
+// Which files exist is decided by claude-permissions.php, the same function the
+// endpoint uses, so the list on the page and the list it will accept cannot
+// drift apart. Everything here is only the wording and the fields.
+
+$ccp_label = [];
+foreach (($profiles ?: []) as $ccp_p) {
+    $ccp_label[$ccp_p['slug']] = ($ccp_p['email'] ?? '') !== '' ? $ccp_p['email'] : $ccp_p['label'];
+}
+if (!isset($ccp_label['default'])) {
+    $ccp_label['default'] = $account_email !== '' ? $account_email : t('Main account', 'Cuenta principal');
+}
+
+$ccp_files = [];
+foreach (ccp_targets() as $ccp_t) {
+    $ccp_who = [];
+    foreach ($ccp_t['slugs'] as $ccp_s) $ccp_who[] = $ccp_label[$ccp_s] ?? $ccp_s;
+    if ($ccp_t['kind'] === 'dir') {
+        $ccp_title = t('Working directory', 'Carpeta de trabajo') . ': ' . $ccp_t['dir'];
+        $ccp_who_text = t('Used by', 'La usan') . ': ' . implode(', ', $ccp_who);
+    } else {
+        $ccp_title = t('Account', 'Cuenta') . ': ' . ($ccp_label[$ccp_t['slug']] ?? $ccp_t['slug']);
+        $ccp_who_text = t('This account\'s own file, in its config folder.', 'El archivo propio de esta cuenta, en su carpeta de configuración.');
+    }
+    $ccp_cur = ccp_read($ccp_t['path']);
+    $ccp_rules = ccp_rules($ccp_cur['settings']);
+    // One rule per line is what makes the boxes below editable, so a rule with
+    // a line break in it cannot be shown there: saving would silently split it
+    // in two and leave two rules that match nothing. Nothing in Claude Code
+    // writes one, but a file edited by hand can hold anything, and quietly
+    // mangling it is worse than sending it to the JSON editor.
+    $ccp_flat = true;
+    foreach (['allow', 'ask', 'deny', 'additionalDirectories'] as $ccp_k) {
+        foreach ($ccp_rules[$ccp_k] as $ccp_v) if (strpbrk($ccp_v, "\r\n") !== false) $ccp_flat = false;
+    }
+    $ccp_files[] = [
+        'key'   => $ccp_t['key'],
+        'kind'  => $ccp_t['kind'],
+        'title' => $ccp_title,
+        'who'   => $ccp_who_text,
+        'path'  => $ccp_t['path'],
+        'exists'=> $ccp_cur['exists'],
+        'valid' => $ccp_cur['valid'],
+        'raw'   => $ccp_cur['raw'],
+        'rules' => $ccp_rules,
+        'flat'  => $ccp_flat,
+    ];
+}
+
+// The four lists, in the order they are worth reading: what is allowed, what is
+// always asked, what is refused outright, and what else a session may reach.
+$ccp_lists = [
+    ['key' => 'allow', 'label' => t('Allowed without asking', 'Permitido sin preguntar'),
+     'help' => t('One rule per line, in Claude Code\'s own notation: Bash(git status), Read(/mnt/user/**), WebSearch. Everything here is something you answered "yes, and don\'t ask again" to. Deleting a line does not undo anything that was already done -- it only means you will be asked the next time.',
+                 'Una regla por línea, con la notación de Claude Code: Bash(git status), Read(/mnt/user/**), WebSearch. Todo lo que hay aquí es algo a lo que respondiste "sí, y no vuelvas a preguntar". Borrar una línea no deshace nada de lo ya hecho: sólo hace que te lo vuelva a preguntar la próxima vez.')],
+    ['key' => 'ask', 'label' => t('Always ask', 'Preguntar siempre'),
+     'help' => t('Same notation. These are asked every single time, even if something else on this tab would have allowed them. Useful for the handful of commands you want to keep an eye on.',
+                 'Misma notación. Esto se pregunta siempre, aunque otra regla de esta pestaña lo permitiera. Útil para el puñado de comandos que quieres seguir vigilando.')],
+    ['key' => 'deny', 'label' => t('Never allowed', 'Nunca permitido'),
+     'help' => t('Same notation, and this list wins over the other two: a rule here is refused without asking. This is the place for the things that should never happen in this directory, whatever gets granted later by accident.',
+                 'Misma notación, y esta lista gana a las otras dos: lo que esté aquí se rechaza sin preguntar. Es el sitio para lo que nunca debe pasar en esta carpeta, por mucho que luego se conceda algo por descuido.')],
+    ['key' => 'additionalDirectories', 'label' => t('Other folders it may reach', 'Otras carpetas a las que puede llegar'),
+     'help' => t('One absolute path per line. A session normally only reads and writes inside its working directory; these are the extra folders it is allowed to use as well.',
+                 'Una ruta absoluta por línea. Una sesión normalmente sólo lee y escribe dentro de su carpeta de trabajo; éstas son las carpetas adicionales que además puede usar.')],
+];
+?>
+
+<div class="claude-box">
+<h4><?=t('Permission rules', 'Permisos concedidos')?></h4>
+<p><?=t(
+    'What this server has granted Claude Code, and the only place to take any of it back without opening a terminal. Every time you answer a permission prompt with "yes, and don\'t ask again", the rule is written to a file called settings.local.json -- and it stays there, unread, until something it allows surprises you.',
+    'Lo que este servidor le tiene concedido a Claude Code, y el único sitio donde retirar algo de ello sin abrir una terminal. Cada vez que respondes a una petición de permiso con "sí, y no vuelvas a preguntar", la regla se escribe en un archivo llamado settings.local.json, y ahí se queda, sin que nadie la lea, hasta que algo que permite te sorprende.'
+)?></p>
+<p><?=t(
+    'These are not the settings on the Configuration tab. That tab edits settings.json, which belongs to an account. This one is per working directory: a session running in one directory is governed by that directory\'s file, plus the file of the account running it. Both are listed below.',
+    'Esto no son los ajustes de la pestaña de configuración. Esa pestaña edita settings.json, que es de una cuenta. Esta va por carpeta de trabajo: a una sesión que corre en una carpeta le manda el archivo de esa carpeta, más el de la cuenta que la ejecuta. Abajo están los dos.'
+)?></p>
+<blockquote class="inline_help"><?=t(
+    'Changes apply to a session that is already open -- Claude Code rereads this file when it changes, so a rule you delete here stops applying without restarting anything. Every save leaves the previous version beside the file as settings.local.json.bak.',
+    'Los cambios afectan a una sesión que ya esté abierta: Claude Code vuelve a leer este archivo cuando cambia, así que una regla que borres aquí deja de aplicarse sin reiniciar nada. Cada guardado deja la versión anterior al lado, como settings.local.json.bak.'
+)?></blockquote>
+</div>
+
+<?php if (count($ccp_files) > 1): ?>
+<div class="claude-box">
+<h4><?=t('File', 'Archivo')?></h4>
+<dl>
+<dt><?=t('Editing the rules of:', 'Editando los permisos de:')?></dt>
+<dd><select id="ccp-pick" onchange="ccpSelect(this.value)">
+<?php foreach ($ccp_files as $ccp_f): ?>
+<option value="<?=htmlspecialchars($ccp_f['key'])?>"><?=htmlspecialchars($ccp_f['title'])?></option>
+<?php endforeach; ?>
+</select></dd>
+</dl>
+</div>
+<?php endif; ?>
+
+<?php foreach ($ccp_files as $ccp_i => $ccp_f): ?>
+<div class="ccp-pane" id="ccp-pane-<?=htmlspecialchars($ccp_f['key'])?>"<?=$ccp_i ? ' style="display:none;"' : ''?>>
+
+<div class="claude-box">
+<h4><?=htmlspecialchars($ccp_f['title'])?></h4>
+<p><?=htmlspecialchars($ccp_f['who'])?></p>
+<dl>
+<dt><?=t('File:', 'Archivo:')?></dt>
+<dd><code><?=htmlspecialchars($ccp_f['path'])?></code></dd>
+<dt><?=t('Rules:', 'Reglas:')?></dt>
+<dd><?php
+  if (!$ccp_f['exists']) {
+      echo htmlspecialchars(t('No file yet -- nothing has been granted here.', 'Todavía no hay archivo: aquí no se ha concedido nada.'));
+  } else {
+      $ccp_n = [];
+      foreach ($ccp_lists as $ccp_l) {
+          $ccp_n[] = htmlspecialchars($ccp_l['label']) . ': <b>' . count($ccp_f['rules'][$ccp_l['key']]) . '</b>';
+      }
+      echo implode(' &middot; ', $ccp_n);
+  }
+?></dd>
+</dl>
+<?php if (!$ccp_f['valid']): ?>
+<div class="claude-notice"><?=t('This file is not valid JSON, so the fields below cannot be filled in or saved. Fix it in the JSON editor at the bottom of this tab.',
+                                'Este archivo no es JSON válido, así que los campos de abajo no se pueden rellenar ni guardar. Corrígelo en el editor JSON del final de esta pestaña.')?></div>
+<?php endif; ?>
+</div>
+
+<?php if (!$ccp_f['flat']): ?>
+<div class="claude-box">
+<h4><?=t('Rules', 'Reglas')?></h4>
+<div class="claude-notice"><?=t('One of the rules in this file contains a line break, so the rules cannot be shown one per line without breaking them. Use the JSON editor below.',
+                                'Una de las reglas de este archivo contiene un salto de línea, así que no se pueden mostrar una por línea sin romperlas. Usa el editor JSON de abajo.')?></div>
+</div>
+<?php else: ?>
+<div class="claude-box">
+<h4><?=t('Rules', 'Reglas')?></h4>
+<?php foreach ($ccp_lists as $ccp_l):
+    $ccp_id = 'ccp-' . str_replace(':', '-', $ccp_f['key']) . '-' . $ccp_l['key'];
+?>
+<dl>
+<dt><?=htmlspecialchars($ccp_l['label'])?></dt>
+<dd><textarea id="<?=$ccp_id?>" data-list="<?=$ccp_l['key']?>" rows="8" cols="90" spellcheck="false" style="font-family:monospace;"><?=htmlspecialchars(implode("\n", $ccp_f['rules'][$ccp_l['key']]))?></textarea></dd>
+</dl>
+<blockquote class="inline_help"><?=htmlspecialchars($ccp_l['help'])?></blockquote>
+<?php endforeach; ?>
+<dl>
+<dt><?=t('Default answer', 'Respuesta por defecto')?></dt>
+<dd><select id="ccp-<?=str_replace(':', '-', htmlspecialchars($ccp_f['key']))?>-defaultMode">
+<?php
+$ccp_modes = [
+    ''                  => t('Not set (ask, the normal behaviour)', 'Sin definir (preguntar, el comportamiento normal)'),
+    'default'           => t('default -- ask for anything not allowed above', 'default -- preguntar todo lo que no esté permitido arriba'),
+    'acceptEdits'       => t('acceptEdits -- accept file edits without asking', 'acceptEdits -- aceptar ediciones de archivos sin preguntar'),
+    'plan'              => t('plan -- plan only, change nothing', 'plan -- sólo planificar, no cambiar nada'),
+    'bypassPermissions' => t('bypassPermissions -- never ask about anything', 'bypassPermissions -- no preguntar nunca nada'),
+];
+foreach ($ccp_modes as $ccp_mv => $ccp_ml): ?>
+<option value="<?=htmlspecialchars($ccp_mv)?>"<?=$ccp_f['rules']['defaultMode'] === $ccp_mv ? ' selected' : ''?>><?=htmlspecialchars($ccp_ml)?></option>
+<?php endforeach; ?>
+</select></dd>
+</dl>
+<blockquote class="inline_help"><?=t(
+    'What happens when nothing above matches. Leave it unset unless you have a reason: bypassPermissions means a session in this directory does whatever it decides to do, with nothing asked and nothing to stop it.',
+    'Qué pasa cuando nada de lo de arriba encaja. Déjalo sin definir salvo que tengas un motivo: bypassPermissions significa que una sesión en esta carpeta hace lo que decida hacer, sin preguntar nada y sin nada que la detenga.'
+)?></blockquote>
+<input type="button" value="<?=t('Save rules', 'Guardar reglas')?>" onclick="ccpSave('<?=htmlspecialchars($ccp_f['key'])?>')">
+<span id="ccp-msg-<?=htmlspecialchars($ccp_f['key'])?>" style="margin-left:10px;"></span>
+<blockquote class="inline_help"><?=t('Saves only the rules on this tab. Anything else in the file is read, kept and written back unchanged.',
+                                     'Guarda sólo las reglas de esta pestaña. Lo demás que haya en el archivo se lee, se conserva y se vuelve a escribir igual.')?></blockquote>
+</div>
+<?php endif; ?>
+
+<div class="claude-box">
+<h4><?=t('Whole file (JSON)', 'Archivo completo (JSON)')?></h4>
+<p><?=t('For anything this tab has no field for. Saving here replaces the document, so it is the one place where a key can be added or removed by hand.',
+        'Para lo que esta pestaña no tiene campo. Guardar aquí reemplaza el documento entero, así que es el único sitio donde añadir o quitar una clave a mano.')?></p>
+<textarea id="ccp-raw-<?=htmlspecialchars($ccp_f['key'])?>" rows="16" cols="90" spellcheck="false" style="font-family:monospace;"><?=htmlspecialchars($ccp_f['raw'] !== '' ? $ccp_f['raw'] : "{\n}\n")?></textarea>
+<blockquote class="inline_help"><?=t('Checked before anything is written: invalid JSON is refused and the file on disk is left as it was.',
+                                     'Se comprueba antes de escribir nada: un JSON inválido se rechaza y el archivo del disco se queda como estaba.')?></blockquote>
+<input type="button" value="<?=t('Save JSON', 'Guardar JSON')?>" onclick="ccpSaveRaw('<?=htmlspecialchars($ccp_f['key'])?>')">
+<span id="ccp-rawmsg-<?=htmlspecialchars($ccp_f['key'])?>" style="margin-left:10px;"></span>
+<p><?=t('The notation for a rule is documented at', 'La notación de las reglas está documentada en')?>
+   <a href="https://code.claude.com/docs/en/iam#permission-settings" target="_blank">code.claude.com/docs/en/iam</a>.</p>
+</div>
+
+</div>
+<?php endforeach; ?>
+
+<script>
+(function () {
+  var LISTS = <?=json_encode(array_column($ccp_lists, 'key'))?>;
+  var L = <?=json_encode([
+      'saving'  => t('Saving...', 'Guardando...'),
+      'saved'   => t('Saved', 'Guardado'),
+      'network' => t('Could not reach the server', 'No se pudo contactar con el servidor'),
+  ])?>;
+  // Every POST to a page under the webGUI needs this token or PHP's prepend
+  // file ends the request with an empty body, which arrives here looking
+  // exactly like the server being unreachable.
+  var CSRF = <?=json_encode($var['csrf_token'] ?? '')?>;
+  var ENDPOINT = '/plugins/claude-code/include/claude-permissions.php';
+
+  function el(id) { return document.getElementById(id); }
+  function idOf(key) { return key.replace(/:/g, '-'); }
+
+  window.ccpSelect = function (key) {
+    var panes = document.getElementsByClassName('ccp-pane');
+    for (var i = 0; i < panes.length; i++) panes[i].style.display = (panes[i].id === 'ccp-pane-' + key) ? '' : 'none';
+  };
+
+  function post(body, node, onOk) {
+    body.set('csrf_token', CSRF);
+    node.textContent = L.saving;
+    node.className = '';
+    fetch(ENDPOINT, { method: 'POST', cache: 'no-store', headers: { 'X-CSRF-TOKEN': CSRF }, body: body })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        node.textContent = d.ok ? (L.saved + ' — ' + (d.path || '')) : (d.message || '');
+        node.className = d.ok ? 'ok' : 'error';
+        if (d.ok && onOk) onOk(d);
+      })
+      .catch(function () { node.textContent = L.network; node.className = 'error'; });
+  }
+
+  window.ccpSave = function (key) {
+    var node = el('ccp-msg-' + key);
+    var rules = {}, i, box;
+    for (i = 0; i < LISTS.length; i++) {
+      box = el('ccp-' + idOf(key) + '-' + LISTS[i]);
+      if (!box) continue;
+      rules[LISTS[i]] = (box.value || '').split('\n').map(function (s) { return s.trim(); })
+                                         .filter(function (s) { return s !== ''; });
+    }
+    var mode = el('ccp-' + idOf(key) + '-defaultMode');
+    if (mode) rules.defaultMode = mode.value;
+    var body = new URLSearchParams();
+    body.set('action', 'save');
+    body.set('target', key);
+    body.set('rules', JSON.stringify(rules));
+    post(body, node, function (d) {
+      // Keep the JSON editor, the counts and the boxes showing what was just
+      // written, so no two halves of this tab ever disagree about the file.
+      var raw = el('ccp-raw-' + key);
+      if (raw && typeof d.raw === 'string') raw.value = d.raw;
+      setTimeout(function () { location.reload(); }, 900);
+    });
+  };
+
+  window.ccpSaveRaw = function (key) {
+    var node = el('ccp-rawmsg-' + key);
+    var body = new URLSearchParams();
+    body.set('action', 'save');
+    body.set('target', key);
+    body.set('raw', el('ccp-raw-' + key).value);
+    post(body, node, function () { setTimeout(function () { location.reload(); }, 900); });
+  };
+})();
+</script>
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeSettings.page">
+<SHA256>8cdad622ffe5c3f7281d3c36e87e0b7531577fb527b5b21f456d069ba2359f34</SHA256>
+<INLINE>
+<![CDATA[
+Menu="claude-code:6"
 Title="Settings"
 Tag="cog"
 ---
@@ -6767,13 +7333,14 @@ Tag="cog"
      languages/LOCALE/SEGMENT.txt for each segment of the request URI, and
      this page sits under a segment named claude-code. -->
 <FILE Name="/usr/local/emhttp/languages/es_ES/claude-code.txt" Mode="0644">
-<SHA256>b35c281668848cd4b2531c77c1b6f9e5f0ef8d39fe3340fa370ad9da7d31112c</SHA256>
+<SHA256>d6cc3800a79fb46a1dc0562d38986b6a71feb0d81c3dc2781e8ac319eb50c5d7</SHA256>
 <INLINE>
 <![CDATA[
 Dashboard=Panel
 Accounts=Cuentas
 Remote Control=Control Remoto
 Claude Code Config=Config. de Claude
+Permissions=Permisos
 Settings=Ajustes
 ]]>
 </INLINE>
