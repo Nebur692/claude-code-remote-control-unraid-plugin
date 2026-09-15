@@ -1,12 +1,27 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.09.13"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.09.15"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.09.15
+- New Permissions tab. It shows every settings.local.json this server has:
+  the one for each account's working directory, where a "yes, and don't ask
+  again" ends up, and each account's own. Each one lists what is allowed
+  without asking, what is always asked, what is never allowed and the extra
+  folders a session may reach, one rule per line, plus the default mode and a
+  JSON editor for the rest. Saving keeps every other key in the file and
+  leaves the previous version beside it as settings.local.json.bak.
+- The Update popup now finishes. When an update restarted Remote Control,
+  the restarted bridge inherited the popup's connection from the web server
+  and kept it open for as long as it ran: the output never got its Done
+  button, and behind a reverse proxy the popup stayed blank. The update itself
+  always completed; now the popup does too.
+- "View live log" under installation on the Settings tab opens the install
+  log again. It was opening one account's Remote Control log instead.
 ###2026.09.13
 - The permission rules granted to sessions that run in "/" now survive a
   reboot. Remote Control starts its sessions there, and Claude Code records
@@ -7471,7 +7486,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.09.13 has been installed!"
+    echo " Claude Code plugin v2026.09.15 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
