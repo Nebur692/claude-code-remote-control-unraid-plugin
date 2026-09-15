@@ -1523,7 +1523,7 @@ prune_versions
      taken over as "most recent"; see the connect subcommand and the
      Settings page's Session ID field. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh" Mode="0755">
-<SHA256>43cd4547409c1afdce42063ea4fa075a2da6327785f1768225a753f57d593673</SHA256>
+<SHA256>385dd9a68371d50abf45e03d187a36f35ba5a242c133c7dbee7a32484d1be1b7</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1768,8 +1768,25 @@ run_fresh() {
     run_claude "$rc_dir" > /dev/null
 }
 
+# emhttpd gives every command it runs extra copies of its descriptors, the web
+# popup's output pipe among them, without close-on-exec; redirecting 0-2 leaves
+# those alone. A supervisor started from the Update button kept that pipe open
+# for as long as the bridge lived, so the popup never got its end. Everything
+# above 2 goes, except the descriptor bash reads this script from.
+close_inherited_fds() {
+    local fd self
+    self=$(readlink -f "$0")
+    for fd in /proc/$$/fd/*; do
+        fd=${fd##*/}
+        case "$fd" in 0|1|2) continue ;; esac
+        [ "$(readlink "/proc/$$/fd/$fd" 2>/dev/null)" = "$self" ] && continue
+        eval "exec $fd>&-" 2>/dev/null
+    done
+}
+
 do_run() {
     local rc_dir output pinned_id own_id fail_count=0
+    close_inherited_fds
     # The pid the page, the update script and the watchdog all look for. Written
     # here, by the supervisor itself: whoever launched it only knows the pid of
     # what it backgrounded, and with setsid in front that is not this shell.
@@ -3659,7 +3676,7 @@ respond([
 <!-- Shared preamble and styling for the tabs. Every tab requires this once,
      so the state it computes is worked out a single time per request. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/common.php" Mode="0644">
-<SHA256>8ebf04045858af43ae055f3d9c022c4a0ab06e65843b990d8175f4f1ccf610cd</SHA256>
+<SHA256>f6e9f2947f3f6809f87092eaebbe34171097946c3557c5c26ce78ff68f8e0437</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -3826,12 +3843,16 @@ foreach (($profiles ?: [['slug' => 'default', 'label' => t('Main account', 'Cuen
         $running = $pid !== '' && file_exists("/proc/$pid");
     }
 
-    $log_name = "claude-code-remote-control$suffix.log";
-    $log_exists = file_exists("/var/log/$log_name");
+    // Named apart from $log_name on purpose. Every tab is evaluated in one
+    // scope, and reusing that name here overwrote the install log with the
+    // last account's Remote Control log, so "View live log" under
+    // installation on the Settings tab opened the wrong file.
+    $acct_log_name = "claude-code-remote-control$suffix.log";
+    $acct_log_exists = file_exists("/var/log/$acct_log_name");
     $session_url = '';
     $archived = '';
-    if ($log_exists) {
-        $tail = shell_exec("tail -n 300 /var/log/" . escapeshellarg($log_name) . " 2>/dev/null");
+    if ($acct_log_exists) {
+        $tail = shell_exec("tail -n 300 /var/log/" . escapeshellarg($acct_log_name) . " 2>/dev/null");
         if ($tail && preg_match_all('#https://claude\.ai/code[^\s]*#', $tail, $m) && !empty($m[0])) {
             $session_url = end($m[0]);
         }
@@ -3870,8 +3891,8 @@ foreach (($profiles ?: [['slug' => 'default', 'label' => t('Main account', 'Cuen
         'dir_key'     => $dir_key,
         'dir_default' => $dir_default,
         'running'     => $running,
-        'log_name'    => $log_name,
-        'log_exists'  => $log_exists,
+        'log_name'    => $acct_log_name,
+        'log_exists'  => $acct_log_exists,
         'session_url' => $session_url,
         'archived'    => $archived,
         'last_sid'    => $cfg[$slug === 'default' ? 'LAST_SESSION_ID' : "LAST_SESSION_ID_$slug"] ?? '',
