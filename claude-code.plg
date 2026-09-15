@@ -3081,106 +3081,119 @@ s_write_json($state_file, $state);
 </INLINE>
 </FILE>
 
-<!-- Turns the sampler history into "this many points were spent on this server" -->
-<FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-attribution.php" Mode="0644">
-<SHA256>dea510aa60c8017a34028d29d637feff212ae8d03d3fd2bc250353a9939eba63</SHA256>
+<!-- Plan pace: how fast each usage window is filling, from the sampler history -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-pace.php" Mode="0644">
+<SHA256>b2882d91452c7ec61b0a52abf427fe33039f500a1cfc7819945cae06e7e3b2c4</SHA256>
 <INLINE>
 <![CDATA[
 <?php
 /*
- * How much of an account's plan usage was spent on this server.
+ * How fast an account's plan windows are filling, and whether they fill before
+ * they reset.
  *
- * Reads what scripts/usage-sampler.php records and turns it into three
- * numbers, in plan points:
- *
- *   here        the percentage moved while this account was working on this
- *               machine
- *   elsewhere   the percentage moved while it was not -- by definition,
- *               somewhere else
- *   unmeasured  the rest of the window: what was already spent before the
- *               sampler started, or while it could not read the figure
- *
- * The API gives a single number per account and no split by machine, so this
- * is the only honest way to answer "how much of this is mine": watch the
- * number move and look at what was running here at that moment. It is a
- * measurement with known limits, not accounting -- see attribution_caveats().
+ * Reads the percentages scripts/usage-sampler.php records every five minutes.
+ * The percentage is the account's, so it already includes whatever was spent
+ * anywhere else: nothing here tries to say where, only how fast.
  */
 
-function attr_history_file($appdata, $slug) {
-    if (!preg_match('/^[a-z][a-z0-9_]{0,23}$/', $slug) && $slug !== 'default') return null;
-    return rtrim($appdata, '/') . '/usage-history/' . $slug . '.jsonl';
+// Enough of the history for a day of five-minute samples, without reading a
+// month-long file on every page poll.
+function pace_tail_samples($file, $bytes = 131072) {
+    if (!is_readable($file)) return [];
+    $size = @filesize($file);
+    $fh = @fopen($file, 'r');
+    if (!$fh || $size === false) return [];
+    if ($size > $bytes) { fseek($fh, $size - $bytes); fgets($fh); }
+    $out = [];
+    while (($line = fgets($fh)) !== false) {
+        $d = json_decode($line, true);
+        if (is_array($d) && isset($d['ts'])) $out[] = $d;
+    }
+    fclose($fh);
+    usort($out, function ($a, $b) { return $a['ts'] <=> $b['ts']; });
+    return $out;
 }
 
 /*
- * $window is 'week' or 'five'. Returns null when there is nothing to say yet,
- * which is the normal state for the first few hours after installing.
+ * $key is 'five_hour' or 'seven_day'. $pct_now and $reset_now are the live
+ * reading when there is one, so the projection starts from the current figure
+ * rather than from the last sample.
  */
-function attribution_for($appdata, $slug, $window = 'week') {
-    $file = attr_history_file($appdata, $slug);
-    if ($file === null || !is_readable($file)) return null;
+function pace_from_samples($samples, $key, $pct_now, $reset_now, $now) {
+    $f = $key === 'five_hour' ? ['five', 'five_rst', 3600, 20 * 60] : ['week', 'week_rst', 86400, 6 * 3600];
+    list($pf, $rf, $lookback, $min_span) = $f;
 
-    $samples = [];
-    $fh = @fopen($file, 'r');
-    if (!$fh) return null;
-    while (($line = fgets($fh)) !== false) {
-        $d = json_decode($line, true);
-        if (is_array($d) && isset($d['ts'])) $samples[] = $d;
-    }
-    fclose($fh);
-    if (count($samples) < 2) return null;
-
-    usort($samples, function ($a, $b) { return $a['ts'] <=> $b['ts']; });
-    $last = end($samples);
-    if (!isset($last[$window]) || $last[$window] === null) return null;
-
-    // Only this window counts. The weekly one says where it began; the
-    // five-hour one does not, so it is derived from when it next resets.
-    if ($window === 'week') {
-        $start = !empty($last['week_from']) ? strtotime($last['week_from']) : 0;
-    } else {
-        $reset = !empty($last['five_rst']) ? strtotime($last['five_rst']) : 0;
-        $start = $reset ? $reset - 5 * 3600 : 0;
-    }
-    if (!$start) return null;
-
-    $here = 0.0; $elsewhere = 0.0; $unclear = 0.0; $used = 0; $prev = null;
+    // Only readings of an active window: an idle five-hour window reports 0
+    // with no reset time, and there is no rate to speak of in it.
+    $rows = [];
     foreach ($samples as $s) {
-        if ($s['ts'] < $start) { $prev = $s; continue; }
-        if ($prev === null || !isset($prev[$window]) || $prev[$window] === null) { $prev = $s; continue; }
-        // A sample from before the window began cannot be the other end of an
-        // interval inside it.
-        if ($prev['ts'] < $start) { $prev = $s; continue; }
-        $delta = (float)$s[$window] - (float)$prev[$window];
-        $prev_ts = $prev['ts'];
-        $prev = $s;
-        // Negative means the window reset between the two samples; zero means
-        // nothing was spent, and there is nothing to attribute either way.
-        if ($delta <= 0) continue;
-        $used++;
-        $local   = (float)($s['local'] ?? 0);
-        $unknown = (float)($s['local_unknown'] ?? 0);
-        if ($local > 0.01)        $here      += $delta;
-        elseif ($unknown > 0.01)  $unclear   += $delta;   // ran here, owner unproven
-        else                      $elsewhere += $delta;
-        unset($prev_ts);
+        if (!isset($s[$pf], $s[$rf]) || !is_numeric($s[$pf])) continue;
+        $r = strtotime((string)$s[$rf]);
+        if (!$r) continue;
+        $rows[] = ['ts' => (int)$s['ts'], 'pct' => (float)$s[$pf], 'rst' => $r];
+    }
+    if (!$rows) return null;
+    $last = end($rows);
+    // A sampler that stopped (expired token, sampler not running) says nothing
+    // about the rate now.
+    if ($now - $last['ts'] > 15 * 60) return null;
+
+    // The current stretch: same window, and never going down. The reset time
+    // jitters by a fraction of a second between readings, hence the tolerance;
+    // and the percentage can drop mid-window when Anthropic resets a limit,
+    // which starts a new stretch just as a reset does.
+    $first = count($rows) - 1;
+    for ($i = count($rows) - 1; $i > 0; $i--) {
+        $a = $rows[$i - 1]; $b = $rows[$i];
+        if (abs($a['rst'] - $b['rst']) > 120 || $a['pct'] > $b['pct']) break;
+        $first = $i - 1;
+    }
+    $start = $rows[$first];
+    for ($i = $first; $i < count($rows); $i++) {
+        if ($rows[$i]['ts'] >= $now - $lookback) { $start = $rows[$i]; break; }
     }
 
-    $total = (float)$last[$window];
-    $accounted = $here + $elsewhere + $unclear;
-    $unmeasured = $total - $accounted;
-    if ($unmeasured < 0) $unmeasured = 0.0;
+    $pct = $pct_now !== null ? (float)$pct_now : $last['pct'];
+    $reset = $reset_now ?: $last['rst'];
+    $span = $last['ts'] - $start['ts'];
+    // Less than a full lookback follows whatever the last few hours happened to
+    // be -- a burst of work, or a night -- so the page says so.
+    $out = ['state' => 'measuring', 'rate_h' => null, 'span_min' => (int)round($span / 60),
+            'provisional' => $span < 0.9 * $lookback,
+            'full_at' => null, 'at_reset' => null, 'reset' => $reset];
 
-    return [
-        'window'     => $window,
-        'total'      => round($total, 1),
-        'here'       => round($here, 1),
-        'elsewhere'  => round($elsewhere, 1),
-        'unclear'    => round($unclear, 1),
-        'unmeasured' => round($unmeasured, 1),
-        'intervals'  => $used,
-        'since'      => $start,
-        'samples'    => count($samples),
-    ];
+    if ($pct >= 100) { $out['state'] = 'full'; return $out; }
+    if ($span < $min_span) return $out;
+
+    $rise = $last['pct'] - $start['pct'];
+    $rate = $rise / ($span / 3600);
+    $out['rate_h'] = round($rate, 1);
+    if ($rise <= 0) { $out['state'] = 'flat'; return $out; }
+
+    $full_at = $now + (int)round((100 - $pct) / $rate * 3600);
+    if ($reset && $full_at >= $reset) {
+        $out['state'] = 'safe';
+        $out['at_reset'] = (int)min(100, round($pct + $rate * ($reset - $now) / 3600));
+    } else {
+        $out['state'] = 'rising';
+        $out['full_at'] = $full_at;
+    }
+    return $out;
+}
+
+// Pace for the two windows every plan has, keyed like the usage payload.
+function pace_for_account($appdata, $slug, $windows, $now = null) {
+    if (!preg_match('/^[a-z][a-z0-9_]{0,23}$/', $slug) && $slug !== 'default') return null;
+    $now = $now ?: time();
+    $samples = pace_tail_samples(rtrim($appdata, '/') . "/usage-history/$slug.jsonl");
+    if (!$samples) return null;
+    $out = [];
+    foreach ($windows as $w) {
+        if (!in_array($w['key'] ?? '', ['five_hour', 'seven_day'], true)) continue;
+        $p = pace_from_samples($samples, $w['key'], $w['percent'] ?? null, $w['resets_at'] ?? null, $now);
+        if ($p !== null) $out[$w['key']] = $p;
+    }
+    return $out ?: null;
 }
 ]]>
 </INLINE>
@@ -3345,7 +3358,7 @@ echo json_encode([
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-usage.php" Mode="0644">
-<SHA256>af4243415b0b8b323487a4e1449c9c991eac944fc9274256401dfacb4bc8e738</SHA256>
+<SHA256>70bc93a1c69b589d64ace97c0db1d7d9339eb21bafdf6153c5a09d31292ba9cc</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -3451,14 +3464,14 @@ function respond($payload, $cache_file, $ttl, $last_file = null, $prof_file = nu
         if ($prof && !empty($prof['subscription'])) $payload['subscription'] = $prof['subscription'];
     }
 
-    // How much of this account's percentage was spent on this server. Comes
-    // from the sampler's history, so it is absent until that has been running
-    // for a while -- the page simply does not show the line until then.
+    // How fast each window is filling, from the sampler's history. Only on a
+    // current reading: a projection from figures that stopped moving hours ago
+    // would read as a forecast and mean nothing.
     global $appdata, $slug;
-    if (!empty($appdata) && !empty($slug)) {
-        require_once __DIR__ . '/claude-attribution.php';
-        $attr = attribution_for($appdata, $slug, 'week');
-        if ($attr !== null) $payload['attribution'] = $attr;
+    if (($payload['state'] ?? '') === 'ok' && !empty($payload['windows']) && !empty($appdata) && !empty($slug)) {
+        require_once __DIR__ . '/claude-pace.php';
+        $pace = pace_for_account($appdata, $slug, $payload['windows']);
+        if ($pace !== null) $payload['pace'] = $pace;
     }
 
     $json = json_encode($payload);
@@ -5403,7 +5416,7 @@ Tabs="true"
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeDashboard.page">
-<SHA256>904dfcbb5ddc5c8c79e29037b8f3c62da84dabb7f2f67e088b539e7d79e0fac1</SHA256>
+<SHA256>1030e475006de90db0caa4500ae98dc56320ff8eef1375323a81cae4ef5f81fd</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:1"
@@ -5455,13 +5468,16 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
       'min'       => t('min', 'min'),
       'nodata'    => t('not signed in', 'sin iniciar sesión'),
       'plan'      => t('Plan usage', 'Uso del plan'),
-      'from_here' => t('from this server', 'de este servidor'),
-      'from_else' => t('elsewhere', 'de otros sitios'),
-      'attr_help' => t(
-          'Anthropic reports one percentage per account and never says which machine spent it, so this is measured rather than asked for: the percentage is read every few minutes, and a rise while this account was working here is counted as this server, a rise while it was idle here as somewhere else. Two things it cannot do: the percentage moves in whole points, so small amounts round away, and an interval where the account worked here and elsewhere at the same time cannot be split. "Not measured" is the part of the window that was already spent before the sampling started.',
-          'Anthropic informa de un solo porcentaje por cuenta y nunca dice qué máquina lo ha gastado, así que esto se mide en vez de preguntarse: se lee el porcentaje cada pocos minutos, y una subida mientras esta cuenta trabajaba aquí se cuenta como este servidor, y una subida mientras estaba parada aquí como otro sitio. Dos cosas que no puede hacer: el porcentaje va de punto en punto, así que lo pequeño se pierde en el redondeo, y un intervalo en el que la cuenta trabajó aquí y fuera a la vez no se puede repartir. «Sin medir» es la parte de la ventana que ya estaba gastada antes de empezar a muestrear.'),
-      'attr_unclear' => t('ran here, account unproven', 'corrió aquí, cuenta sin confirmar'),
-      'attr_unmeasured' => t('not measured', 'sin medir'),
+      'pace_help' => t('How fast this window is filling, from the percentage read every five minutes: over the last hour for the 5-hour window, over the last day for the weekly one. It is the account\'s percentage, so it counts what was spent anywhere, not only on this server. The projection assumes that pace carries on; with less history than that it is marked provisional.',
+                       'A qué ritmo se está llenando esta ventana, según el porcentaje leído cada cinco minutos: en la última hora para la de 5 h y en el último día para la semanal. Es el porcentaje de la cuenta, así que cuenta lo gastado en cualquier sitio, no sólo en este servidor. La previsión supone que ese ritmo se mantiene; con menos historia que eso se marca como provisional.'),
+      'per_h'     => t('pts/h', 'pts/h'),
+      'per_day'   => t('pts/day', 'pts/día'),
+      'full_by'   => t('100% by', '100% hacia'),
+      'at_reset'  => t('at reset', 'al reinicio'),
+      'flat'      => t('not rising', 'sin subir'),
+      'measuring' => t('measuring pace', 'midiendo ritmo'),
+      'limit_hit' => t('limit reached', 'límite alcanzado'),
+      'provisional' => t('provisional', 'provisional'),
       // Shown with the figures whenever they are the last reading rather than
       // a current one, so a number on this line is never mistaken for live.
       'last'      => t('last reading', 'última lectura'),
@@ -5519,6 +5535,27 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 
   function money(v, cur) { return v.toFixed(2) + ' ' + esc(cur || 'USD'); }
 
+  // Where the current pace takes a window: over the limit before it resets, or
+  // how far it gets by then. Weekly rates read better per day than per hour.
+  function paceText(p, key) {
+    if (!p) return '';
+    var daily = key === 'seven_day';
+    var rate = '';
+    if (typeof p.rate_h === 'number') {
+      var v = daily ? p.rate_h * 24 : p.rate_h;
+      rate = '&uarr; ' + esc(v.toLocaleString(LOCALE, { maximumFractionDigits: 1 })) + ' ' + esc(daily ? L.per_day : L.per_h);
+    }
+    var text, c = 'dim-text';
+    if (p.state === 'full') { text = esc(L.limit_hit); c = 'error'; }
+    else if (p.state === 'measuring') { text = esc(L.measuring) + '&hellip;'; }
+    else if (p.state === 'flat') { text = esc(L.flat); }
+    else if (p.state === 'rising') { text = rate + ' &rarr; ' + esc(L.full_by) + ' ' + esc(stamp(p.full_at)); c = 'error'; }
+    else if (p.state === 'safe') { text = rate + ' &rarr; ' + esc(L.at_reset) + ' ~' + p.at_reset + '%'; }
+    else return '';
+    if (p.provisional && (p.state === 'rising' || p.state === 'safe')) text += ' (' + esc(L.provisional) + ')';
+    return ' <span class="' + c + '" title="' + esc(L.pace_help) + '">&middot; ' + text + '</span>';
+  }
+
   // Builds the figures for one account. Shared by the single-account bar and by
   // the per-account rows, so both always say the same thing the same way.
   function usageParts(d) {
@@ -5532,18 +5569,8 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
       parts.push('<b>' + esc(name) + ':</b> ' +
                  '<span class="' + cls(w.percent) + '">' + Math.round(w.percent) + '%</span>' +
                  (rel ? ' <span class="dim-text">(' + esc(L.resets) + ' ' + esc(rel) +
-                        (abs ? ' &mdash; ' + esc(abs) : '') + ')</span>' : ''));
-    }
-    // Where the weekly percentage was spent. Only shown once the sampler has
-    // enough history to say anything, and always with its own explanation on
-    // hover: a number like this invites more trust than it has earned.
-    var a = d.attribution;
-    if (a && (a.here > 0 || a.elsewhere > 0 || a.unclear > 0)) {
-      var bits = ['<span class="ok">' + a.here + ' pts</span> ' + esc(L.from_here),
-                  '<span class="dim-text">' + a.elsewhere + ' pts ' + esc(L.from_else) + '</span>'];
-      if (a.unclear > 0)    bits.push('<span class="dim-text">' + a.unclear + ' pts ' + esc(L.attr_unclear) + '</span>');
-      if (a.unmeasured > 0) bits.push('<span class="dim-text">' + a.unmeasured + ' pts ' + esc(L.attr_unmeasured) + '</span>');
-      parts.push('<b title="' + esc(L.attr_help) + '">' + esc(L.seven_day) + ' &rarr;</b> ' + bits.join(' <span class="sep">&middot;</span> '));
+                        (abs ? ' &mdash; ' + esc(abs) : '') + ')</span>' : '') +
+                 paceText(d.pace && d.pace[w.key], w.key));
     }
 
     // Only present when the account actually has extra usage enabled.
