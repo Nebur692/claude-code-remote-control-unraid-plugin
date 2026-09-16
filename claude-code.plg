@@ -1,12 +1,21 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.09.16"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.09.16.2"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.09.16.2
+- Restarting Remote Control no longer loses the account's session. An update
+  stopped the bridge and started it again a second later, but a bridge with a
+  session attached takes a moment to shut down: the new one found its own
+  session still held by the old one, took that as someone else owning it, and
+  opened a brand-new session instead. Stopping now waits for the old bridge to
+  be gone (forcing it only after 30 seconds), and a session still held by the
+  account's own previous bridge is waited for and asked for again. This
+  applies to Update, Reinstall, Connect and New session.
 ###2026.09.16
 - The Dashboard says when a newer Claude Code has been published than the one
   installed, next to its version, with an Update link that opens the same
@@ -7576,7 +7585,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.09.16 has been installed!"
+    echo " Claude Code plugin v2026.09.16.2 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
