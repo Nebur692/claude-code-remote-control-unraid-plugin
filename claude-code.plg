@@ -1,12 +1,23 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.09.15.2"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.09.16"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.09.16
+- The Dashboard says when a newer Claude Code has been published than the one
+  installed, next to its version, with an Update link that opens the same
+  popup as the Settings tab. It asks the same place Claude Code itself asks,
+  for the release channel set in its settings (latest when unset), and keeps
+  the answer for six hours.
+- The usage sampler now records why a reading is missing (an HTTP error such
+  as a rate limit, a timeout, a network error or no token), once for each
+  stretch rather than every five minutes. And while the Dashboard is open it
+  reuses the reading the page took less than a minute ago instead of asking
+  the API again, which was losing every other sample to the rate limit.
 ###2026.09.15.2
 - The Dashboard now shows how fast each plan window is filling, instead of
   how many points were "from this server" and "from elsewhere". That split
@@ -7531,7 +7542,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.09.15.2 has been installed!"
+    echo " Claude Code plugin v2026.09.16 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
