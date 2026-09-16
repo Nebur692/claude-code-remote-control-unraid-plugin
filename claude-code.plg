@@ -1563,7 +1563,7 @@ prune_versions
      taken over as "most recent"; see the connect subcommand and the
      Settings page's Session ID field. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh" Mode="0755">
-<SHA256>385dd9a68371d50abf45e03d187a36f35ba5a242c133c7dbee7a32484d1be1b7</SHA256>
+<SHA256>18b42ee055ee82da992fe0a980cedcccdb85a88910805e1562a487e57f140b35</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1825,7 +1825,7 @@ close_inherited_fds() {
 }
 
 do_run() {
-    local rc_dir output pinned_id own_id fail_count=0
+    local rc_dir output pinned_id own_id holder held_waits=0 fail_count=0
     close_inherited_fds
     # The pid the page, the update script and the watchdog all look for. Written
     # here, by the supervisor itself: whoever launched it only knows the pid of
@@ -1894,6 +1894,22 @@ do_run() {
             # of its own, now. Without this the supervisor retried the same
             # taken session every 5 seconds forever -- the same shape of
             # infinite loop the archived-session check was added to prevent.
+            holder=$(printf '%s\n' "$output" | grep -o 'instance (pid [0-9]*)' | grep -o '[0-9][0-9]*' | head -1)
+            # Held by this account's own previous bridge, still shutting down:
+            # that is the same session, not someone else's. Wait for it to go and
+            # ask for the same id again, instead of throwing the id away. Twice at
+            # most, so a holder that never lets go still ends in a session.
+            if [ -n "$own_id" ] && [ -n "$holder" ] && [ "$held_waits" -lt 2 ] &&
+               echo "$output" | grep -q "already being served by another" &&
+               tr '\0' ' ' < "/proc/$holder/cmdline" 2>/dev/null | grep -q -- "--remote-control-session-name-prefix $NAME_PREFIX *\$"; then
+                held_waits=$((held_waits + 1))
+                echo "=== Session $own_id is still held by this account's previous bridge (pid $holder), which is shutting down -- waiting for it and asking for the same session again: $(date) ===" >> "$LOGFILE"
+                cc_log "Session $own_id is still held by the previous bridge of account '$PROFILE'; waiting for it to exit"
+                local w=0
+                while [ -d "/proc/$holder" ] && [ "$w" -lt 30 ]; do sleep 1; w=$((w + 1)); done
+                [ -d "/proc/$holder" ] && kill -9 "$holder" 2>/dev/null
+                continue
+            fi
             if echo "$output" | grep -q "already being served by another"; then
                 echo "=== The session in $rc_dir is already held by another instance${own_id:+ (}${own_id}${own_id:+)} -- starting a new session for account '$PROFILE': $(date) ===" >> "$LOGFILE"
                 cc_log "The session in $rc_dir is already held by another instance; starting a new session for account '$PROFILE'"
@@ -2020,6 +2036,24 @@ stop_running() {
     # match "unraid-work".
     pkill -f "remote-control.sh _run $PROFILE\$" 2>/dev/null
     pkill -f "remote-control-session-name-prefix $NAME_PREFIX\$" 2>/dev/null
+    # Signalling is not stopping. A bridge with a session attached shuts it down
+    # before it exits, and every caller of this starts a new bridge straight
+    # after: the new one asked for the same session while the old one still
+    # held it, was told "already being served by another instance", and this
+    # account lost its session to a brand-new one -- seen for real on the update
+    # of 2026-09-16. So wait for this account's processes to be gone, and only
+    # force them after a grace period long enough for an orderly shutdown.
+    local waited=0
+    while pgrep -f "remote-control-session-name-prefix $NAME_PREFIX\$" >/dev/null 2>&1 ||
+          pgrep -f "remote-control.sh _run $PROFILE\$" >/dev/null 2>&1; do
+        if [ "$waited" -ge 30 ]; then
+            pkill -9 -f "remote-control.sh _run $PROFILE\$" 2>/dev/null
+            pkill -9 -f "remote-control-session-name-prefix $NAME_PREFIX\$" 2>/dev/null
+            break
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
 }
 
 # Start the supervisor in a session of its own, detached from whoever asked for
