@@ -2820,7 +2820,7 @@ exec "$REAL" "$@"
 
 <!-- Usage sampler: records the plan percentages on a schedule so the Dashboard can show how fast they are rising -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/usage-sampler.php" Mode="0644">
-<SHA256>33456ef315a0296278922a0f3bda21321ab5d5a412def7a0d35a8f692fdc1204</SHA256>
+<SHA256>349d9696332ca494cf601944fd8bbef912cd746ea6acb0b1552a5174949b0784</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -2879,10 +2879,14 @@ function s_token($slug) {
     return is_string($t) && $t !== '' ? $t : null;
 }
 
+// The reading, or why there is none. The reason is what makes a gap in the
+// history explainable afterwards: a limit, a timeout and an expired token all
+// look the same as a missing line otherwise.
 function s_usage($token) {
     // Nothing to sample without curl, and a cron job that fatals every five
     // minutes is worse than one that quietly does nothing.
-    if (!function_exists('curl_init')) return null;
+    if (!function_exists('curl_init')) return ['error' => 'no curl'];
+    $retry = '';
     $ch = curl_init('https://api.anthropic.com/api/oauth/usage');
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
@@ -2892,34 +2896,91 @@ function s_usage($token) {
             'anthropic-beta: oauth-2025-04-20',
             'Content-Type: application/json',
         ],
+        CURLOPT_HEADERFUNCTION => function ($ch, $h) use (&$retry) {
+            if (stripos($h, 'retry-after:') === 0) $retry = trim(substr($h, 12));
+            return strlen($h);
+        },
     ]);
     $body = curl_exec($ch);
     $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $errno = curl_errno($ch);
+    $err = curl_error($ch);
     curl_close($ch);
-    if ($code !== 200 || !is_string($body)) return null;
-    $d = json_decode($body, true);
-    return is_array($d) ? $d : null;
+    if ($errno === CURLE_OPERATION_TIMEDOUT) return ['error' => 'timeout'];
+    if ($errno !== 0) return ['error' => 'network: ' . $err];
+    // retry-after travels apart from the reason: it counts down between runs, and
+    // folded into the reason it made every run look like a new failure.
+    if ($code !== 200) return ['error' => "http $code"] + ($retry !== '' ? ['retry_after' => $retry] : []);
+    $d = json_decode((string)$body, true);
+    if (!is_array($d)) return ['error' => 'unreadable response'];
+    return ['data' => [
+        'five'     => isset($d['five_hour']['utilization']) ? (float)$d['five_hour']['utilization'] : null,
+        'five_rst' => $d['five_hour']['resets_at'] ?? null,
+        'week'     => isset($d['seven_day']['utilization']) ? (float)$d['seven_day']['utilization'] : null,
+        'week_rst' => $d['seven_day']['resets_at'] ?? null,
+    ]];
+}
+
+// The Dashboard asks the same endpoint once a minute per account while it is
+// open. Asking again a few seconds later was the likeliest reason for losing
+// every other sample while the page was open, so a reading the page took less
+// than a minute ago is used as it is.
+function s_from_panel($slug, $now) {
+    $c = @json_decode((string)@file_get_contents("/var/tmp/claude-code-usage-cache-$slug.json"), true);
+    if (!is_array($c) || ($c['state'] ?? '') !== 'ok' || !empty($c['stale'])) return null;
+    if ($now - (int)($c['fetched_at'] ?? 0) > 60) return null;
+    $out = ['five' => null, 'five_rst' => null, 'week' => null, 'week_rst' => null];
+    $found = false;
+    foreach (($c['windows'] ?? []) as $w) {
+        $key = $w['key'] ?? '';
+        if ($key !== 'five_hour' && $key !== 'seven_day') continue;
+        $p = $key === 'five_hour' ? 'five' : 'week';
+        $out[$p] = isset($w['percent']) ? (float)$w['percent'] : null;
+        $out[$p . '_rst'] = !empty($w['resets_at']) ? gmdate('Y-m-d\TH:i:sP', (int)$w['resets_at']) : null;
+        $found = true;
+    }
+    return $found ? $out : null;
+}
+
+// The last line of an account's history, without reading the whole file.
+function s_last_line($file) {
+    $size = @filesize($file);
+    if (!$size) return null;
+    $fh = @fopen($file, 'r');
+    if (!$fh) return null;
+    fseek($fh, max(0, $size - 4096));
+    $lines = array_filter(explode("\n", (string)stream_get_contents($fh)), 'strlen');
+    fclose($fh);
+    return $lines ? json_decode(end($lines), true) : null;
 }
 
 $hist = s_hist_dir();
 $now = time();
 foreach (s_accounts() as $slug) {
-    // An expired token or no network: skip the round. Only the CLI renews a
-    // token, so an idle account simply stops being sampled until it is used.
-    $token = s_token($slug);
-    if ($token === null) continue;
-    $u = s_usage($token);
-    if ($u === null) continue;
-
-    $sample = [
-        'ts'       => $now,
-        'five'     => isset($u['five_hour']['utilization']) ? (float)$u['five_hour']['utilization'] : null,
-        'five_rst' => $u['five_hour']['resets_at'] ?? null,
-        'week'     => isset($u['seven_day']['utilization']) ? (float)$u['seven_day']['utilization'] : null,
-        'week_rst' => $u['seven_day']['resets_at'] ?? null,
-    ];
-
     $file = "$hist/$slug.jsonl";
+    $sample = null;
+    $panel = s_from_panel($slug, $now);
+    if ($panel !== null) {
+        $sample = ['ts' => $now] + $panel + ['via' => 'panel'];
+    } else {
+        $token = s_token($slug);
+        $r = $token === null ? ['error' => 'no token'] : s_usage($token);
+        if (isset($r['data'])) {
+            $sample = ['ts' => $now] + $r['data'];
+        } else {
+            // Written once per stretch, not every five minutes: an account whose
+            // token expired would otherwise fill its history with the same line.
+            // Only the CLI renews a token, so an idle account stays like this
+            // until it is used.
+            $last = s_last_line($file);
+            if (!is_array($last) || ($last['error'] ?? null) !== $r['error']) {
+                @file_put_contents($file, json_encode(['ts' => $now] + $r, JSON_UNESCAPED_SLASHES) . "\n", FILE_APPEND);
+                @chmod($file, 0600);
+            }
+            continue;
+        }
+    }
+
     @file_put_contents($file, json_encode($sample, JSON_UNESCAPED_SLASHES) . "\n", FILE_APPEND);
     @chmod($file, 0600);
 
@@ -2936,6 +2997,68 @@ foreach (s_accounts() as $slug) {
         @rename($file . '.tmp', $file);
     }
 }
+]]>
+</INLINE>
+</FILE>
+
+<!-- Release check: the published Claude Code version for the configured channel -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-version.php" Mode="0644">
+<SHA256>04a050450897ff65a6887bbbe3c89aeb82b5f5f2d6364d24c751e0f50e692f71</SHA256>
+<INLINE>
+<![CDATA[
+<?php
+// Whether a newer Claude Code has been published than the one installed here.
+//
+// Asks the same place the CLI itself asks: downloads.claude.ai returns the
+// current version of a release channel as plain text. The channel is the one in
+// Claude Code's settings, and unset means latest, exactly as in the CLI. The
+// answer is kept for six hours (a quarter of an hour after a failed check):
+// releases come out a few times a week, and the page asks once per load.
+
+header('Content-Type: application/json');
+header('Cache-Control: no-store');
+
+$cfg = @parse_ini_file('/boot/config/plugins/claude-code/claude-code.cfg') ?: [];
+$appdata = rtrim((string)($cfg['APPDATA_PATH'] ?? ''), '/');
+if ($appdata === '') $appdata = '/mnt/user/appdata/claude-code';
+
+function cv_version($s) {
+    return preg_match('/^(\d+\.\d+\.\d+)(?:\s|$)/', trim((string)$s), $m) ? $m[1] : null;
+}
+
+$installed = cv_version(shell_exec('claude --version 2>/dev/null'));
+
+$settings = @json_decode((string)@file_get_contents("$appdata/.claude/settings.json"), true);
+$channel = is_array($settings) && is_string($settings['autoUpdatesChannel'] ?? null) ? $settings['autoUpdatesChannel'] : 'latest';
+if (!in_array($channel, ['latest', 'stable', 'rc'], true)) $channel = 'latest';
+
+$cache = "/var/tmp/claude-code-release-$channel.json";
+$c = @json_decode((string)@file_get_contents($cache), true);
+if (!is_array($c)) $c = [];
+$ttl = !empty($c['ok']) ? 6 * 3600 : 15 * 60;
+if (time() - (int)($c['checked_at'] ?? 0) > $ttl) {
+    $ch = curl_init("https://downloads.claude.ai/claude-code-releases/$channel");
+    curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 5]);
+    $body = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    $v = $code === 200 ? cv_version($body) : null;
+    // A failed check keeps the last version read, so a network blip does not make
+    // a known update disappear from the page.
+    $c = ['version' => $v ?? ($c['version'] ?? null), 'ok' => $v !== null, 'checked_at' => time()];
+    $tmp = "$cache.tmp." . getmypid();
+    if (@file_put_contents($tmp, json_encode($c)) !== false) @rename($tmp, $cache);
+}
+
+$latest = $c['version'] ?? null;
+echo json_encode([
+    'installed'  => $installed,
+    'channel'    => $channel,
+    'latest'     => $latest,
+    'update'     => $installed !== null && $latest !== null && version_compare($latest, $installed, '>'),
+    'checked_at' => (int)($c['checked_at'] ?? 0),
+    'check_ok'   => !empty($c['ok']),
+]);
 ]]>
 </INLINE>
 </FILE>
@@ -5275,7 +5398,7 @@ Tabs="true"
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeDashboard.page">
-<SHA256>1030e475006de90db0caa4500ae98dc56320ff8eef1375323a81cae4ef5f81fd</SHA256>
+<SHA256>5050cccab09b3c4d638077a22f911c20da50f50e25844632d0126113254d3de4</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:1"
@@ -5287,7 +5410,7 @@ Tag="dashboard"
 
 <div class="claude-status">
 <b><?=t('Status:', 'Estado:')?></b>
-Claude Code: <span class="<?=$claude_installed ? 'ok' : 'error'?>"><?=$claude_installed ? $claude_version : t('Not installed', 'No instalado')?></span>
+Claude Code: <span class="<?=$claude_installed ? 'ok' : 'error'?>"><?=$claude_installed ? $claude_version : t('Not installed', 'No instalado')?></span><span id="claude-version-update"></span>
 <span class="sep">&middot;</span>
 <?=t('Array', 'Array')?>: <span class="<?=$array_started ? 'ok' : 'error'?>"><?=$array_started ? t('Started', 'Iniciado') : t('Not started', 'No iniciado')?></span>
 <span class="sep">&middot;</span>
@@ -5298,6 +5421,42 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
      the per-process breakdown stays in that box. -->
 <span id="claude-stats-bar"><span class="dim-text"><?=t('measuring...', 'midiendo...')?></span></span>
 </div>
+
+<?php if ($claude_installed): ?>
+<script>
+(function () {
+  // Whether a newer Claude Code is out, next to the version installed. Asked once
+  // per page load; the server keeps the answer for hours.
+  var L = <?=json_encode([
+      'available' => t('update available', 'actualización disponible'),
+      'channel'   => t('release channel', 'canal de versiones'),
+      'update'    => t('Update', 'Actualizar'),
+      'title'     => t('Updating Claude Code', 'Actualizando Claude Code'),
+  ])?>;
+  var el = document.getElementById('claude-version-update');
+  fetch('/plugins/claude-code/include/claude-version.php', { cache: 'no-store' })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (!d || !d.update) return;
+      var note = document.createElement('span');
+      note.className = 'warn';
+      note.title = L.channel + ': ' + d.channel;
+      note.textContent = ' (' + L.available + ': ' + d.latest + ') ';
+      var link = document.createElement('a');
+      link.href = '#';
+      link.textContent = L.update;
+      // The same popup as the Update button on the Settings tab.
+      link.addEventListener('click', function (e) {
+        e.preventDefault();
+        openBox('/plugins/claude-code/scripts/update-claude.sh', L.title, 600, 900, true);
+      });
+      el.appendChild(note);
+      el.appendChild(link);
+    })
+    .catch(function () {});
+})();
+</script>
+<?php endif; ?>
 
 <!-- Claude.ai plan usage, on its own line under the status bar: the 5-hour and
      weekly windows with the date each one resets, any per-model window and
