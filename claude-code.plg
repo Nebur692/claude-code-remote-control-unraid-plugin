@@ -1,12 +1,38 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.09.16.2"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.09.27"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.09.27
+- The Config tab no longer deletes settings when you save. A value that did
+  not fit its field was drawn as an empty field and removed on save, so
+  pressing Save without touching anything took out the status line, both
+  security locks (forbid the no-questions mode, remove automatic mode), the
+  question timeout and three more. Only the fields you change are saved now,
+  and a value a field cannot show is said so and left alone.
+- Values this tab used to write wrongly are shown corrected, with a note, and
+  written corrected on the next save: "disable" instead of true for the two
+  locks, hold instead of notice, notify and off instead of queue and discard,
+  a duration such as 5m instead of seconds, and no signature instead of the
+  word none.
+- Effort levels that /effort saved per model, which win over the Effort level
+  field, are now shown and can be removed.
+- Model, output style, language and time zone are lists instead of free text,
+  with Other for anything else. The time zones are the same list as Unraid's
+  own Date and Time page.
+- Eleven new settings: the advisor model, what to do when a message is
+  flagged, ultracode, workflow size, the ultracode keyword, the automatic check
+  while planning, how long a Remote Control dialog waits, Artifacts, claude.ai
+  skills and connectors on this server, and the time format.
+- The tab is regrouped from six sections into nine, and the account selector
+  now comes before the preset.
+- Brought up to date: the preset is now Optimized for Opus 5.5, fast mode
+  lists Opus 5.5, the compaction window says it is in tokens, and number
+  fields refuse values outside the range Claude Code accepts.
 ###2026.09.16.2
 - Restarting Remote Control no longer loses the account's session. An update
   stopped the bridge and started it again a second later, but a bridge with a
@@ -8008,7 +8034,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.09.16.2 has been installed!"
+    echo " Claude Code plugin v2026.09.27 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
