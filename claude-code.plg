@@ -6525,7 +6525,7 @@ if ($rc_owner === '') {
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeConfig.page">
-<SHA256>6e389d34e7ff3f565707a3ab3ccbb7b391b7bbfcab556303f0cbc0a00f0f33cc</SHA256>
+<SHA256>c9f67a4658393006406f2e7b5a12fb68d0ef662c79188f02df330d9e7fbfcabc</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:4"
@@ -6708,8 +6708,8 @@ $cc_fields = [
   ],
   [
     'title' => t('Workflows, skills and hooks', 'Flujos de trabajo, skills y hooks'),
-    'help'  => t('Workflows let Claude run many agents at once for a big job: they get a lot done, and they can use a lot of your plan in one go, so each workflow option here is worth choosing on purpose. Below them, what skills and your own automations (hooks) are allowed to do.',
-                 'Los flujos de trabajo dejan que Claude ponga a trabajar muchos agentes a la vez en una tarea grande: sacan mucho trabajo adelante, y pueden gastar mucho plan de golpe, así que conviene elegir a propósito cada opción de flujos de aquí. Debajo, qué pueden hacer las skills y tus propias automatizaciones (hooks).'),
+    'help'  => t('Workflows let Claude run many agents at once for a big job: they get a lot done, and they can use a lot of your plan in one go, so each workflow option here is worth choosing on purpose. Below them, background agents, and what skills and your own automations (hooks) are allowed to do.',
+                 'Los flujos de trabajo dejan que Claude ponga a trabajar muchos agentes a la vez en una tarea grande: sacan mucho trabajo adelante, y pueden gastar mucho plan de golpe, así que conviene elegir a propósito cada opción de flujos de aquí. Debajo, los agentes en segundo plano, y qué pueden hacer las skills y tus propias automatizaciones (hooks).'),
     'fields' => [
       ['key' => 'enableWorkflows', 'type' => 'bool',
        'label' => t('Workflows', 'Flujos de trabajo'),
@@ -6733,6 +6733,14 @@ $cc_fields = [
        'label' => t('The word ultracode starts one', 'La palabra ultracode lanza uno'),
        'help'  => t('Whether writing the word ultracode in a message starts a workflow. Set it to No if you want to be able to write the word without starting one. Switched on by default.',
                     'Si escribir la palabra ultracode en un mensaje lanza un flujo de trabajo. Ponlo en No si quieres poder escribir la palabra sin lanzar uno. Activado de fábrica.')],
+      ['key' => 'disableAgentView', 'type' => 'bool',
+       'labels' => [
+         'true'  => t('Yes -- turn them off', 'Sí -- desactivarlos'),
+         'false' => t('No (the same as unset)', 'No (igual que sin definir)'),
+       ],
+       'label' => t('Turn off background agents', 'Desactivar los agentes en segundo plano'),
+       'help'  => t('Background agents are sessions you send off to work on their own and follow from one screen: claude agents, --bg and /background. Yes turns all of that off. This plugin\'s Remote Control does not use them.',
+                    'Los agentes en segundo plano son sesiones que mandas a trabajar por su cuenta y sigues desde una sola pantalla: claude agents, --bg y /background. Sí lo desactiva todo. El Control Remoto de este plugin no los usa.')],
       ['key' => 'disableBundledSkills', 'type' => 'bool',
        'label' => t('Turn off built-in skills', 'Desactivar las skills de fábrica'),
        'help'  => t('Turns off the skills and workflows that come with Claude Code.',
@@ -6913,8 +6921,8 @@ $cc_fields = [
   ],
   [
     'title' => t('Git', 'Git'),
-    'help'  => t('The signature Claude Code leaves on the commits and pull requests it writes for you.',
-                 'La firma que Claude Code deja en los commits y pull requests que escribe por ti.'),
+    'help'  => t('The signature Claude Code leaves on the commits and pull requests it writes for you, and whether it brings its own instructions for writing them.',
+                 'La firma que Claude Code deja en los commits y pull requests que escribe por ti, y si aporta sus propias instrucciones para escribirlos.'),
     'fields' => [
       // No signature is an empty string, which is not the same as unset
       // (unset means Claude Code's own signature). Earlier versions of this
@@ -6936,6 +6944,14 @@ $cc_fields = [
        'label' => t('Include the session link', 'Incluir el enlace de la sesión'),
        'help'  => t('Whether commits made from Remote Control carry a link back to the claude.ai session that produced them. Set it to No to keep that out of a public repository.',
                     'Si los commits hechos desde el Control Remoto llevan un enlace a la sesión de claude.ai que los produjo. Ponlo en No para que eso no acabe en un repositorio público.')],
+      ['key' => 'includeGitInstructions', 'type' => 'bool',
+       'labels' => [
+         'true'  => t('Yes (the same as unset)', 'Sí (igual que sin definir)'),
+         'false' => t('No -- leave them out', 'No -- dejarlas fuera'),
+       ],
+       'label' => t('Claude Code\'s own git instructions', 'Instrucciones de git de Claude Code'),
+       'help'  => t('Claude Code gives Claude its own instructions for writing commits and pull requests, and a snapshot of the repository\'s git status when a conversation starts. No leaves both out, for when you work with git skills of your own. Unset, both are included.',
+                    'Claude Code le da a Claude sus propias instrucciones para escribir commits y pull requests, y una foto del estado de git del repositorio al empezar cada conversación. No deja fuera las dos cosas, para cuando trabajas con skills de git propias. Sin definir, se incluyen las dos.')],
     ],
   ],
   [
@@ -6954,10 +6970,39 @@ $cc_fields = [
        'label' => t('Verbose output', 'Salida detallada'),
        'help'  => t('Shows everything Claude does in full detail, instead of summarising each action in a single line.',
                     'Muestra con todo detalle cada cosa que hace Claude, en vez de resumirla en una sola línea.')],
+      ['key' => 'viewMode', 'type' => 'select', 'options' => ['default', 'verbose', 'focus'],
+       'labels' => [
+         'default' => t('Normal -- tool output shortened', 'Normal -- salida de herramientas recortada'),
+         'verbose' => t('Detailed -- tool output in full', 'Detallada -- salida de herramientas completa'),
+         'focus'   => t('Focus -- your message, one line per step, and the answer', 'Enfocada -- tu mensaje, una línea por paso, y la respuesta'),
+       ],
+       'label' => t('Starting view', 'Vista al empezar'),
+       'help'  => t('The view every session starts in. Focus shows only your last message, a one-line summary of each step with how many lines it changed, and the final answer; it needs the fullscreen renderer below. When set, this wins over Verbose output above and over the last /focus you chose.',
+                    'La vista con la que empieza cada sesión. Enfocada muestra solo tu último mensaje, un resumen de una línea por paso con cuántas líneas cambió, y la respuesta final; necesita el renderizador de pantalla completa de abajo. Si la defines, manda sobre la Salida detallada de arriba y sobre el último /focus que eligieras.')],
+      ['key' => 'tui', 'type' => 'select', 'options' => ['default', 'fullscreen'],
+       'labels' => [
+         'default'    => t('Classic', 'Clásico'),
+         'fullscreen' => t('Fullscreen -- no flicker, scrollable history', 'Pantalla completa -- sin parpadeo, historial desplazable'),
+       ],
+       'label' => t('Renderer', 'Renderizador'),
+       'help'  => t('How Claude Code draws itself in the terminal: the classic way, or fullscreen, which does not flicker and keeps a history you can scroll. Unset, Claude Code picks one for you. /tui fullscreen or /tui default switches it from inside a session and saves it here.',
+                    'Cómo se dibuja Claude Code en la terminal: a la manera clásica, o a pantalla completa, que no parpadea y guarda un historial que puedes desplazar. Sin definir, Claude Code elige por ti. /tui fullscreen o /tui default lo cambian desde dentro de una sesión y lo guardan aquí.')],
       ['key' => 'spinnerTipsEnabled', 'type' => 'bool',
        'label' => t('Tips while working', 'Consejos mientras trabaja'),
        'help'  => t('The little tips that appear next to the "working" spinner while you wait. Switched on by default.',
                     'Los consejos que van apareciendo junto al indicador de «trabajando» mientras esperas. Activado de fábrica.')],
+      ['key' => 'prefersReducedMotion', 'type' => 'bool',
+       'labels' => [
+         'true'  => t('Yes -- reduce them', 'Sí -- reducirlas'),
+         'false' => t('No (the same as unset)', 'No (igual que sin definir)'),
+       ],
+       'label' => t('Reduce animations', 'Reducir animaciones'),
+       'help'  => t('Turns down or off the spinner, shimmer and flash animations while Claude works. Unset, they are shown.',
+                    'Reduce o quita las animaciones del indicador de trabajo, los brillos y los destellos mientras Claude trabaja. Sin definir, se muestran.')],
+      ['key' => 'maxProseWidth', 'type' => 'number', 'min' => 40,
+       'label' => t('Maximum text width (columns)', 'Ancho máximo del texto (columnas)'),
+       'help'  => t('Keeps Claude\'s paragraphs, headings and lists within this many columns, so lines stay readable in a very wide terminal such as a maximised browser window. Tables and code keep the full width. At least 40; unset, text runs to the edge of the terminal.',
+                    'Mantiene los párrafos, títulos y listas de Claude dentro de este número de columnas, para que las líneas se lean bien en una terminal muy ancha, como una ventana del navegador maximizada. Las tablas y el código siguen usando todo el ancho. Como mínimo 40; sin definir, el texto llega hasta el borde de la terminal.')],
       ['key' => 'showTurnDuration', 'type' => 'bool',
        'label' => t('Show how long it took', 'Mostrar cuánto ha tardado'),
        'help'  => t('The duration shown under each answer. Set it to No to hide it.',
