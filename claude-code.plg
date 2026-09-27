@@ -6525,7 +6525,7 @@ if ($rc_owner === '') {
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeConfig.page">
-<SHA256>070620c9952c3962029dab86ddcebcbe29d46246e3fc918958e0cf62c421b686</SHA256>
+<SHA256>6e389d34e7ff3f565707a3ab3ccbb7b391b7bbfcab556303f0cbc0a00f0f33cc</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:4"
@@ -6649,9 +6649,14 @@ $cc_fields = [
        'help'  => t('Shows a readable summary of Claude\'s reasoning while it works, instead of a collapsed line. It changes nothing about how it thinks, only what you get to see.',
                     'Muestra un resumen legible del razonamiento de Claude mientras trabaja, en vez de una línea plegada. No cambia nada de cómo piensa, solo lo que ves.')],
       ['key' => 'language', 'type' => 'choice',
-       'options' => ['spanish', 'english', 'catalan', 'galician', 'basque', 'portuguese', 'french', 'italian', 'german', 'dutch', 'japanese', 'chinese', 'korean'],
+       'options' => ['European Spanish (Spain)', 'spanish', 'english', 'catalan', 'galician', 'basque', 'portuguese', 'french', 'italian', 'german', 'dutch', 'japanese', 'chinese', 'korean'],
        'labels' => [
-         'spanish' => t('Spanish', 'Español'), 'english' => t('English', 'Inglés'), 'catalan' => t('Catalan', 'Catalán'),
+         // The value goes into Claude's instructions word for word ("Always
+         // respond in ..."), so a variant can be named. Voice dictation only
+         // knows "spanish" and falls back to English for this one; that only
+         // matters where someone dictates in a terminal on this server.
+         'European Spanish (Spain)' => t('Spanish (Spain)', 'Español de España'),
+         'spanish' => t('Spanish (no variant fixed)', 'Español (sin fijar variante)'), 'english' => t('English', 'Inglés'), 'catalan' => t('Catalan', 'Catalán'),
          'galician' => t('Galician', 'Gallego'), 'basque' => t('Basque', 'Euskera'), 'portuguese' => t('Portuguese', 'Portugués'),
          'french' => t('French', 'Francés'), 'italian' => t('Italian', 'Italiano'), 'german' => t('German', 'Alemán'),
          'dutch' => t('Dutch', 'Neerlandés'), 'japanese' => t('Japanese', 'Japonés'), 'chinese' => t('Chinese', 'Chino'),
