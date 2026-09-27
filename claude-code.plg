@@ -4954,7 +4954,7 @@ echo json_encode($out);
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-config.php" Mode="0644">
-<SHA256>03ce850da047728b7bab3b219069cdd449abc8454b1aa25770f6592364333b5e</SHA256>
+<SHA256>b77563f71bebe0fbaa8e10768f1a9246aa9a579f36d8c31ff2bb8c44540dcf3e</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -5128,6 +5128,19 @@ if (isset($_POST['raw'])) {
             }
         }
         cc_apply($data, $key, $value);
+    }
+    // The levels /effort saved per model win over the top-level effortLevel,
+    // so the form offers to remove them. Model names carry dashes and dots,
+    // which a dotted key cannot address, so this is its own request field.
+    // Only the level goes: a per-model maxEffortLevel stays, and an entry
+    // left empty is dropped the way cc_apply drops an empty object.
+    if (($_POST['clear_model_effort'] ?? '') === '1' && is_array($data['modelSettings'] ?? null)) {
+        foreach ($data['modelSettings'] as $model => $entry) {
+            if (!is_array($entry)) continue;
+            unset($data['modelSettings'][$model]['effortLevel']);
+            if (!$data['modelSettings'][$model]) unset($data['modelSettings'][$model]);
+        }
+        if (!$data['modelSettings']) unset($data['modelSettings']);
     }
 }
 
@@ -6486,7 +6499,7 @@ if ($rc_owner === '') {
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeConfig.page">
-<SHA256>a82963309d767fc2bd430e6bcadb977c37330840f42f8a1af13dd1571f784cb9</SHA256>
+<SHA256>12c99d332501f1f822719779cf5311128c75258073da19d03ac700be3438be24</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:4"
@@ -6508,20 +6521,59 @@ Tag="sliders"
 //   bool   three states: unset, true, false. Unset is not the same as false
 //          for most of these keys, so it has to be expressible.
 //   select one of a fixed list, or unset
+//   choice a list plus "Other...", which opens a text box -- for keys where
+//          any name is accepted but a handful cover almost everyone (models,
+//          output styles). 'empty' adds an option that writes "", which is
+//          not the same as unset for the attribution keys.
 //   text   free text, unset when empty
 //   number whole number, unset when empty
 //   lines  array of strings, one per line
 //   kv     object of NAME=value lines
+//   statusline  the command of a {"type":"command"} status line; the object's
+//          other fields (padding, refreshInterval...) are left as they are
+//
+// Two optional entries deal with what is already in the file:
+//   labels  what an option reads as, when its raw value says little
+//   legacy  values earlier versions of this tab wrote, which Claude Code does
+//           not accept, keyed by their JSON: shown already corrected, and
+//           written corrected on the next save
+// A value no field type can show -- someone's hand edit, or a key whose shape
+// changed -- is never flattened into the field. The field says so, and the
+// save leaves that key exactly as it is in the file.
+//
+// Time zones come from the list Unraid's own Date and Time page uses
+// (timezones.key, "Europe/Paris|(UTC+01:00) Brussels, Copenhagen, Madrid,
+// Paris"), so the choice reads the same here as there. Every key in it is an
+// IANA name, which is what Claude Code expects.
+$cc_zones = [];
+foreach ((@file('/usr/local/emhttp/webGui/include/timezones.key', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: []) as $cc_line) {
+    $cc_pair = explode('|', $cc_line, 2);
+    $cc_zones[$cc_pair[0]] = $cc_pair[1] ?? $cc_pair[0];
+}
+if (!$cc_zones) foreach (DateTimeZone::listIdentifiers() as $cc_line) $cc_zones[$cc_line] = $cc_line;
 $cc_fields = [
   [
     'title' => t('Model and responses', 'Modelo y respuestas'),
     'help'  => t('Most of these apply as soon as you save, even to a session you already have open. Three of them -- the model, the effort level and the output style -- only take effect the next time you start a session, not the one that is already running.',
                  'La mayoría se aplican en cuanto guardas, aunque tengas una sesión abierta. Tres de ellos -- el modelo, el nivel de esfuerzo y el estilo de respuesta -- solo se aplican a partir de la siguiente sesión que abras, no a la que ya está abierta.'),
     'fields' => [
-      ['key' => 'model', 'type' => 'text', 'list' => ['default', 'sonnet', 'opus', 'haiku', 'opusplan', 'claude-sonnet-5', 'claude-opus-5', 'claude-haiku-4-5'],
+      ['key' => 'model', 'type' => 'choice',
+       'options' => ['default', 'best', 'fable', 'opus', 'sonnet', 'haiku', 'opusplan', 'opus[1m]', 'sonnet[1m]',
+                     'claude-fable-5-1', 'claude-opus-5-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5'],
+       'labels' => [
+         'default'    => t('default -- whatever your account uses', 'default -- el que use tu cuenta'),
+         'best'       => t('best -- Fable where you have it, otherwise Opus', 'best -- Fable si lo tienes, si no Opus'),
+         'fable'      => t('fable -- the latest Fable', 'fable -- el Fable más reciente'),
+         'opus'       => t('opus -- the latest Opus', 'opus -- el Opus más reciente'),
+         'sonnet'     => t('sonnet -- the latest Sonnet', 'sonnet -- el Sonnet más reciente'),
+         'haiku'      => t('haiku -- the latest Haiku', 'haiku -- el Haiku más reciente'),
+         'opusplan'   => t('opusplan -- Opus to plan, Sonnet to carry it out', 'opusplan -- Opus para planificar, Sonnet para ejecutar'),
+         'opus[1m]'   => t('opus[1m] -- Opus with a 1M-token context', 'opus[1m] -- Opus con contexto de 1M de tokens'),
+         'sonnet[1m]' => t('sonnet[1m] -- Sonnet with a 1M-token context', 'sonnet[1m] -- Sonnet con contexto de 1M de tokens'),
+       ],
        'label' => t('Model', 'Modelo'),
-       'help'  => t('The model every new session starts with. You can type a short name like sonnet or opus, or a full model name. Leave it empty to use whatever your account uses by default.',
-                    'El modelo con el que arrancará cada sesión nueva. Puedes escribir un nombre corto, como sonnet u opus, o el nombre completo del modelo. Si lo dejas vacío, se usará el que tengas configurado por defecto en tu cuenta.')],
+       'help'  => t('The model every new session starts with. The short names (opus, sonnet...) always point at the newest version of that model, so they move forward on their own when a new one comes out; a full name such as claude-opus-5-5 stays exactly on that version. "Other" lets you type any model name that is not in the list. Leave it unset to use whatever your account uses by default.',
+                    'El modelo con el que arrancará cada sesión nueva. Los nombres cortos (opus, sonnet...) apuntan siempre a la versión más nueva de ese modelo, así que avanzan solos cuando sale una nueva; un nombre completo como claude-opus-5-5 se queda justo en esa versión. «Otro» te deja escribir cualquier modelo que no esté en la lista. Déjalo sin definir para usar el que tenga tu cuenta por defecto.')],
       ['key' => 'fallbackModel', 'type' => 'lines',
        'label' => t('Fallback models', 'Modelos de respaldo'),
        'help'  => t('One per line. If the model above is not available right now (for example, because too many people are using it), Claude tries these instead, in the order you list them. Leave it empty and Claude will simply wait for the model above to be free again.',
@@ -6530,18 +6582,33 @@ $cc_fields = [
        'label' => t('Effort level', 'Nivel de esfuerzo'),
        'help'  => t('How hard Claude thinks before answering, by default. Higher means it reasons more thoroughly through difficult steps, but takes longer and uses more of your plan; lower answers faster and uses less, at the cost of thinking less on hard steps. If you are not sure, leave it empty -- Claude Code already picks a sensible level on its own.',
                     'Cuánto se «piensa» una respuesta antes de darla. Más alto significa que Claude razona más a fondo los pasos difíciles, pero tarda más y gasta más de tu plan; más bajo responde antes y gasta menos, a cambio de pensar menos en esos pasos. Si no sabes cuál elegir, déjalo vacío: Claude Code ya elige por su cuenta un nivel que funciona bien en la mayoría de los casos.')],
-      ['key' => 'outputStyle', 'type' => 'text',
+      ['key' => 'outputStyle', 'type' => 'choice',
+       'options' => ['Proactive', 'Concise', 'Explanatory', 'Learning'],
+       'labels' => [
+         'Proactive'   => t('Proactive -- gets on with it instead of asking about routine decisions', 'Proactive -- se pone a trabajar en vez de preguntar las decisiones rutinarias'),
+         'Concise'     => t('Concise -- the result first, no preamble or recap', 'Concise -- el resultado primero, sin preámbulos ni resúmenes'),
+         'Explanatory' => t('Explanatory -- explains the choices behind the code it writes', 'Explanatory -- explica las decisiones detrás del código que escribe'),
+         'Learning'    => t('Learning -- explains, and leaves small pieces for you to write', 'Learning -- explica, y te deja pequeñas partes para que las escribas tú'),
+       ],
        'label' => t('Output style', 'Estilo de respuesta'),
-       'help'  => t('The name of a response style -- one that comes built into Claude Code, or one you created yourself. It changes the tone and the instructions Claude follows while it works.',
-                    'El nombre de un estilo de respuesta: uno de los que trae Claude Code de fábrica, o uno que hayas creado tú. Cambia el tono y las instrucciones con las que trabaja Claude.')],
+       'help'  => t('Changes the tone and the instructions Claude follows while it works. Unset is Claude Code\'s normal style. "Other" is for a style you created yourself: type its name exactly, capitals included -- a name that does not match exactly silently falls back to the normal style.',
+                    'Cambia el tono y las instrucciones con las que trabaja Claude. Sin definir es el estilo normal de Claude Code. «Otro» es para un estilo que hayas creado tú: escribe su nombre exacto, mayúsculas incluidas -- un nombre que no coincida exactamente vuelve sin avisar al estilo normal.')],
       ['key' => 'alwaysThinkingEnabled', 'type' => 'bool',
        'label' => t('Extended thinking', 'Pensamiento extendido'),
        'help'  => t('Makes Claude "think out loud" before answering, on every message, on models that support it -- this is switched on by default on those models. Only set this to No if you would rather have quicker, more direct answers even on hard problems, in exchange for using fewer tokens.',
                     'Hace que Claude «piense en voz alta» antes de responder, en todos los mensajes, en los modelos que lo permiten -- está activado de fábrica en esos modelos. Ponlo en No solo si prefieres respuestas más rápidas y directas, incluso en problemas difíciles, a cambio de gastar menos tokens.')],
-      ['key' => 'language', 'type' => 'text',
+      ['key' => 'language', 'type' => 'choice',
+       'options' => ['spanish', 'english', 'catalan', 'galician', 'basque', 'portuguese', 'french', 'italian', 'german', 'dutch', 'japanese', 'chinese', 'korean'],
+       'labels' => [
+         'spanish' => t('Spanish', 'Español'), 'english' => t('English', 'Inglés'), 'catalan' => t('Catalan', 'Catalán'),
+         'galician' => t('Galician', 'Gallego'), 'basque' => t('Basque', 'Euskera'), 'portuguese' => t('Portuguese', 'Portugués'),
+         'french' => t('French', 'Francés'), 'italian' => t('Italian', 'Italiano'), 'german' => t('German', 'Alemán'),
+         'dutch' => t('Dutch', 'Neerlandés'), 'japanese' => t('Japanese', 'Japonés'), 'chinese' => t('Chinese', 'Chino'),
+         'korean' => t('Korean', 'Coreano'),
+       ],
        'label' => t('Response language', 'Idioma de las respuestas'),
-       'help'  => t('The name of a language, such as spanish or english. Claude will answer you in that language.',
-                    'El nombre de un idioma, por ejemplo español o inglés. Claude te responderá en ese idioma.')],
+       'help'  => t('Claude will answer you in this language, and name sessions in it. Unset, it follows the language you write in. "Other" takes any language name, written in English (for example swedish).',
+                    'Claude te responderá en este idioma, y pondrá los nombres de las sesiones en él. Sin definir, sigue el idioma en el que le escribas. «Otro» acepta cualquier idioma, escrito en inglés (por ejemplo swedish).')],
       ['key' => 'autoCompactEnabled', 'type' => 'bool',
        'label' => t('Auto-compact conversation', 'Compactar conversación automáticamente'),
        'help'  => t('When a conversation runs long, Claude summarises the older part of it by itself so it can keep working without running out of room to remember things. Switched on by default.',
@@ -6563,12 +6630,12 @@ $cc_fields = [
                     'Los consejos que van apareciendo junto al indicador de «trabajando» mientras esperas. Activado de fábrica.')],
       ['key' => 'autoContinueAtUsageLimit', 'type' => 'bool',
        'label' => t('Wait for the limit to reset', 'Esperar a que se reinicie el límite'),
-       'help'  => t('When you run out of plan usage in the middle of a job, Claude waits until your limit resets and carries on by itself instead of stopping there. Useful on a server you are not sitting in front of.',
-                    'Cuando te quedas sin uso del plan a mitad de una tarea, Claude espera a que se reinicie tu límite y continúa por su cuenta en vez de quedarse parado. Útil en un servidor que no tienes delante.')],
-      ['key' => 'autoCompactWindow', 'type' => 'number',
-       'label' => t('When to compact', 'Cuándo compactar'),
-       'help'  => t('How full the conversation gets before Claude summarises the older part of it. Leave it empty unless you have a reason: compacting sooner means doing it more often and with a coarser summary.',
-                    'Cuánto se llena la conversación antes de que Claude resuma la parte más antigua. Déjalo vacío salvo que tengas un motivo: compactar antes significa hacerlo más veces y con un resumen más basto.')],
+       'help'  => t('When you run out of plan usage in the middle of a job, Claude waits until your limit resets and carries on by itself instead of stopping there. Useful on a server you are not sitting in front of. Switched on by default.',
+                    'Cuando te quedas sin uso del plan a mitad de una tarea, Claude espera a que se reinicie tu límite y continúa por su cuenta en vez de quedarse parado. Útil en un servidor que no tienes delante. Activado de fábrica.')],
+      ['key' => 'autoCompactWindow', 'type' => 'number', 'min' => 100000, 'max' => 1000000,
+       'label' => t('When to compact (tokens)', 'Cuándo compactar (tokens)'),
+       'help'  => t('How full the conversation gets, in tokens, before Claude summarises the older part of it: between 100000 and 1000000, and never more than the model can hold. Leave it empty unless you have a reason -- Claude Code already picks a size that suits each model, and compacting sooner means doing it more often and with a coarser summary.',
+                    'Cuánto se llena la conversación, en tokens, antes de que Claude resuma la parte más antigua: entre 100000 y 1000000, y nunca más de lo que cabe en el modelo. Déjalo vacío salvo que tengas un motivo -- Claude Code ya elige un tamaño adecuado para cada modelo, y compactar antes significa hacerlo más veces y con un resumen más basto.')],
       ['key' => 'showThinkingSummaries', 'type' => 'bool',
        'label' => t('Show what it is thinking', 'Mostrar lo que va pensando'),
        'help'  => t('Shows a readable summary of Claude\'s reasoning while it works, instead of a collapsed line. It changes nothing about how it thinks, only what you get to see.',
@@ -6583,8 +6650,8 @@ $cc_fields = [
                     'Un techo fijo a cuánto puede pensar Claude, pida lo que pida la sesión. Cuidado con este: no es un ahorro, es un límite de capacidad -- un problema difícil que necesitaba pensar más simplemente se responderá pensando menos. Déjalo vacío salvo que estés limitando el gasto a propósito y aceptes peores respuestas en los pasos difíciles.')],
       ['key' => 'fastMode', 'type' => 'bool',
        'label' => t('Fast mode', 'Modo rápido'),
-       'help'  => t('Runs the same model noticeably faster where it is available (Opus 5 and 4.8). It is the same intelligence, not less -- what changes is the price: fast mode is charged at a premium rate, so it eats through your plan faster. Leave it unset unless speed is worth that to you.',
-                    'Ejecuta el mismo modelo bastante más rápido donde está disponible (Opus 5 y 4.8). Es la misma inteligencia, no menos -- lo que cambia es el precio: el modo rápido se cobra a tarifa premium, así que consume tu plan más deprisa. Déjalo sin definir salvo que la velocidad te compense.')],
+       'help'  => t('Runs the same model noticeably faster where it is available (Opus 5.5, Opus 5 and Opus 4.8). It is the same intelligence, not less -- what changes is the price: fast mode is charged at a premium rate, so it eats through your plan faster. Leave it unset unless speed is worth that to you.',
+                    'Ejecuta el mismo modelo bastante más rápido donde está disponible (Opus 5.5, Opus 5 y Opus 4.8). Es la misma inteligencia, no menos -- lo que cambia es el precio: el modo rápido se cobra a tarifa premium, así que consume tu plan más deprisa. Déjalo sin definir salvo que la velocidad te compense.')],
       ['key' => 'fastModePerSessionOptIn', 'type' => 'bool',
        'label' => t('Ask for fast mode each session', 'Pedir el modo rápido en cada sesión'),
        'help'  => t('Makes fast mode something you turn on session by session instead of it being on by default. A sensible companion to the setting above if you only want it now and then.',
@@ -6598,9 +6665,17 @@ $cc_fields = [
     'fields' => [
       ['key' => 'permissions.defaultMode', 'type' => 'select',
        'options' => ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'],
+       'labels' => [
+         'default'           => t('default -- asks before anything but reading', 'default -- pregunta antes de todo salvo leer'),
+         'acceptEdits'       => t('acceptEdits -- also edits files without asking', 'acceptEdits -- además edita archivos sin preguntar'),
+         'plan'              => t('plan -- shows a plan and waits for your approval', 'plan -- enseña un plan y espera tu aprobación'),
+         'auto'              => t('auto -- does everything, with safety checks in the background', 'auto -- lo hace todo, con comprobaciones de seguridad de fondo'),
+         'dontAsk'           => t('dontAsk -- refuses whatever it would have asked about', 'dontAsk -- rechaza lo que habría preguntado'),
+         'bypassPermissions' => t('bypassPermissions -- asks about nothing at all', 'bypassPermissions -- no pregunta absolutamente nada'),
+       ],
        'label' => t('Default permission mode', 'Modo de permisos por defecto'),
-       'help'  => t('The mode every new session starts in. default asks before doing anything other than reading; acceptEdits also lets Claude edit files without asking; plan makes Claude show you a plan and wait for your approval before changing anything; bypassPermissions does not ask about anything at all -- worth thinking twice about if this server can be reached from outside your network.',
-                    'El modo con el que arranca cada sesión nueva. default pregunta antes de hacer cualquier cosa que no sea leer; acceptEdits deja además que Claude edite archivos sin preguntar; plan hace que Claude te enseñe un plan y espere tu aprobación antes de cambiar nada; bypassPermissions no pregunta absolutamente nada -- conviene pensárselo dos veces si este servidor se puede alcanzar desde fuera de tu red.')],
+       'help'  => t('The mode every new session starts in. dontAsk never stops to ask: whatever it would have asked about is simply refused, while reading and the actions you have already allowed still go ahead. bypassPermissions does not ask about anything at all -- worth thinking twice about if this server can be reached from outside your network.',
+                    'El modo con el que arranca cada sesión nueva. dontAsk nunca se para a preguntar: lo que habría preguntado simplemente se rechaza, mientras que leer y las acciones que ya hayas permitido siguen adelante. bypassPermissions no pregunta absolutamente nada -- conviene pensárselo dos veces si este servidor se puede alcanzar desde fuera de tu red.')],
       ['key' => 'permissions.allow', 'type' => 'lines',
        'label' => t('Always allow', 'Permitir siempre'),
        'help'  => t('One rule per line. Anything that matches these, Claude does straight away, without asking you.',
@@ -6621,14 +6696,22 @@ $cc_fields = [
        'label' => t('Do not read outside the working folders', 'No leer fuera de las carpetas de trabajo'),
        'help'  => t('Makes Claude refuse to read files outside the folder it is working in and the extra ones listed above. Worth turning on when sessions start from the root of the server, where everything is within reach by default.',
                     'Hace que Claude se niegue a leer archivos fuera de la carpeta en la que trabaja y de las adicionales de arriba. Merece la pena activarlo cuando las sesiones arrancan desde la raíz del servidor, donde por defecto todo queda a su alcance.')],
-      ['key' => 'permissions.disableBypassPermissionsMode', 'type' => 'bool',
+      // Both keys take the one string "disable", not a boolean. Earlier
+      // versions of this tab wrote true, which Claude Code does not document
+      // for either; a true left in the file is read as the "forbidden" it was
+      // meant to be, and written back as "disable".
+      ['key' => 'permissions.disableBypassPermissionsMode', 'type' => 'select', 'options' => ['disable'],
+       'labels' => ['disable' => t('Forbidden', 'Prohibido')],
+       'legacy' => ['true' => 'disable', 'false' => null],
        'label' => t('Forbid the no-questions mode', 'Prohibir el modo sin preguntas'),
-       'help'  => t('Stops anyone from putting a session into the mode where Claude stops asking for permission at all. On a server that runs as root this is a reasonable thing to forbid.',
-                    'Impide que nadie ponga una sesión en el modo en el que Claude deja de pedir permiso para todo. En un servidor que corre como root, es razonable prohibirlo.')],
-      ['key' => 'disableAutoMode', 'type' => 'bool',
+       'help'  => t('Stops anyone from putting a session into the mode where Claude stops asking for permission at all (bypassPermissions, or the --dangerously-skip-permissions flag). On a server that runs as root this is a reasonable thing to forbid.',
+                    'Impide que nadie ponga una sesión en el modo en el que Claude deja de pedir permiso para todo (bypassPermissions, o la opción --dangerously-skip-permissions). En un servidor que corre como root, es razonable prohibirlo.')],
+      ['key' => 'disableAutoMode', 'type' => 'select', 'options' => ['disable'],
+       'labels' => ['disable' => t('Removed', 'Quitado')],
+       'legacy' => ['true' => 'disable', 'false' => null],
        'label' => t('Remove automatic mode', 'Quitar el modo automático'),
-       'help'  => t('Automatic mode lets Claude decide by itself which ordinary actions are safe enough not to ask about. Setting this to Yes takes that mode off the list entirely.',
-                    'El modo automático deja que Claude decida por su cuenta qué acciones corrientes son lo bastante seguras como para no preguntar. Ponerlo en Sí quita ese modo de la lista por completo.')],
+       'help'  => t('Automatic mode lets Claude decide by itself which ordinary actions are safe enough not to ask about. Removed takes that mode off the list entirely, and a session that would have started in it starts in the normal mode instead.',
+                    'El modo automático deja que Claude decida por su cuenta qué acciones corrientes son lo bastante seguras como para no preguntar. Quitado lo saca de la lista por completo, y una sesión que habría arrancado en ese modo arranca en el modo normal.')],
       ['key' => 'autoMode.classifyAllShell', 'type' => 'bool',
        'label' => t('Check every command in automatic mode', 'Revisar todos los comandos en modo automático'),
        'help'  => t('In automatic mode, sends every single shell command to be judged, instead of only the ones that are not obviously harmless. Slower, and stricter.',
@@ -6660,18 +6743,34 @@ $cc_fields = [
        'label' => t('Recap when you come back', 'Resumen al volver'),
        'help'  => t('The summary of what happened while you were away, shown when you return to the session. Set it to No to skip it.',
                     'El resumen de lo que ha pasado mientras no estabas, que se muestra al volver a la sesión. Ponlo en No para saltártelo.')],
-      ['key' => 'crossSessionInbound', 'type' => 'select', 'options' => ['accept', 'notice', 'refuse'],
+      // "notice" was this tab's name for what Claude Code calls "hold".
+      ['key' => 'crossSessionInbound', 'type' => 'select', 'options' => ['accept', 'hold', 'refuse'],
+       'labels' => [
+         'accept' => t('Deliver them', 'Entregarlos'),
+         'hold'   => t('Only tell me one arrived', 'Solo avisarme de que ha llegado uno'),
+         'refuse' => t('Drop them', 'Descartarlos'),
+       ],
+       'legacy' => ['"notice"' => 'hold'],
        'label' => t('Messages from your other sessions', 'Mensajes de tus otras sesiones'),
-       'help'  => t('Whether a session here accepts messages sent by your other Claude sessions: accept delivers them, notice only tells you one arrived, refuse turns it off. Worth thinking about when you have sessions running on more than one machine.',
-                    'Si una sesión de aquí acepta mensajes enviados por tus otras sesiones de Claude: accept los entrega, notice solo te avisa de que ha llegado uno, refuse lo desactiva. Merece pensarlo cuando tienes sesiones en más de una máquina.')],
+       'help'  => t('What a session here does with messages sent by your other Claude sessions. Unset, Claude Code decides message by message. Worth thinking about when you have sessions running on more than one machine.',
+                    'Qué hace una sesión de aquí con los mensajes que le mandan tus otras sesiones de Claude. Sin definir, Claude Code lo decide mensaje a mensaje. Merece pensarlo cuando tienes sesiones en más de una máquina.')],
       ['key' => 'isolatePeerMachines', 'type' => 'bool',
        'label' => t('Ask before writing to another machine', 'Preguntar antes de escribir a otra máquina'),
        'help'  => t('Makes Claude ask you first before messaging one of your sessions running on a different machine.',
                     'Hace que Claude te pregunte antes de escribir a una de tus sesiones que corre en otra máquina.')],
-      ['key' => 'askUserQuestionTimeout', 'type' => 'number',
-       'label' => t('Carry on after waiting (seconds)', 'Continuar tras esperar (segundos)'),
-       'help'  => t('How long a question waits for you before Claude carries on with its best guess. Leave it empty and it waits for you indefinitely.',
-                    'Cuánto espera una pregunta a que contestes antes de que Claude siga con su mejor suposición. Si lo dejas vacío, espera indefinidamente.')],
+      // Claude Code takes one of four fixed durations, not a number of
+      // seconds; earlier versions of this tab wrote seconds.
+      ['key' => 'askUserQuestionTimeout', 'type' => 'select', 'options' => ['60s', '5m', '10m', 'never'],
+       'labels' => [
+         '60s'   => t('After 1 minute', 'Tras 1 minuto'),
+         '5m'    => t('After 5 minutes', 'Tras 5 minutos'),
+         '10m'   => t('After 10 minutes', 'Tras 10 minutos'),
+         'never' => t('Never -- wait for me', 'Nunca -- esperarme'),
+       ],
+       'legacy' => ['60' => '60s', '300' => '5m', '600' => '10m'],
+       'label' => t('Carry on after a question waits', 'Continuar si una pregunta espera'),
+       'help'  => t('When Claude asks you something with a list of choices and nobody answers, it carries on after this long with whatever you had already ticked. Unset, it waits for you as long as it takes.',
+                    'Cuando Claude te pregunta algo con una lista de opciones y nadie contesta, sigue pasado este tiempo con lo que ya tuvieras marcado. Sin definir, te espera todo lo que haga falta.')],
     ],
   ],
   [
@@ -6703,11 +6802,16 @@ $cc_fields = [
        'label' => t('Update channel', 'Canal de actualización'),
        'help'  => t('Which releases Claude Code looks for when it checks for updates. latest gives you the newest release as soon as it comes out; stable stays about a week behind and skips releases that turned out to have known problems.',
                     'Qué versiones sigue Claude Code cuando comprueba si hay actualizaciones. latest te da la versión más reciente en cuanto sale; stable va aproximadamente una semana por detrás y se salta las versiones en las que ya se han encontrado fallos.')],
-      ['key' => 'timeZone', 'type' => 'text',
+      // The same list, with the same labels, as Unraid's own Date and Time
+      // page. That list files Madrid under Europe/Paris, so any other valid
+      // zone already in the file (Europe/Madrid, say) is offered by its own
+      // name instead of being flagged as a value the list cannot show.
+      ['key' => 'timeZone', 'type' => 'select', 'options' => array_keys($cc_zones), 'labels' => $cc_zones,
+       'accepts' => function ($zone) { return in_array($zone, DateTimeZone::listIdentifiers(DateTimeZone::ALL_WITH_BC), true); },
        'label' => t('Time zone', 'Zona horaria'),
-       'help'  => t('The time zone you want Claude to use, written as Continent/City -- for example, Europe/Madrid. Leave it empty to use the server\'s own time zone.',
-                    'La zona horaria que quieres que use Claude, escrita como Continente/Ciudad -- por ejemplo, Europe/Madrid. Si lo dejas vacío, se usa la zona horaria del propio servidor.')],
-      ['key' => 'bashOutputMaxChars', 'type' => 'number',
+       'help'  => t('The time zone for the times Claude Code shows. Unset, it uses the server\'s own time zone.',
+                    'La zona horaria de las horas que muestra Claude Code. Sin definir, usa la zona horaria del propio servidor.')],
+      ['key' => 'bashOutputMaxChars', 'type' => 'number', 'min' => 4000, 'max' => 128000,
        'label' => t('Command output limit', 'Límite de salida de comandos'),
        'help'  => t('How much text from a command\'s output Claude sees right away, before it has to go and look for the rest. Some commands print a huge amount of text that rarely matters (long installs, big log files); a lower number stops that from piling up in the conversation for nothing, and Claude can still read the full output afterwards from a file if it genuinely needs to. Default is 30000, and the highest you can set is 128000.',
                     'Cuánto texto de la salida de un comando puede ver Claude de golpe, antes de tener que ir a buscar el resto. Algunos comandos escriben muchísimo texto que casi nunca hace falta entero (instalaciones largas, archivos de registro grandes); un número más bajo evita que ese texto se acumule sin necesidad en la conversación, y si de verdad hace falta más, Claude puede leerlo después desde un archivo. Por defecto son 30000, y el máximo que se puede poner es 128000.')],
@@ -6719,26 +6823,34 @@ $cc_fields = [
        'label' => t('Where automatic memory is kept', 'Dónde se guarda la memoria automática'),
        'help'  => t('The folder holding those notes. There is normally one folder per working directory; setting this puts every session\'s notes in the same place instead. It has to stay inside this plugin\'s appdata folder, which is what makes it survive a reboot -- anything else is refused when you save.',
                     'La carpeta donde están esas notas. Normalmente hay una por carpeta de trabajo; si pones esto, las notas de todas las sesiones van al mismo sitio. Tiene que quedarse dentro de la carpeta appdata de este plugin, que es lo que hace que sobreviva a un reinicio -- cualquier otra cosa se rechaza al guardar.')],
-      ['key' => 'attribution.commit', 'type' => 'text',
+      // No signature is an empty string, which is not the same as unset
+      // (unset means Claude Code's own signature). Earlier versions of this
+      // tab told people to type "none", which Claude Code would have used as
+      // the signature text itself.
+      ['key' => 'attribution.commit', 'type' => 'choice', 'options' => [],
+       'empty' => t('No signature', 'Sin firma'),
+       'legacy' => ['"none"' => ''],
        'label' => t('Signature on commits', 'Firma en los commits'),
-       'help'  => t('The trailer Claude Code adds at the end of a commit it writes. Write your own text, or leave it as the word none to add nothing.',
-                    'La línea que Claude Code añade al final de un commit que escribe. Pon tu propio texto, o escribe none para que no añada nada.')],
-      ['key' => 'attribution.pr', 'type' => 'text',
+       'help'  => t('The line Claude Code adds at the end of a commit it writes. Unset, it adds its own Co-Authored-By line. "Other" lets you write your own text.',
+                    'La línea que Claude Code añade al final de un commit que escribe. Sin definir, añade su propia línea Co-Authored-By. «Otro» te deja escribir tu propio texto.')],
+      ['key' => 'attribution.pr', 'type' => 'choice', 'options' => [],
+       'empty' => t('No signature', 'Sin firma'),
+       'legacy' => ['"none"' => ''],
        'label' => t('Signature on pull requests', 'Firma en los pull requests'),
-       'help'  => t('The same thing for the description of a pull request. The word none removes it.',
-                    'Lo mismo para la descripción de un pull request. La palabra none la quita.')],
+       'help'  => t('The same thing for the description of a pull request. Unset, it adds its own "Generated with Claude Code" line.',
+                    'Lo mismo para la descripción de un pull request. Sin definir, añade su propia línea «Generated with Claude Code».')],
       ['key' => 'attribution.sessionUrl', 'type' => 'bool',
        'label' => t('Include the session link', 'Incluir el enlace de la sesión'),
        'help'  => t('Whether commits made from Remote Control carry a link back to the claude.ai session that produced them. Set it to No to keep that out of a public repository.',
                     'Si los commits hechos desde el Control Remoto llevan un enlace a la sesión de claude.ai que los produjo. Ponlo en No para que eso no acabe en un repositorio público.')],
-      ['key' => 'statusLine', 'type' => 'text',
+      ['key' => 'statusLine', 'type' => 'statusline',
        'label' => t('Status line command', 'Comando de la línea de estado'),
-       'help'  => t('A command of your own whose output is shown as a status line under the prompt. For advanced setups; leave it empty if you do not have one.',
-                    'Un comando tuyo cuya salida se muestra como línea de estado bajo el cursor. Para configuraciones avanzadas; déjalo vacío si no tienes ninguno.')],
+       'help'  => t('A command of your own whose output is shown as a status line under the prompt. For advanced setups; leave it empty if you do not have one. Only the command is edited here: any other status line options already in the file, such as its padding, are kept.',
+                    'Un comando tuyo cuya salida se muestra como línea de estado bajo el cursor. Para configuraciones avanzadas; déjalo vacío si no tienes ninguno. Aquí solo se edita el comando: el resto de opciones de la línea de estado que ya haya en el archivo, como el margen, se conservan.')],
       ['key' => 'enableWorkflows', 'type' => 'bool',
        'label' => t('Workflows', 'Flujos de trabajo'),
-       'help'  => t('Lets Claude orchestrate several agents at once for a big job. It can use a lot of your plan in one go, so it is worth deciding on purpose.',
-                    'Permite que Claude organice varios agentes a la vez para un trabajo grande. Puede gastar bastante plan de golpe, así que conviene decidirlo a propósito.')],
+       'help'  => t('Lets Claude orchestrate several agents at once for a big job. It can use a lot of your plan in one go, so it is worth deciding on purpose. Unset, they are on -- except on the Pro plan, where they are off.',
+                    'Permite que Claude organice varios agentes a la vez para un trabajo grande. Puede gastar bastante plan de golpe, así que conviene decidirlo a propósito. Sin definir, están activados -- salvo en el plan Pro, donde están desactivados.')],
       ['key' => 'disableSkillShellExecution', 'type' => 'bool',
        'label' => t('Stop skills running commands', 'Impedir que las skills ejecuten comandos'),
        'help'  => t('Stops skills and custom commands from running shell commands inline. A sensible lock if you install skills you did not write.',
@@ -6747,10 +6859,17 @@ $cc_fields = [
        'label' => t('Turn off built-in skills', 'Desactivar las skills de fábrica'),
        'help'  => t('Turns off the skills and workflows that come with Claude Code.',
                     'Desactiva las skills y flujos de trabajo que vienen incluidos con Claude Code.')],
-      ['key' => 'feedbackDrafts', 'type' => 'select', 'options' => ['queue', 'discard'],
+      // "queue" and "discard" were this tab's names; Claude Code's are these.
+      ['key' => 'feedbackDrafts', 'type' => 'select', 'options' => ['notify', 'quiet', 'off'],
+       'labels' => [
+         'notify' => t('Draft, and show me a card', 'Redactar, y enseñarme un aviso'),
+         'quiet'  => t('Draft quietly, I will look in /feedback', 'Redactar en silencio, ya miraré en /feedback'),
+         'off'    => t('Do not draft any', 'No redactar ninguno'),
+       ],
+       'legacy' => ['"queue"' => 'notify', '"discard"' => 'off'],
        'label' => t('Feedback drafts', 'Borradores de comentarios'),
-       'help'  => t('What happens to the feedback Claude drafts about itself: queue keeps it for you to review, discard throws it away. Nothing is ever sent without you approving it.',
-                    'Qué pasa con los comentarios que Claude redacta sobre sí mismo: queue los guarda para que los revises, discard los tira. Nunca se envía nada sin que tú lo apruebes.')],
+       'help'  => t('When something goes wrong in a session, Claude can draft a feedback report about it for you to review in /feedback. Nothing is ever sent without you approving it. Unset, it drafts and shows a card.',
+                    'Cuando algo sale mal en una sesión, Claude puede redactar un informe sobre ello para que lo revises en /feedback. Nunca se envía nada sin que tú lo apruebes. Sin definir, lo redacta y te enseña un aviso.')],
     ],
   ],
 ];
@@ -6794,23 +6913,86 @@ function cc_get($settings, $dotted) {
     return $ref;
 }
 
-// Turns a stored value into what the field shows. Everything the form manages
-// is a string, a number, a boolean, a list of strings or a flat object, and a
-// value of any other shape is left to the JSON editor rather than being
-// flattened into a field that could not save it back.
-function cc_field_value($type, $value) {
-    if ($value === null) return '';
-    switch ($type) {
-        case 'bool':   return $value === true ? 'true' : ($value === false ? 'false' : '');
-        case 'number': return is_numeric($value) ? (string)$value : '';
-        case 'lines':  return is_array($value) ? implode("\n", array_filter($value, 'is_scalar')) : '';
-        case 'kv':
-            if (!is_array($value)) return '';
-            $out = [];
-            foreach ($value as $k => $v) if (is_scalar($v)) $out[] = "$k=$v";
-            return implode("\n", $out);
-        default:       return is_scalar($value) ? (string)$value : '';
+// Turns a stored value into what the field shows, as three things:
+//   value  what goes in the field
+//   keep   the value is one this field cannot show. It is not flattened into
+//          something close: the field says what is there, and the save leaves
+//          that key alone unless it is changed on purpose.
+//   was    set when the value is one an earlier version of this tab wrote and
+//          Claude Code does not accept: the field shows it corrected, and the
+//          next save writes the correction.
+function cc_field_state($fd, $value) {
+    $st = ['value' => '', 'keep' => false, 'was' => null];
+    $legacy = $fd['legacy'] ?? [];
+    $json = json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($value !== null && array_key_exists($json, $legacy)) {
+        $st['was'] = $json;
+        $value = $legacy[$json];
     }
+    // A plain string is what earlier versions of this tab wrote for a status
+    // line; it was meant as the command, so it is read as one.
+    if ($fd['type'] === 'statusline' && is_string($value) && $value !== '') {
+        $st['was'] = $json;
+        $value = ['type' => 'command', 'command' => $value];
+    }
+    if ($value === null) return $st;
+    $is_list = function ($v) { return is_array($v) && array_values($v) === $v; };
+    switch ($fd['type']) {
+        case 'bool':
+            if (is_bool($value)) $st['value'] = $value ? 'true' : 'false'; else $st['keep'] = true;
+            break;
+        case 'select':
+            if (is_string($value) && (in_array($value, $fd['options'], true) || (isset($fd['accepts']) && $fd['accepts']($value)))) $st['value'] = $value;
+            else $st['keep'] = true;
+            break;
+        case 'choice':
+            if ($value === '' && isset($fd['empty'])) $st['value'] = '__empty__';
+            elseif (is_string($value) && $value !== '') $st['value'] = $value;
+            else $st['keep'] = true;
+            break;
+        case 'number':
+            if (is_int($value)) $st['value'] = (string)$value; else $st['keep'] = true;
+            break;
+        case 'lines':
+            if ($is_list($value) && count(array_filter($value, 'is_string')) === count($value)) $st['value'] = implode("\n", $value);
+            else $st['keep'] = true;
+            break;
+        case 'kv':
+            if (is_array($value) && !($value && $is_list($value)) && count(array_filter($value, 'is_string')) === count($value)) {
+                $out = [];
+                foreach ($value as $k => $v) $out[] = "$k=$v";
+                $st['value'] = implode("\n", $out);
+            } else {
+                $st['keep'] = true;
+            }
+            break;
+        case 'statusline':
+            if (is_array($value) && ($value['type'] ?? null) === 'command' && is_string($value['command'] ?? null)) $st['value'] = $value['command'];
+            else $st['keep'] = true;
+            break;
+        default:
+            if (is_string($value)) $st['value'] = $value; else $st['keep'] = true;
+    }
+    return $st;
+}
+
+// A stored value as the notes under a field quote it: short enough to read,
+// and exactly what is in the file.
+function cc_quote($json) {
+    // PCRE's /u counts characters, not bytes, without needing mbstring.
+    return preg_replace('/^(.{77}).{4,}$/us', '$1...', $json);
+}
+
+// The effort levels saved per model under modelSettings. /effort writes there
+// since Claude Code 2.1.251, and a level saved there beats the top-level
+// effortLevel in the same file -- so with one present, the Effort level field
+// would otherwise change nothing for that model without saying why.
+function cc_model_efforts($settings) {
+    $out = [];
+    foreach ((array)($settings['modelSettings'] ?? []) as $model => $entry) {
+        if (is_array($entry) && is_string($entry['effortLevel'] ?? null)) $out[$model] = $entry['effortLevel'];
+    }
+    return $out;
 }
 
 // The type of every field, for the browser: it decides there whether a value
@@ -6843,12 +7025,12 @@ foreach ($cc_fields as $cc_g) foreach ($cc_g['fields'] as $cc_fd) $cc_types[$cc_
 <option value=""><?=t('Choose a preset...', 'Elegir un preajuste...')?></option>
 <option value="automatic"><?=t('Automatic', 'Automática')?></option>
 <option value="none"><?=t('Default (nothing set)', 'Por defecto (sin nada configurado)')?></option>
-<option value="opus5"><?=t('Optimized for Opus 5', 'Optimizado para Opus 5')?></option>
+<option value="opus55"><?=t('Optimized for Opus 5.5', 'Optimizado para Opus 5.5')?></option>
 </select></dd>
 </dl>
 <blockquote class="inline_help"><?=t(
-  'A preset just fills in some of the fields below for the account you have selected further down -- it never saves anything by itself, so you can check the values and press "Save settings" whenever you are happy with them. Automatic lets Claude Code choose the model on its own ("default") and leaves everything else alone. Default (nothing set) clears everything this preset manages, exactly as if this tab had never been touched. Optimized for Opus 5 makes sure Opus 5 is the model in use, keeps automatic conversation summarising on so a long session never runs out of room, follows the more reliable update channel, and trims the extra text that very "talkative" commands dump into the conversation -- all without turning down how much Opus 5 thinks, and without switching to a different, weaker model if Opus is busy: if you choose Opus 5, you keep using Opus 5.',
-  'Un preajuste solo rellena algunos de los campos de aquí abajo para la cuenta que tengas seleccionada más abajo -- no guarda nada por sí solo, así que puedes revisar los valores y pulsar «Guardar ajustes» cuando estés conforme. Automática deja que Claude Code elija el modelo por su cuenta («default») y no toca nada más. Por defecto (sin nada configurado) borra todo lo que gestiona este preajuste, tal y como si nunca hubieras tocado esta pestaña. Optimizado para Opus 5 asegura que se use el modelo Opus 5, mantiene activado el resumen automático de conversaciones largas para que nunca se quede sin espacio, sigue el canal de actualización más fiable, y recorta el texto de sobra que sueltan los comandos muy «habladores» -- todo esto sin bajarle a Opus 5 lo que piensa, y sin cambiar a un modelo distinto y más simple si Opus está ocupado: si eliges Opus 5, sigues usando Opus 5.'
+  'A preset just fills in some of the fields below for the account you have selected further down -- it never saves anything by itself, so you can check the values and press "Save settings" whenever you are happy with them. Automatic lets Claude Code choose the model on its own ("default") and leaves everything else alone. Default (nothing set) clears everything this preset manages, exactly as if this tab had never been touched. Optimized for Opus 5.5 makes sure Opus 5.5 is the model in use, keeps automatic conversation summarising on so a long session never runs out of room, follows the more reliable update channel, and trims the extra text that very "talkative" commands dump into the conversation -- all without turning down how much Opus 5.5 thinks, and without switching to a different, weaker model if Opus is busy: if you choose Opus 5.5, you keep using Opus 5.5.',
+  'Un preajuste solo rellena algunos de los campos de aquí abajo para la cuenta que tengas seleccionada más abajo -- no guarda nada por sí solo, así que puedes revisar los valores y pulsar «Guardar ajustes» cuando estés conforme. Automática deja que Claude Code elija el modelo por su cuenta («default») y no toca nada más. Por defecto (sin nada configurado) borra todo lo que gestiona este preajuste, tal y como si nunca hubieras tocado esta pestaña. Optimizado para Opus 5.5 asegura que se use el modelo Opus 5.5, mantiene activado el resumen automático de conversaciones largas para que nunca se quede sin espacio, sigue el canal de actualización más fiable, y recorta el texto de sobra que sueltan los comandos muy «habladores» -- todo esto sin bajarle a Opus 5.5 lo que piensa, y sin cambiar a un modelo distinto y más simple si Opus está ocupado: si eliges Opus 5.5, sigues usando Opus 5.5.'
 )?></blockquote>
 <span id="cc-preset-msg"></span>
 </div>
@@ -6883,46 +7065,95 @@ foreach ($cc_fields as $cc_g) foreach ($cc_g['fields'] as $cc_fd) $cc_types[$cc_
 <?php if ($cc_g['help'] !== ''): ?><p><?=htmlspecialchars($cc_g['help'])?></p><?php endif; ?>
 <?php foreach ($cc_g['fields'] as $cc_fd):
     $cc_id = 'cc-' . $cc_f['slug'] . '-' . str_replace('.', '_', $cc_fd['key']);
-    $cc_val = cc_field_value($cc_fd['type'], cc_get($cc_f['settings'], $cc_fd['key']));
+    $cc_raw_val = cc_get($cc_f['settings'], $cc_fd['key']);
+    $cc_st = cc_field_state($cc_fd, $cc_raw_val);
+    $cc_val = $cc_st['value'];
+    $cc_is_list = in_array($cc_fd['type'], ['bool', 'select', 'choice'], true);
+    // A field whose value is being corrected is saved even if nobody touches
+    // it; every other field is saved only once it has been changed.
+    $cc_attrs = 'id="' . $cc_id . '" data-key="' . htmlspecialchars($cc_fd['key']) . '"'
+              . ($cc_st['was'] !== null ? ' data-dirty="1"' : '')
+              . ($cc_st['keep'] && !$cc_is_list ? ' disabled' : '');
+    $cc_unset = t('Not set (Claude Code default)', 'Sin definir (valor por defecto)');
+    $cc_keep_opt = $cc_st['keep']
+        ? '<option value="__keep__" selected>' . htmlspecialchars(t('Leave what is in the file: ', 'Dejar lo que hay en el archivo: ') . cc_quote(json_encode($cc_raw_val, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE))) . '</option>'
+        : '';
+    $cc_custom = $cc_fd['type'] === 'choice' && $cc_val !== '' && $cc_val !== '__empty__' && !in_array($cc_val, $cc_fd['options'], true);
 ?>
 <dl>
 <dt><?=htmlspecialchars($cc_fd['label'])?></dt>
 <dd>
 <?php if ($cc_fd['type'] === 'bool'): ?>
-  <select id="<?=$cc_id?>" data-key="<?=htmlspecialchars($cc_fd['key'])?>">
-    <option value=""<?=$cc_val === '' ? ' selected' : ''?>><?=t('Not set (Claude Code default)', 'Sin definir (valor por defecto)')?></option>
+  <select <?=$cc_attrs?>>
+    <option value=""<?=$cc_val === '' && !$cc_st['keep'] ? ' selected' : ''?>><?=$cc_unset?></option>
+    <?=$cc_keep_opt?>
     <option value="true"<?=$cc_val === 'true' ? ' selected' : ''?>><?=t('Yes', 'Sí')?></option>
     <option value="false"<?=$cc_val === 'false' ? ' selected' : ''?>><?=t('No', 'No')?></option>
   </select>
-<?php elseif ($cc_fd['type'] === 'select'): ?>
-  <select id="<?=$cc_id?>" data-key="<?=htmlspecialchars($cc_fd['key'])?>">
-    <option value=""<?=$cc_val === '' ? ' selected' : ''?>><?=t('Not set (Claude Code default)', 'Sin definir (valor por defecto)')?></option>
+<?php elseif ($cc_fd['type'] === 'select' || $cc_fd['type'] === 'choice'): ?>
+  <select <?=$cc_attrs?><?=$cc_fd['type'] === 'choice' ? ' onchange="ccChoice(this)"' : ''?>>
+    <option value=""<?=$cc_val === '' && !$cc_st['keep'] ? ' selected' : ''?>><?=$cc_unset?></option>
+    <?=$cc_keep_opt?>
+    <?php if (isset($cc_fd['empty'])): ?>
+    <option value="__empty__"<?=$cc_val === '__empty__' ? ' selected' : ''?>><?=htmlspecialchars($cc_fd['empty'])?></option>
+    <?php endif; ?>
     <?php foreach ($cc_fd['options'] as $cc_o): ?>
-    <option value="<?=htmlspecialchars($cc_o)?>"<?=$cc_val === $cc_o ? ' selected' : ''?>><?=htmlspecialchars($cc_o)?></option>
+    <option value="<?=htmlspecialchars($cc_o)?>"<?=$cc_val === $cc_o ? ' selected' : ''?>><?=htmlspecialchars($cc_fd['labels'][$cc_o] ?? $cc_o)?></option>
     <?php endforeach; ?>
+    <?php if ($cc_fd['type'] === 'select' && $cc_val !== '' && !in_array($cc_val, $cc_fd['options'], true)): ?>
+    <option value="<?=htmlspecialchars($cc_val)?>" selected><?=htmlspecialchars($cc_val)?></option>
+    <?php endif; ?>
+    <?php if ($cc_fd['type'] === 'choice'): ?>
+    <option value="__custom__"<?=$cc_custom ? ' selected' : ''?>><?=t('Other...', 'Otro...')?></option>
+    <?php endif; ?>
   </select>
-<?php elseif ($cc_fd['type'] === 'lines' || $cc_fd['type'] === 'kv'): ?>
-  <textarea id="<?=$cc_id?>" data-key="<?=htmlspecialchars($cc_fd['key'])?>" rows="4" cols="60" spellcheck="false"><?=htmlspecialchars($cc_val)?></textarea>
-<?php elseif ($cc_fd['type'] === 'number'): ?>
-  <input type="number" min="1" step="1" id="<?=$cc_id?>" data-key="<?=htmlspecialchars($cc_fd['key'])?>" value="<?=htmlspecialchars($cc_val)?>" class="narrow">
-<?php else: ?>
-  <input type="text" id="<?=$cc_id?>" data-key="<?=htmlspecialchars($cc_fd['key'])?>" value="<?=htmlspecialchars($cc_val)?>" class="narrow"
-    <?php if (!empty($cc_fd['list'])): ?>list="<?=$cc_id?>-list"<?php endif; ?>>
-  <?php if (!empty($cc_fd['list'])): ?>
-  <datalist id="<?=$cc_id?>-list"><?php foreach ($cc_fd['list'] as $cc_o): ?><option value="<?=htmlspecialchars($cc_o)?>"><?php endforeach; ?></datalist>
+  <?php if ($cc_fd['type'] === 'choice'): ?>
+  <input type="text" id="<?=$cc_id?>-custom" value="<?=$cc_custom ? htmlspecialchars($cc_val) : ''?>" class="narrow"<?=$cc_custom ? '' : ' style="display:none;"'?>>
   <?php endif; ?>
+<?php elseif ($cc_fd['type'] === 'lines' || $cc_fd['type'] === 'kv'): ?>
+  <textarea <?=$cc_attrs?> rows="4" cols="60" spellcheck="false"><?=htmlspecialchars($cc_val)?></textarea>
+<?php elseif ($cc_fd['type'] === 'number'): ?>
+  <input type="number" min="<?=(int)($cc_fd['min'] ?? 1)?>"<?=isset($cc_fd['max']) ? ' max="' . (int)$cc_fd['max'] . '"' : ''?> step="1" <?=$cc_attrs?> value="<?=htmlspecialchars($cc_val)?>" class="narrow">
+<?php else: ?>
+  <input type="text" <?=$cc_attrs?> value="<?=htmlspecialchars($cc_val)?>" class="narrow">
+<?php endif; ?>
+<?php if ($cc_st['was'] !== null): ?>
+  <span class="warning cc-was"><i class="fa fa-warning fa-fw"></i> <?=htmlspecialchars(sprintf(t('The file has %s, which an earlier version of this tab wrote by mistake. It is shown corrected, and the correction is written when you save.',
+                                                              'El archivo tiene %s, que una versión anterior de esta pestaña escribió por error. Se muestra ya corregido, y la corrección se escribe al guardar.'), cc_quote($cc_st['was'])))?></span>
+<?php elseif ($cc_st['keep'] && $cc_is_list): ?>
+  <span class="warning"><i class="fa fa-warning fa-fw"></i> <?=t('The file has a value this list does not offer. Saving leaves it as it is unless you pick something else.',
+                               'El archivo tiene un valor que esta lista no ofrece. Al guardar se queda como está, salvo que elijas otra cosa.')?></span>
+<?php elseif ($cc_st['keep']): ?>
+  <span class="warning"><i class="fa fa-warning fa-fw"></i> <?=htmlspecialchars(sprintf(t('The file has %s, which this field cannot show. Saving leaves it as it is; to change it, use the JSON editor at the bottom.',
+                                                      'El archivo tiene %s, que este campo no puede mostrar. Al guardar se queda como está; para cambiarlo, usa el editor JSON del final.'), cc_quote(json_encode($cc_raw_val, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE))))?></span>
 <?php endif; ?>
 </dd>
 </dl>
 <blockquote class="inline_help"><?=htmlspecialchars($cc_fd['help'])?></blockquote>
+<?php if ($cc_fd['key'] === 'effortLevel' && ($cc_efforts = cc_model_efforts($cc_f['settings']))): ?>
+<dl class="cc-model-effort">
+<dt><?=t('Levels saved per model', 'Niveles guardados por modelo')?></dt>
+<dd>
+  <select id="cc-<?=htmlspecialchars($cc_f['slug'])?>-modelEffortClear">
+    <option value=""><?=t('Keep them', 'Conservarlos')?></option>
+    <option value="clear"><?=t('Remove them when saving', 'Quitarlos al guardar')?></option>
+  </select>
+  <span class="warning"><i class="fa fa-warning fa-fw"></i> <?=htmlspecialchars(sprintf(t('Running /effort saved a level for %s. For those models it wins over the Effort level above, so changing that field alone does nothing for them.',
+                                                      'Al usar /effort se guardó un nivel para %s. En esos modelos manda sobre el Nivel de esfuerzo de arriba, así que cambiar solo ese campo no les hace nada.'),
+                                                    implode(', ', array_map(function ($m, $l) { return "$m ($l)"; }, array_keys($cc_efforts), $cc_efforts))))?></span>
+</dd>
+</dl>
+<blockquote class="inline_help"><?=t('Removing them only takes out the level saved for each model. A per-model effort ceiling, if there is one, is kept.',
+                                     'Quitarlos solo borra el nivel guardado para cada modelo. Si algún modelo tiene un tope de esfuerzo propio, se conserva.')?></blockquote>
+<?php endif; ?>
 <?php endforeach; ?>
 </div>
 <?php endforeach; ?>
 
 <div class="claude-box">
 <h4><?=t('Save', 'Guardar')?></h4>
-<p><?=t('Saves only the fields on this tab. Anything else already in the file -- hooks, a status line, MCP settings -- is read, kept and written back unchanged, and the previous version is left beside it as settings.json.bak.',
-        'Guarda solo los campos de esta pestaña. Lo demás que ya haya en el archivo -- hooks, línea de estado, ajustes de MCP -- se lee, se conserva y se vuelve a escribir igual, y la versión anterior queda al lado como settings.json.bak.')?></p>
+<p><?=t('Saves only the fields you have changed on this tab, plus any value marked above as being corrected. Everything else in the file -- the fields you did not touch, hooks, MCP settings -- is read, kept and written back unchanged, and the previous version is left beside it as settings.json.bak.',
+        'Guarda solo los campos que hayas cambiado en esta pestaña, más los valores marcados arriba como corregidos. Todo lo demás del archivo -- los campos que no hayas tocado, hooks, ajustes de MCP -- se lee, se conserva y se vuelve a escribir igual, y la versión anterior queda al lado como settings.json.bak.')?></p>
 <input type="button" value="<?=t('Save settings', 'Guardar ajustes')?>" onclick="ccSave('<?=htmlspecialchars($cc_f['slug'])?>')">
 <span id="cc-msg-<?=htmlspecialchars($cc_f['slug'])?>" style="margin-left:10px;"></span>
 </div>
@@ -6952,6 +7183,8 @@ foreach ($cc_fields as $cc_g) foreach ($cc_g['fields'] as $cc_fd) $cc_types[$cc_
       'saved'   => t('Saved', 'Guardado'),
       'network' => t('Could not reach the server', 'No se pudo contactar con el servidor'),
       'badnum'  => t('is not a whole number', 'no es un número entero'),
+      'badrange' => t('has to be between %1 and %2', 'tiene que estar entre %1 y %2'),
+      'badmin'   => t('has to be at least %1', 'tiene que ser como mínimo %1'),
       'badkv'   => t('must be written as NAME=value, one per line', 'debe escribirse como NOMBRE=valor, uno por línea'),
       'preset'  => t('Preset applied -- review and click "Save settings"', 'Preajuste aplicado -- revisa y pulsa "Guardar ajustes"'),
   ])?>;
@@ -6974,7 +7207,7 @@ foreach ($cc_fields as $cc_g) foreach ($cc_g['fields'] as $cc_fd) $cc_types[$cc_
   // cheaper, lighter session, not something an "optimize this model" preset
   // should decide quietly on someone's behalf. Same reasoning for
   // fallbackModel: falling back to a weaker model on overload is a real drop
-  // in capability, and whoever picks Opus 5 wants to keep using Opus 5, not
+  // in capability, and whoever picks Opus 5.5 wants to keep using Opus 5.5, not
   // silently get Sonnet answers. What is left costs nothing in quality:
   // pinning the right model, keeping auto-compact on (already the default),
   // and trimming raw command-output noise that was never adding intelligence
@@ -6987,7 +7220,7 @@ foreach ($cc_fields as $cc_g) foreach ($cc_g['fields'] as $cc_fd) $cc_types[$cc_
     automatic: { model: 'default', fallbackModel: '', autoCompactEnabled: '', autoUpdatesChannel: '', bashOutputMaxChars: '' },
     // The blank slate: as if this tab had never been touched.
     none:      { model: '', fallbackModel: '', autoCompactEnabled: '', autoUpdatesChannel: '', bashOutputMaxChars: '' },
-    // Opus 5, without giving up any reasoning quality: the right model, kept
+    // Opus 5.5, without giving up any reasoning quality: the right model, kept
     // there (no weaker fallback), auto-compact on so a long session never
     // runs out of room, the stable update channel, and a command-output cap
     // that only cuts noise a command dumps in bulk (very verbose builds,
@@ -6995,19 +7228,38 @@ foreach ($cc_fields as $cc_g) foreach ($cc_g['fields'] as $cc_fd) $cc_types[$cc_
     // from the file Claude Code saves it to if it genuinely needs more than
     // this. effortLevel and alwaysThinkingEnabled are deliberately absent:
     // see the block comment above.
-    opus5:     { model: 'claude-opus-5', fallbackModel: '', autoCompactEnabled: 'true', autoUpdatesChannel: 'stable', bashOutputMaxChars: '15000' },
+    opus55:    { model: 'claude-opus-5-5', fallbackModel: '', autoCompactEnabled: 'true', autoUpdatesChannel: 'stable', bashOutputMaxChars: '15000' },
   };
+
+  function fieldId(slug, key) { return 'cc-' + slug + '-' + key.replace(/\./g, '_'); }
+
+  // "Other..." in a choice list shows the text box beside it.
+  window.ccChoice = function (node) {
+    var box = el(node.id + '-custom');
+    if (!box) return;
+    box.style.display = node.value === '__custom__' ? '' : 'none';
+    if (node.value === '__custom__' && box.focus) box.focus();
+  };
+
+  // Puts a value in a field. A choice list takes a value it does not offer
+  // as "Other..." with the value typed in.
+  function setField(slug, key, value) {
+    var node = el(fieldId(slug, key));
+    if (!node || node.disabled) return;
+    node.value = value;
+    if (TYPES[key] === 'choice' && value !== '' && node.value !== value) {
+      node.value = '__custom__';
+      el(node.id + '-custom').value = value;
+    }
+    if (TYPES[key] === 'choice') ccChoice(node);
+  }
 
   window.ccApplyPreset = function (presetKey) {
     var preset = PRESETS[presetKey];
     var msg = el('cc-preset-msg');
     if (!preset) { if (msg) msg.textContent = ''; return; }
     var slug = el('cc-account') ? el('cc-account').value : 'default';
-    var key, node;
-    for (key in preset) {
-      node = el('cc-' + slug + '-' + key.replace(/\./g, '_'));
-      if (node) node.value = preset[key];
-    }
+    for (var key in preset) setField(slug, key, preset[key]);
     if (msg) { msg.textContent = L.preset; msg.className = 'ok'; }
   };
 
@@ -7021,23 +7273,62 @@ foreach ($cc_fields as $cc_g) foreach ($cc_g['fields'] as $cc_fd) $cc_types[$cc_
     if (el('cc-preset-msg')) el('cc-preset-msg').textContent = '';
   };
 
-  // Turns what is in the fields into the JSON types settings.json expects. An
+  // What a field holds right now, as one string: a choice list set to
+  // "Other..." reads as the text typed beside it.
+  function readField(node, key) {
+    var raw = (node.value || '').trim();
+    if (TYPES[key] === 'choice' && raw === '__custom__') raw = (el(node.id + '-custom').value || '').trim();
+    return raw;
+  }
+
+  // Each field as the page drew it, so a save can tell which ones were
+  // changed. Only those are sent: a field nobody touched never rewrites its
+  // key, whatever shape the value in the file has.
+  var ORIG = {};
+  function snapshot(slug) {
+    ORIG[slug] = {};
+    for (var key in TYPES) {
+      var node = el(fieldId(slug, key));
+      if (node) ORIG[slug][key] = readField(node, key);
+    }
+  }
+  for (var s in PATHS) snapshot(s);
+
+  // Turns the changed fields into the JSON types settings.json expects. An
   // empty field means "not set" and travels as null, which removes the key
   // rather than writing an empty string Claude Code would have to interpret.
   function collect(slug, msg) {
     var values = {}, key, node, raw;
     for (key in TYPES) {
-      node = el('cc-' + slug + '-' + key.replace(/\./g, '_'));
-      if (!node) continue;
-      raw = (node.value || '').trim();
+      node = el(fieldId(slug, key));
+      if (!node || node.disabled) continue;
+      raw = readField(node, key);
+      if (raw === '__keep__') continue;
+      if (raw === ORIG[slug][key] && !node.getAttribute('data-dirty')) continue;
       if (raw === '') { values[key] = null; continue; }
       switch (TYPES[key]) {
         case 'bool':
           values[key] = (raw === 'true');
           break;
+        case 'choice':
+          values[key] = raw === '__empty__' ? '' : raw;
+          break;
+        case 'statusline':
+          // Set as two keys, so the endpoint changes the command and the type
+          // and keeps whatever else the object has.
+          values[key + '.type'] = 'command';
+          values[key + '.command'] = raw;
+          break;
         case 'number':
           if (!/^\d+$/.test(raw)) { msg(key + ': ' + L.badnum, false); return null; }
           values[key] = parseInt(raw, 10);
+          // The range Claude Code accepts. The form is never submitted, so
+          // the browser's own min/max check does not run; this is that check.
+          var lo = parseInt(node.getAttribute('min'), 10), hi = parseInt(node.getAttribute('max'), 10);
+          if (values[key] < lo || (hi && values[key] > hi)) {
+            msg(key + ': ' + (hi ? L.badrange.replace('%1', lo).replace('%2', hi) : L.badmin.replace('%1', lo)), false);
+            return null;
+          }
           break;
         case 'lines':
           var list = raw.split('\n').map(function (s) { return s.trim(); }).filter(function (s) { return s !== ''; });
@@ -7082,15 +7373,24 @@ foreach ($cc_fields as $cc_g) foreach ($cc_g['fields'] as $cc_fd) $cc_types[$cc_
     var show = function (text, ok) { node.textContent = text; node.className = ok ? 'ok' : 'error'; };
     var values = collect(slug, show);
     if (values === null) return;
+    var clear = el('cc-' + slug + '-modelEffortClear');
     var body = new URLSearchParams();
     body.set('action', 'save');
     body.set('profile', slug);
     body.set('values', JSON.stringify(values));
+    if (clear && clear.value === 'clear') body.set('clear_model_effort', '1');
     post(body, node, function (d) {
       // Keep the JSON editor in step with what was just written, so the two
       // halves of this tab never show different files.
       var box = el('cc-raw-' + slug);
       if (box && typeof d.raw === 'string') box.value = d.raw;
+      // What was just saved is now what the file holds: the corrections
+      // are written and the per-model levels, if asked, are gone.
+      var pane = el('cc-pane-' + slug), i, notes = pane.querySelectorAll('.cc-was, .cc-model-effort');
+      for (i = 0; i < notes.length; i++) if (notes[i].className.indexOf('cc-was') !== -1 || (clear && clear.value === 'clear')) notes[i].style.display = 'none';
+      var dirty = pane.querySelectorAll('[data-dirty]');
+      for (i = 0; i < dirty.length; i++) dirty[i].removeAttribute('data-dirty');
+      snapshot(slug);
     });
   };
 
