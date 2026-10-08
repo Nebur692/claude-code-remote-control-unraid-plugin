@@ -730,7 +730,7 @@ fi
 
 <!-- Install/setup script -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh" Mode="0755">
-<SHA256>f1eed3fae72cc20fa1668c398dc24e4d6c8eab0ff682d21b2eaa1f34d6c9553a</SHA256>
+<SHA256>5ecbadca5f5b8f7c946283db914e2a594db0b78c5ac296c2f88482664a2b446a</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1186,6 +1186,9 @@ setup_cron() {
         cat >> "$cron" <<CRONEOF
 # Generated Claude Code usage sampling schedule:
 */5 * * * * $php_bin /usr/local/emhttp/plugins/claude-code/scripts/usage-sampler.php &> /dev/null
+# Claude Code update notice, once a day after Unraid's own checks at 00:10.
+# It does nothing unless turned on in the plugin's Settings tab:
+20 0 * * * $php_bin /usr/local/emhttp/plugins/claude-code/scripts/version-notify.php &> /dev/null
 CRONEOF
     fi
     cat >> "$cron" <<CRONEOF
@@ -1195,6 +1198,7 @@ CRONEOF
     if command -v update_cron >/dev/null 2>&1; then
         update_cron
         [ -n "$php_bin" ] && echo "Usage sampling scheduled every 5 minutes."
+        [ -n "$php_bin" ] && echo "Claude Code update notice checked daily at 00:20 (when turned on in Settings)."
         echo "Remote Control watchdog scheduled every 5 minutes."
     fi
 }
@@ -2343,7 +2347,7 @@ esac
 <!-- Claude account profiles: several logins on one server, either sharing
      the agent memory and settings or fully isolated. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/profiles.sh" Mode="0755">
-<SHA256>3d75f61f14438b327dd75e27154ab0af0137e8fe8c361fa27262d2e6c6aaebc7</SHA256>
+<SHA256>7b8f1b5aa69ee1ceed4a8a6766f08294fe771908ce85d5b656de3f9330d67525</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -2645,6 +2649,9 @@ refresh_profile() {
     save_cfg_var "PROFILE_EMAIL_$slug" "$email"
     save_cfg_var "PROFILE_PLAN_$slug" "$plan"
     stamp_identity "$slug" "$body"
+    # For the "refresh every account" report below, which says what it read.
+    REFRESHED_EMAIL="$email"
+    REFRESHED_PLAN="$plan"
     return 0
 }
 
@@ -2907,7 +2914,20 @@ case "$1" in
         if [ -n "$2" ]; then
             refresh_profile "$2"
         else
-            for p in default $PROFILES; do refresh_profile "$p"; done
+            # Each account on its own line, the ones that worked too. The loop
+            # used to end with the last account's status alone, so one stopped
+            # account with an expired token made the whole refresh read as a
+            # failure: the page showed only that error and did not reload, and
+            # the accounts it had just updated looked untouched. Now it counts
+            # as done when at least one account could be read.
+            refreshed=0
+            for p in default $PROFILES; do
+                if refresh_profile "$p"; then
+                    refreshed=1
+                    echo "$p: ${REFRESHED_EMAIL}${REFRESHED_PLAN:+, plan $REFRESHED_PLAN} -- up to date"
+                fi
+            done
+            [ "$refreshed" = 1 ]
         fi
         ;;
     env)
@@ -2998,6 +3018,58 @@ if [ -r "$CFG" ]; then
 fi
 
 exec "$REAL" "$@"
+]]>
+</INLINE>
+</FILE>
+
+<!-- Tells Unraid's own notification system when a newer Claude Code is out,
+     if the user turned that on in Settings. Run once a day by cron. -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/version-notify.php" Mode="0644">
+<SHA256>6803f635effff1bd9cc1d45f3b37c3b95af0be4cabd1bd9803d9d64aa15a80dd</SHA256>
+<INLINE>
+<![CDATA[
+<?php
+// A notice through Unraid's own notification system when a newer Claude Code
+// has been published, if the user turned that on in the plugin's Settings tab
+// (VERSION_NOTIFY). cron runs this once a day, after Unraid's own checks.
+//
+// It works the way Unraid's plugincheck does, deliberately: the same notify
+// script, the delivery agents the user picked for plugin update notices in
+// Settings > Notifications, and -x, which makes the notice a single ticket per
+// event -- with the version in the event, each version is announced once,
+// however many days it stays available and whether or not it was read. The
+// check itself is claude-version.php's, the one behind the Dashboard notice:
+// the same release channel (Claude Code's autoUpdatesChannel) and the same
+// six-hour cache, so the two never disagree.
+
+$cfg = @parse_ini_file('/boot/config/plugins/claude-code/claude-code.cfg') ?: [];
+if (($cfg['VERSION_NOTIFY'] ?? 'no') !== 'yes') exit(0);
+
+// cron's PATH has neither of the places claude lives; the check below asks
+// "claude --version" and inherits this.
+putenv('PATH=/usr/local/bin:/root/.local/bin:' . (getenv('PATH') ?: '/usr/bin:/bin'));
+$out = shell_exec(escapeshellarg(PHP_BINARY) . ' /usr/local/emhttp/plugins/claude-code/include/claude-version.php 2>/dev/null');
+$v = json_decode((string)$out, true);
+if (!is_array($v) || empty($v['update']) || !is_string($v['latest'] ?? null)) exit(0);
+
+$dyn = @parse_ini_file('/boot/config/plugins/dynamix/dynamix.cfg', true) ?: [];
+$agents = (string)($dyn['notify']['plugin'] ?? '');
+$es = stripos((string)($dyn['display']['locale'] ?? ''), 'es_') === 0;
+$var = @parse_ini_file('/var/local/emhttp/var.ini') ?: [];
+$server = strtoupper((string)($var['NAME'] ?? 'tower'));
+
+$event = "Claude Code [{$v['latest']}]";
+$subject = sprintf($es ? 'Aviso [%s] - Claude Code %s disponible' : 'Notice [%s] - Claude Code %s is available', $server, $v['latest']);
+$description = sprintf($es ? 'Hay una versión nueva de Claude Code: %s (instalada: %s, canal %s). Se actualiza desde la pestaña Ajustes del plugin.'
+                           : 'A new version of Claude Code is available: %s (installed: %s, %s channel). Update it from the plugin\'s Settings tab.',
+                       $v['latest'], (string)($v['installed'] ?? '?'), (string)($v['channel'] ?? 'latest'));
+exec('/usr/local/emhttp/webGui/scripts/notify'
+    . ' -e ' . escapeshellarg($event)
+    . ' -s ' . escapeshellarg($subject)
+    . ' -d ' . escapeshellarg($description)
+    . ' -i ' . escapeshellarg(trim("normal $agents"))
+    . ' -l ' . escapeshellarg('/Settings/claude-code')
+    . ' -x');
 ]]>
 </INLINE>
 </FILE>
@@ -6041,7 +6113,7 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeAccounts.page">
-<SHA256>82a957896d7f50eb25c33be1b8e42661ae334941da4441e5900081d0064681b6</SHA256>
+<SHA256>7bd5b5cb173b90fd97f3cd4c33e3ff1d86e44a4b1dc0151d5d2c41416e5d3c25</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:2"
@@ -6186,7 +6258,9 @@ Tag="users"
       .then(function (d) {
         msg.textContent = d.message || '';
         msg.className = d.ok ? 'ok' : 'error';
-        if (d.ok) setTimeout(function () { location.reload(); }, 900);
+        // A refresh reports every account on its own line: long enough to read
+        // before the reload that shows what it updated.
+        if (d.ok) setTimeout(function () { location.reload(); }, params.action === 'refresh' ? 3000 : 900);
       })
       .catch(function () { msg.textContent = L.network; msg.className = 'error'; });
   }
@@ -8110,7 +8184,7 @@ foreach ($ccp_modes as $ccp_mv => $ccp_ml): ?>
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeSettings.page">
-<SHA256>4be0bd0edb0c0b0a2798f442e498228378376dc5139e8cc885a10a9f9ae3be37</SHA256>
+<SHA256>9d869f38cfc20c4864c87b6c0fc8ff2d65a23d87f32ff32777114b811618db50</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:6"
@@ -8135,6 +8209,17 @@ Tag="cog"
 <blockquote class="inline_help"><?=t(
     'Every update downloads a new copy of Claude Code, around 200 MB each, and they pile up in a folder that on Unraid lives in RAM. Updating and rebooting now delete the old ones, keeping this many. The version actually running is always kept, whatever you put here.',
     'Cada actualización se descarga una copia nueva de Claude Code, unos 200 MB cada una, y se van acumulando en una carpeta que en Unraid vive en la RAM. Al actualizar y al arrancar se borran las viejas, conservando estas. La versión que está funcionando se conserva siempre, pongas lo que pongas aquí.'
+)?></blockquote>
+<dl>
+<dt><?=t('Notify of new versions:', 'Avisar de versiones nuevas:')?></dt>
+<dd><select name="VERSION_NOTIFY">
+<option value="no"<?=($cfg['VERSION_NOTIFY'] ?? 'no') !== 'yes' ? ' selected' : ''?>><?=t('No', 'No')?></option>
+<option value="yes"<?=($cfg['VERSION_NOTIFY'] ?? 'no') === 'yes' ? ' selected' : ''?>><?=t('Yes', 'Sí')?></option>
+</select></dd>
+</dl>
+<blockquote class="inline_help"><?=t(
+    'Sends an Unraid notification when a newer Claude Code than the one installed has been published, on the release channel chosen on the Claude Code Config tab. It is checked once a day, just after Unraid checks its own plugins, and each version is announced only once. It arrives wherever Unraid sends plugin update notices -- the browser, email, or the agents set up in Settings > Notifications -- so turning those on or off there applies here too. Installing is still up to you, from Update below.',
+    'Envía una notificación de Unraid cuando se publica una versión de Claude Code más nueva que la instalada, en el canal de versiones elegido en la pestaña Config. de Claude. Se comprueba una vez al día, justo después de que Unraid revise sus propios plugins, y cada versión se avisa una sola vez. Llega por donde Unraid manda los avisos de actualización de plugins -- el navegador, el correo o los agentes configurados en Ajustes > Notificaciones --, así que activarlos o desactivarlos allí vale también aquí. Instalarla sigue siendo cosa tuya, con Actualizar más abajo.'
 )?></blockquote>
 <dl>
 <dt>&nbsp;</dt>
