@@ -1350,6 +1350,61 @@ echo "=== Manual Reinstall $(date) ===" >> "$LOGFILE"
 </INLINE>
 </FILE>
 
+<!-- Runs Update or Reinstall for Unraid's own openPlugin() window. openPlugin
+     starts a command through StartCommand.php, in the background and with its
+     output thrown away, and shows whatever the command publishes on nchan's
+     "plugins" channel, the way Unraid's own plugin_rm does it. This script
+     publishes the other script's output there, line by line, then _DONE_. -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/claude-code-run.sh" Mode="0755">
+<SHA256>285647c8b68603bd6ecb23dab82b4e94685be69be0aa785395562a492d4e7368</SHA256>
+<INLINE>
+<![CDATA[
+#!/bin/bash
+# Usage, from openPlugin(): claude-code-run.sh <update-claude.sh|reinstall-and-log.sh> nchan
+#
+# StartCommand.php looks a command up by name in every plugin's scripts folder
+# and runs the first one it finds, so this name has to be unique to this
+# plugin -- hence the prefix. It also refuses to start a command that is
+# already running, which here means an update and a reinstall can never run
+# at the same time.
+dir=$(dirname "$(readlink -f "$0")")
+case "$1" in
+    update-claude.sh|reinstall-and-log.sh) ;;
+    *) echo "claude-code-run.sh: unknown script '$1'" >&2; exit 1 ;;
+esac
+
+# Without the nchan argument there is no window to publish to: just run it.
+[ "${2:-}" = "nchan" ] || exec "$dir/$1"
+
+# The same call as Unraid's plugin_rm. --data-raw, unlike -d, never reads a
+# line that starts with @ as the name of a file to send.
+publish() {
+    local message
+    for message in "$@"; do
+        curl -sf --data-raw "$message" --unix-socket /var/run/nginx.socket \
+            'http://localhost/pub/plugins?buffer_length=1' >/dev/null 2>&1
+    done
+}
+
+# The window adds each message to its page as HTML and drops the last
+# character, which is why every line goes with a newline after it. What a
+# terminal would show is kept: colour codes out, and of a line redrawn with
+# carriage returns only its last state.
+esc=$(printf '\033')
+"$dir/$1" 2>&1 | while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%$'\r'}
+    line=${line##*$'\r'}
+    line=$(printf '%s' "$line" | sed "s/${esc}\[[0-9;?]*[A-Za-z]//g")
+    line=${line//&/&amp;}
+    line=${line//</&lt;}
+    line=${line//>/&gt;}
+    publish "$line"$'\n'
+done
+publish "_DONE_" ""
+]]>
+</INLINE>
+</FILE>
+
 <!-- Update: install-claude.sh's own install_claude_code() is a no-op once
      `claude` already works (it just confirms the version and returns), so
      it can never pick up a newer Claude Code release. `claude update` is
@@ -1358,7 +1413,7 @@ echo "=== Manual Reinstall $(date) ===" >> "$LOGFILE"
      restore_cached_binary() restores from on every boot, so without
      re-caching here, any update would silently be reverted on next reboot. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/update-claude.sh" Mode="0755">
-<SHA256>5f484bae10e773ae0d2e9c7725a3e6f5eda3a8bbd92823badd800f1e84c39b63</SHA256>
+<SHA256>bb7f8eb2395675b82d2654649de4a67f2aec0bc2ef2abe3159e03de66b627c7c</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1440,7 +1495,16 @@ fi
 before=$(claude --version 2>/dev/null)
 echo "Current version: $before"
 echo "Checking for updates..."
-claude update
+# The output still streams as it comes; the copy is only to recognise the
+# warning recent versions print about the launcher, which on this plugin is
+# expected (see the comment before the apply step below) but reads like a
+# failure to whoever is watching the window.
+update_out=$(mktemp /tmp/claude-update-out.XXXXXX)
+claude update 2>&1 | tee "$update_out"
+if grep -q "not created by the native installer" "$update_out" 2>/dev/null; then
+    echo "Note: that warning is expected with this plugin. It keeps its own copy of Claude Code, restored from appdata on every boot, so the updater leaves it alone and the plugin applies the new version itself, just below."
+fi
+rm -f "$update_out"
 
 # Old versions pile up, and on Unraid that is RAM. "claude update" downloads
 # every new version into $VERSIONS_DIR and the installer's own cleanup is
@@ -1605,7 +1669,7 @@ prune_versions
      taken over as "most recent"; see the connect subcommand and the
      Settings page's Session ID field. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh" Mode="0755">
-<SHA256>18b42ee055ee82da992fe0a980cedcccdb85a88910805e1562a487e57f140b35</SHA256>
+<SHA256>bd4d095f4ebc485efb30e6825f40c602856cb63e0c916faa2767271b25cb5bc6</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1847,7 +1911,9 @@ session_gone_reason() {
 run_fresh() {
     local rc_dir="$1"
     echo "=== Starting a fresh session in $rc_dir: $(date) ===" >> "$LOGFILE"
-    run_claude "$rc_dir" > /dev/null
+    # Kept in $output like every other attempt, so the checks at the end of
+    # the supervisor's loop see what this one said too. The log already has it.
+    output=$(run_claude "$rc_dir")
 }
 
 # emhttpd gives every command it runs extra copies of its descriptors, the web
@@ -1887,6 +1953,7 @@ do_run() {
     fi
     while [ -f "$ENABLED_FLAG" ]; do
         cd "$rc_dir" || break
+        output=""
 
         if [ -f "$FRESHFILE" ]; then
             # "Start a new session" was pressed. Nothing to resume, on purpose.
@@ -1986,6 +2053,19 @@ do_run() {
             else
                 fail_count=0
             fi
+        fi
+
+        # A folder Claude Code has not been told to trust. Since 2.1.284 the CLI
+        # asks on the terminal instead of exiting, and with no terminal to ask
+        # on -- this supervisor has none -- it exits with "Workspace not
+        # trusted". Every retry would say the same thing every five seconds, so
+        # stop here and say how to fix it. The home directory is never trusted
+        # for good, by design, so that one needs another folder.
+        if printf '%s\n' "$output" | grep -q "Workspace not trusted"; then
+            echo "=== Remote Control cannot start in $rc_dir: Claude Code has not been told to trust this folder. Open a terminal, run claude in $rc_dir once and accept the question about trusting it, then start Remote Control again. If $rc_dir is your home directory, pick another folder: trust is never saved for that one. $(date) ===" >> "$LOGFILE"
+            cc_log "Remote Control for account '$PROFILE' stopped: $rc_dir is not a trusted folder (run claude there once, then start it again)"
+            rm -f "$ENABLED_FLAG"
+            break
         fi
 
         [ -f "$ENABLED_FLAG" ] || break
@@ -2907,7 +2987,7 @@ exec "$REAL" "$@"
 
 <!-- Usage sampler: records the plan percentages on a schedule so the Dashboard can show how fast they are rising -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/usage-sampler.php" Mode="0644">
-<SHA256>349d9696332ca494cf601944fd8bbef912cd746ea6acb0b1552a5174949b0784</SHA256>
+<SHA256>ed411df8d0def726e15dcc4cd2f29f668151a0d66c919aa1e7bbee171111a7e0</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -2960,10 +3040,36 @@ function s_hist_dir() {
     return $d;
 }
 
+function s_creds_file($slug) {
+    return s_home($slug) . '/.credentials.json';
+}
+
+// The access token, and when it expires (seconds; null when the file does not
+// say). Read only: renewing it is the CLI's job, never this script's.
 function s_token($slug) {
-    $creds = @json_decode((string)@file_get_contents(s_home($slug) . '/.credentials.json'), true);
-    $t = is_array($creds) ? ($creds['claudeAiOauth']['accessToken'] ?? '') : '';
-    return is_string($t) && $t !== '' ? $t : null;
+    $creds = @json_decode((string)@file_get_contents(s_creds_file($slug)), true);
+    $o = is_array($creds) ? ($creds['claudeAiOauth'] ?? []) : [];
+    $t = $o['accessToken'] ?? '';
+    if (!is_string($t) || $t === '') return [null, null];
+    $exp = isset($o['expiresAt']) && is_numeric($o['expiresAt']) ? intdiv((int)$o['expiresAt'], 1000) : null;
+    return [$t, $exp];
+}
+
+// Whether asking the API now could only fail again. After a 429 the API says
+// how long to wait, and asking sooner keeps the block alive; after a 401, or
+// a token already past its expiry, nothing changes until the CLI writes new
+// credentials. An account nobody uses stayed in that state for weeks, asking
+// every five minutes, so this checks before asking.
+function s_should_wait($last, $creds_file, $now) {
+    if (!is_array($last) || !isset($last['error'], $last['ts'])) return false;
+    if ($last['error'] === 'http 429' && is_numeric($last['retry_after'] ?? null)) {
+        return $now < (int)$last['ts'] + (int)$last['retry_after'];
+    }
+    if ($last['error'] === 'http 401' || $last['error'] === 'token expired') {
+        $mtime = @filemtime($creds_file);
+        return $mtime !== false && $mtime <= (int)$last['ts'];
+    }
+    return false;
 }
 
 // The reading, or why there is none. The reason is what makes a gap in the
@@ -3050,8 +3156,12 @@ foreach (s_accounts() as $slug) {
     if ($panel !== null) {
         $sample = ['ts' => $now] + $panel + ['via' => 'panel'];
     } else {
-        $token = s_token($slug);
-        $r = $token === null ? ['error' => 'no token'] : s_usage($token);
+        $last = s_last_line($file);
+        if (s_should_wait($last, s_creds_file($slug), $now)) continue;
+        [$token, $expires] = s_token($slug);
+        if ($token === null) $r = ['error' => 'no token'];
+        elseif ($expires !== null && $expires <= $now) $r = ['error' => 'token expired'];
+        else $r = s_usage($token);
         if (isset($r['data'])) {
             $sample = ['ts' => $now] + $r['data'];
         } else {
@@ -3059,7 +3169,6 @@ foreach (s_accounts() as $slug) {
             // token expired would otherwise fill its history with the same line.
             // Only the CLI renews a token, so an idle account stays like this
             // until it is used.
-            $last = s_last_line($file);
             if (!is_array($last) || ($last['error'] ?? null) !== $r['error']) {
                 @file_put_contents($file, json_encode(['ts' => $now] + $r, JSON_UNESCAPED_SLASHES) . "\n", FILE_APPEND);
                 @chmod($file, 0600);
@@ -3773,7 +3882,7 @@ respond([
 <!-- Shared preamble and styling for the tabs. Every tab requires this once,
      so the state it computes is worked out a single time per request. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/common.php" Mode="0644">
-<SHA256>f6e9f2947f3f6809f87092eaebbe34171097946c3557c5c26ce78ff68f8e0437</SHA256>
+<SHA256>f2316c4ddbb26bc18f8a3a83b3a3d87e3af8645f8c35501b978ff76c7d6dd713</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -4097,9 +4206,14 @@ uasort($rc_history, function($a, $b) { return $b['ts'] <=> $a['ts']; });
 ?>
 
 <style>
+/* Colours come from the variables every Unraid theme defines (black, white,
+   gray and azure alike), so the boxes keep their outline on a light theme
+   too; the literal after each one is only for an older Unraid without them.
+   The state colours are the ones Unraid's own green-text, orange-text and
+   red-text use. */
 .claude-status {
-  border: 1px solid rgba(255,255,255,0.15);
-  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--table-border-color, rgba(255,255,255,0.15));
+  background: var(--mild-background-color, rgba(255,255,255,0.03));
   border-radius: 4px;
   padding: 8px 14px;
   margin-bottom: 15px;
@@ -4122,11 +4236,11 @@ uasort($rc_history, function($a, $b) { return $b['ts'] <=> $a['ts']; });
   background: none;
   background-color: transparent;
 }
-.claude-status .ok { color: #4caf50; }
-.claude-status .warn { color: #ff9800; }
-.claude-status .error { color: #f44336; }
+.claude-status .ok, .claude-box .ok { color: var(--green-800, #4caf50); }
+.claude-status .warn, .claude-box .warn { color: var(--orange-300, #ff9800); }
+.claude-status .error, .claude-box .error { color: var(--red-600, #f44336); }
 .claude-box {
-  border: 1px solid rgba(255,255,255,0.15);
+  border: 1px solid var(--table-border-color, rgba(255,255,255,0.15));
   border-radius: 4px;
   padding: 5px 15px 12px 15px;
   margin-bottom: 15px;
@@ -4135,14 +4249,11 @@ uasort($rc_history, function($a, $b) { return $b['ts'] <=> $a['ts']; });
   margin-top: 8px;
   margin-bottom: 4px;
 }
-/* Same state colours as the top status bar, for the boxes further down. */
-.claude-box .ok { color: #4caf50; }
-.claude-box .warn { color: #ff9800; }
-.claude-box .error { color: #f44336; }
 .claude-box .sep { opacity: 0.4; margin: 0 8px; }
 .claude-code-block {
-  background: #1e1e1e;
-  color: #d4d4d4;
+  background: var(--mild-background-color, #1e1e1e);
+  color: var(--text-color, #d4d4d4);
+  border: 1px solid var(--table-border-color, transparent);
   padding: 8px 12px;
   border-radius: 4px;
   font-family: monospace;
@@ -4165,12 +4276,40 @@ uasort($rc_history, function($a, $b) { return $b['ts'] <=> $a['ts']; });
 .claude-history th, .claude-history td {
   text-align: left;
   padding: 3px 10px 3px 0;
-  border-bottom: 1px solid rgba(255,255,255,0.08);
+  border-bottom: 1px solid var(--table-border-color, rgba(255,255,255,0.08));
 }
 .claude-history code {
   font-size: 0.95em;
 }
+/* One rule, path or variable per line: Unraid caps a dd's textarea at 400px,
+   which wraps a long permission rule over three lines. These lists get the
+   width of the column instead, and scroll sideways rather than wrap. */
+.claude-box dd textarea.cc-list {
+  max-width: none;
+  width: 100%;
+  white-space: pre;
+  overflow-x: auto;
+}
 </style>
+<script>
+// Update and Reinstall run in Unraid's own progress window, openPlugin(): the
+// command runs in the background through StartCommand.php and its output
+// arrives over nchan, so closing the window does not stop it -- Unraid shows
+// its "operation continues in background" banner instead, with its abort
+// button -- and nothing depends on a long HTTP response getting through a
+// reverse proxy in pieces. When the window closes on a finished run, Unraid
+// calls ccScriptDone, which reloads the page so the version it shows is the
+// one now installed, as openBox's reload did before. openBox, which Unraid
+// keeps "for legacy purposes", stays only for a Unraid without openPlugin.
+window.ccRunScript = window.ccRunScript || function (script, title) {
+  if (typeof openPlugin === 'function') {
+    openPlugin('claude-code-run.sh ' + script, title, 'claude-code', 'ccScriptDone');
+  } else {
+    openBox('/plugins/claude-code/scripts/' + script, title, 600, 900, true);
+  }
+};
+window.ccScriptDone = window.ccScriptDone || function () { location.reload(); };
+</script>
 ]]>
 </INLINE>
 </FILE>
@@ -4987,7 +5126,7 @@ echo json_encode($out);
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-config.php" Mode="0644">
-<SHA256>b77563f71bebe0fbaa8e10768f1a9246aa9a579f36d8c31ff2bb8c44540dcf3e</SHA256>
+<SHA256>236132626c32e9a329949e589c13edb7899c342a4ea7de84342fe5f35b179f55</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -5162,15 +5301,19 @@ if (isset($_POST['raw'])) {
         }
         cc_apply($data, $key, $value);
     }
-    // The levels /effort saved per model win over the top-level effortLevel,
-    // so the form offers to remove them. Model names carry dashes and dots,
-    // which a dotted key cannot address, so this is its own request field.
-    // Only the level goes: a per-model maxEffortLevel stays, and an entry
-    // left empty is dropped the way cc_apply drops an empty object.
-    if (($_POST['clear_model_effort'] ?? '') === '1' && is_array($data['modelSettings'] ?? null)) {
+    // Values Claude Code saves per model win over the top-level key of the
+    // same name in the same file: the effort level /effort saves, and the
+    // compaction window /autocompact saves (2.1.288 on). The form offers to
+    // remove them. Model names carry dashes and dots, which a dotted key
+    // cannot address, so this is its own request field, and only these two
+    // names are accepted. Everything else in a model's entry stays -- a
+    // per-model maxEffortLevel, say -- and an entry left empty is dropped the
+    // way cc_apply drops an empty object.
+    $cc_clear = array_intersect(explode(',', (string)($_POST['clear_model_fields'] ?? '')), ['effortLevel', 'autoCompactWindow']);
+    if ($cc_clear && is_array($data['modelSettings'] ?? null)) {
         foreach ($data['modelSettings'] as $model => $entry) {
             if (!is_array($entry)) continue;
-            unset($data['modelSettings'][$model]['effortLevel']);
+            foreach ($cc_clear as $cc_field) unset($data['modelSettings'][$model][$cc_field]);
             if (!$data['modelSettings'][$model]) unset($data['modelSettings'][$model]);
         }
         if (!$data['modelSettings']) unset($data['modelSettings']);
@@ -5498,7 +5641,7 @@ Tabs="true"
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeDashboard.page">
-<SHA256>5050cccab09b3c4d638077a22f911c20da50f50e25844632d0126113254d3de4</SHA256>
+<SHA256>99b5b885780329c4a055073fd1b20f72dd459d03fea317f58515ea00335cee7e</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:1"
@@ -5548,7 +5691,7 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
       // The same popup as the Update button on the Settings tab.
       link.addEventListener('click', function (e) {
         e.preventDefault();
-        openBox('/plugins/claude-code/scripts/update-claude.sh', L.title, 600, 900, true);
+        ccRunScript('update-claude.sh', L.title);
       });
       el.appendChild(note);
       el.appendChild(link);
@@ -5585,6 +5728,8 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
       'hour'      => t('h', 'h'),
       'min'       => t('min', 'min'),
       'nodata'    => t('not signed in', 'sin iniciar sesión'),
+      'failed'    => t('could not read the usage right now', 'no se pudo leer el uso ahora mismo'),
+      'unreachable' => t('could not reach this server', 'no se pudo contactar con este servidor'),
       'plan'      => t('Plan usage', 'Uso del plan'),
       'pace_help' => t('How fast this window is filling, from the percentage read every five minutes: over the last hour for the 5-hour window, over the last day for the weekly one. It is the account\'s percentage, so it counts what was spent anywhere, not only on this server. The projection assumes that pace carries on; with less history than that it is marked provisional.',
                        'A qué ritmo se está llenando esta ventana, según el porcentaje leído cada cinco minutos: en la última hora para la de 5 h y en el último día para la semanal. Es el porcentaje de la cuenta, así que cuenta lo gastado en cualquier sitio, no sólo en este servidor. La previsión supone que ese ritmo se mantiene; con menos historia que eso se marca como provisional.'),
@@ -5738,7 +5883,9 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
     if (!d || (d.state !== 'ok' && !(d.windows && d.windows.length))) {
       // Nothing was ever read for this account, so there is genuinely nothing
       // to show: say why rather than leaving a gap the reader has to interpret.
-      var why = d && d.state === 'expired' ? L.expired : L.nodata;
+      // Only no-auth means nobody is signed in; a page that could not reach
+      // the endpoint, or an endpoint that could not reach Anthropic, says so.
+      var why = !d ? L.unreachable : d.state === 'expired' ? L.expired : d.state === 'no-auth' ? L.nodata : L.failed;
       row.innerHTML = who + '<span class="dim-text">' + esc(why) + '</span>';
       return;
     }
@@ -5877,7 +6024,7 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeAccounts.page">
-<SHA256>dd42629fec86e6832c62774897c41d92346725e3152d40b1780b2087b819da91</SHA256>
+<SHA256>82a957896d7f50eb25c33be1b8e42661ae334941da4441e5900081d0064681b6</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:2"
@@ -5923,7 +6070,10 @@ Tag="users"
     'Esto no se puede cambiar mientras exista más de una cuenta, porque decide dónde guarda sus ficheros cada una. Elimina antes las cuentas adicionales.'
 )?></span></blockquote>
 <?php endif; ?>
-<input type="submit" value="<?=t('Apply', 'Aplicar')?>">
+<dl>
+<dt>&nbsp;</dt>
+<dd><span class="buttons-spaced"><input type="submit" value="<?=t('Apply', 'Aplicar')?>"></span></dd>
+</dl>
 </form>
 
 <?php if ($multi_account): ?>
@@ -5972,17 +6122,20 @@ Tag="users"
 
 <dl>
 <dt><?=t('Add an account:', 'Añadir una cuenta:')?></dt>
-<dd>
-<input type="text" id="claude-account-name" class="narrow" placeholder="<?=t('for example: Work', 'por ejemplo: Trabajo')?>" autocomplete="off">
+<dd><span class="buttons-spaced">
+<input type="text" id="claude-account-name" placeholder="<?=t('for example: Work', 'por ejemplo: Trabajo')?>" autocomplete="off">
 <input type="button" value="<?=t('Add', 'Añadir')?>" onclick="claudeAccountAdd();">
-</dd>
+</span></dd>
 </dl>
 <blockquote class="inline_help"><?=t(
     'Call it whatever makes sense to you; the folder that holds it is named automatically. Adding an account does not sign it in yet: use Sign in next to it once it appears in the table.',
     'Llámala como te resulte útil; la carpeta que la guarda se nombra sola. Añadir una cuenta todavía no inicia sesión en ella: usa Iniciar sesión a su lado en cuanto aparezca en la tabla.'
 )?></blockquote>
 
-<input type="button" value="<?=t('Refresh account details', 'Actualizar datos de las cuentas')?>" onclick="claudeAccount('refresh','');">
+<dl>
+<dt>&nbsp;</dt>
+<dd><span class="buttons-spaced"><input type="button" value="<?=t('Refresh account details', 'Actualizar datos de las cuentas')?>" onclick="claudeAccount('refresh','');"></span></dd>
+</dl>
 <p id="claude-account-msg"></p>
 
 <script>
@@ -6122,7 +6275,7 @@ function cc_sync_value($v) {
 </tr>
 <?php endforeach; ?>
 </table>
-<input type="button" value="<?=t('Apply ticked to the main account', 'Aplicar lo marcado a la cuenta principal')?>" onclick="ccSyncApply('<?=htmlspecialchars($cc_slug, ENT_QUOTES)?>');">
+<span class="buttons-spaced"><input type="button" value="<?=t('Apply ticked to the main account', 'Aplicar lo marcado a la cuenta principal')?>" onclick="ccSyncApply('<?=htmlspecialchars($cc_slug, ENT_QUOTES)?>');"></span>
 <?php endif; ?>
 </dd>
 </dl>
@@ -6131,7 +6284,10 @@ function cc_sync_value($v) {
     'Tick a change to make it the main account\'s too, which also hands it to every other account. Leave it unticked and it keeps working in that account alone. A row marked "both changed" is one each side moved: leaving it unticked keeps the main account\'s value.',
     'Marca un cambio para que pase a ser también el de la cuenta principal, lo que además se lo entrega a todas las demás. Déjalo sin marcar y seguirá funcionando solo en esa cuenta. Una fila con "cambiado en las dos" es un valor que movieron ambas partes: dejarla sin marcar conserva el de la cuenta principal.'
 )?></blockquote>
-<input type="button" value="<?=t('Sync now', 'Sincronizar ahora')?>" onclick="ccSyncApply('');">
+<dl>
+<dt>&nbsp;</dt>
+<dd><span class="buttons-spaced"><input type="button" value="<?=t('Sync now', 'Sincronizar ahora')?>" onclick="ccSyncApply('');"></span></dd>
+</dl>
 <p id="cc-sync-msg"></p>
 
 <script>
@@ -6221,14 +6377,17 @@ function cc_sync_value($v) {
 <div id="claude-login-step2" style="display:none;">
 <dl>
 <dt><?=t('2. Paste the code:', '2. Pega el código:')?></dt>
-<dd>
-<input type="text" id="claude-login-code" class="narrow" autocomplete="off" spellcheck="false">
+<dd><span class="buttons-spaced">
+<input type="text" id="claude-login-code" autocomplete="off" spellcheck="false">
 <input type="button" id="claude-login-send" value="<?=t('Sign in', 'Iniciar sesión')?>">
-</dd>
+</span></dd>
 </dl>
 </div>
 <p id="claude-login-msg"></p>
-<input type="button" value="<?=t('Cancel', 'Cancelar')?>" onclick="claudeLoginCancel();">
+<dl>
+<dt>&nbsp;</dt>
+<dd><span class="buttons-spaced"><input type="button" value="<?=t('Cancel', 'Cancelar')?>" onclick="claudeLoginCancel();"></span></dd>
+</dl>
 </div>
 
 <script>
@@ -6324,7 +6483,7 @@ function cc_sync_value($v) {
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeRemote.page">
-<SHA256>8e28f5b8e7db57f1d1cdf55c5bd86e1749aa01481d4377eb994a7c6c8e74fcba</SHA256>
+<SHA256>76e796a5bb75ba0e25ddc41ed9572a608ee895ef79a0300c5da866f076b9417f</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:3"
@@ -6338,9 +6497,10 @@ Tag="desktop"
     'Runs "claude remote-control" in the background so you can drive a Claude Code session on this NAS from claude.ai/code or the Claude mobile app -- outbound HTTPS only, no inbound ports opened. Requires being signed in with a claude.ai account (Pro/Max/Team/Enterprise); API key auth does not support this.',
     'Ejecuta "claude remote-control" en segundo plano para que puedas controlar una sesión de Claude Code en este NAS desde claude.ai/code o la app móvil de Claude -- solo conexiones HTTPS salientes, sin abrir puertos entrantes. Requiere haber iniciado sesión con una cuenta de claude.ai (Pro/Max/Team/Enterprise); la autenticación por API key no es compatible.'
 )?></p>
+<blockquote class="inline_help">
 <p><?=t(
-    'Always resumes the same ongoing session in the directory below (--continue), so context carries over between restarts instead of starting over. It only runs when started below -- never launched automatically at boot.',
-    'Siempre retoma la misma sesión en curso en el directorio de abajo (--continue), así que el contexto se mantiene entre reinicios en vez de empezar de cero. Solo corre cuando lo inicias abajo -- nunca se lanza solo al arrancar Unraid.'
+    'Each account always resumes the session it was last using, asking for it by its id, so the context carries over between restarts instead of starting over. It only runs when started below -- never launched automatically at boot.',
+    'Cada cuenta retoma siempre la sesión que estaba usando, pidiéndola por su id, así que el contexto se mantiene entre reinicios en vez de empezar de cero. Solo corre cuando lo inicias abajo -- nunca se lanza solo al arrancar Unraid.'
 )?></p>
 <p><?=t(
     'If the session an account was using can no longer be resumed -- archived on claude.ai, expired, or never attached to a bridge in the first place -- a new one is started in its place automatically, and you can also ask for a brand-new session at any time with the button below.',
@@ -6360,6 +6520,7 @@ Tag="desktop"
     'Cada cuenta ejecuta su propia sesión y pueden estar conectadas a la vez. Una cuenta usa el directorio que le pongas, o el de arriba si no le pones ninguno, así que apuntar todas las cuentas al mismo directorio es válido y se respeta. Lo único que conviene saber: una sesión se retoma por directorio, así que las cuentas que compartan uno pueden encontrarse la sesión de otra, no poder retomar lo que no es suyo, y arrancar una sesión nueva en su lugar. Con directorios distintos eso no pasa.'
 )?></p>
 <?php endif; ?>
+</blockquote>
 </div>
 
 <?php foreach ($rc_accounts as $rc): ?>
@@ -6396,32 +6557,38 @@ Tag="desktop"
 <input type="hidden" name="#file" value="<?=$cfg_file?>">
 <dl>
 <dt><?=t('Directory:', 'Directorio:')?></dt>
-<dd><input type="text" name="<?=htmlspecialchars($rc['dir_key'])?>" value="<?=htmlspecialchars($rc['dir_cfg'])?>" placeholder="<?=htmlspecialchars($rc['dir_default'])?>" class="narrow"></dd>
+<dd><span class="buttons-spaced"><input type="text" name="<?=htmlspecialchars($rc['dir_key'])?>" value="<?=htmlspecialchars($rc['dir_cfg'])?>" placeholder="<?=htmlspecialchars($rc['dir_default'])?>">
+<input type="submit" value="<?=t('Save', 'Guardar')?>"></span></dd>
 </dl>
 <blockquote class="inline_help"><?=t(
     'Claude gets filesystem and command access to this directory. Defaults to a dedicated folder rather than /root itself, since Unraid never persists workspace trust for a home directory. If Remote Control is running, Stop and Start it again after changing this.',
     'Claude tendrá acceso a archivos y comandos en este directorio. Por defecto usa una carpeta dedicada en vez de /root directamente, porque Unraid nunca recuerda la confianza del workspace para un directorio home. Si Control Remoto está corriendo, Detenlo e Inícialo de nuevo después de cambiar esto.'
 )?></blockquote>
-<input type="submit" value="<?=t('Save Directory', 'Guardar Directorio')?>">
 </form>
 
-<form method="POST" action="/update.php" target="progressFrame">
+<dl>
+<dt><?=t('Actions:', 'Acciones:')?></dt>
+<dd><span class="buttons-spaced">
+<!-- display:contents makes each button a direct item of the row, so the two
+     line up as native button rows do; the forms still submit as before. -->
+<form method="POST" action="/update.php" target="progressFrame" style="display:contents;">
 <input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh">
 <input type="hidden" name="#arg[0]" value="<?=$rc['running'] ? 'stop' : 'start'?>">
 <input type="hidden" name="#arg[1]" value="<?=htmlspecialchars($rc['slug'])?>">
 <input type="submit" value="<?=$rc['running'] ? t('Stop', 'Detener') : t('Start', 'Iniciar')?>">
 </form>
-
-<form method="POST" action="/update.php" target="progressFrame">
+<form method="POST" action="/update.php" target="progressFrame" style="display:contents;">
 <input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh">
 <input type="hidden" name="#arg[0]" value="new">
 <input type="hidden" name="#arg[1]" value="<?=htmlspecialchars($rc['slug'])?>">
+<input type="submit" value="<?=t('Start a new session', 'Iniciar sesión nueva')?>">
+</form>
+</span></dd>
+</dl>
 <blockquote class="inline_help"><?=t(
     'Start starts or resumes the session this account was last using. This starts a brand-new one instead: the account stops resuming the old session and opens an empty one, which is the way out when the old session can no longer be resumed. Nothing is deleted -- the old session stays in the list below and can be reconnected by its id.',
     'Iniciar arranca o retoma la sesión que esta cuenta estaba usando. Esto arranca una nueva desde cero: la cuenta deja de retomar la sesión anterior y abre una vacía, que es la salida cuando la sesión anterior ya no se puede retomar. No se borra nada -- la sesión anterior sigue en la lista de abajo y puedes reconectarte a ella por su id.'
 )?></blockquote>
-<input type="submit" value="<?=t('Start a new session', 'Iniciar sesión nueva')?>">
-</form>
 
 <form method="POST" action="/update.php" target="progressFrame">
 <input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh">
@@ -6429,22 +6596,28 @@ Tag="desktop"
 <input type="hidden" name="#arg[1]" value="<?=htmlspecialchars($rc['slug'])?>">
 <dl>
 <dt><?=t('Session ID:', 'ID de sesión:')?></dt>
-<dd>
-<input type="text" name="#arg[2]" list="claude-session-history" value="<?=htmlspecialchars($rc['last_sid'])?>" placeholder="session_..." class="narrow">
-</dd>
+<dd><span class="buttons-spaced"><input type="text" name="#arg[2]" list="claude-session-history" value="<?=htmlspecialchars($rc['last_sid'])?>" placeholder="session_...">
+<input type="submit" value="<?=t('Connect', 'Conectar')?>"></span></dd>
 </dl>
 <blockquote class="inline_help"><?=t(
     'Stops this account\'s current session (if any) and connects to a specific session id instead of the most recent one. Only a Remote Control session that still has a machine attached can be reconnected, which in practice means one this server started and kept alive: an id copied from claude.ai whose bridge has since stopped will not come back, however healthy the conversation looks there. If it cannot be resumed, a fresh session starts automatically and the notice above says why.',
     'Detiene la sesión actual de esta cuenta (si hay alguna) y conecta a un id de sesión concreto en vez de al más reciente. Solo se puede reconectar una sesión de Control Remoto que todavía tenga una máquina asociada, que en la práctica es una que haya arrancado y mantenido este servidor: un id copiado de claude.ai cuyo puente ya se paró no vuelve, por muy bien que se vea la conversación allí. Si no se puede retomar, arranca una sesión nueva automáticamente y el aviso de arriba explica por qué.'
 )?></blockquote>
-<input type="submit" value="<?=t('Connect to session ID', 'Conectar a ese ID de sesión')?>">
 </form>
 </div>
 <?php endforeach; ?>
 
+<?php
+// A history line's time as people read it, in the offset it was written with:
+// date() would use PHP's own zone, which on Unraid is UTC, and print the hour
+// shifted from what the line says. A time it cannot read is shown as written.
+function rc_when($iso) {
+    try { return (new DateTime($iso))->format('d/m/Y H:i'); } catch (Exception $e) { return $iso; }
+}
+?>
 <datalist id="claude-session-history">
 <?php foreach ($rc_history as $rc_sid => $rc_info): ?>
-<option value="<?=htmlspecialchars($rc_sid)?>"><?=htmlspecialchars($rc_info['time'])?> -- <?=htmlspecialchars($rc_info['dir'])?></option>
+<option value="<?=htmlspecialchars($rc_sid)?>"><?=htmlspecialchars(rc_when($rc_info['time']))?> -- <?=htmlspecialchars($rc_info['dir'])?></option>
 <?php endforeach; ?>
 </datalist>
 
@@ -6464,7 +6637,7 @@ foreach ($rc_accounts as $rc_a) {
 <table class="claude-history">
 <tr><th><?=t('When', 'Cuándo')?></th><th><?=t('Session ID', 'ID de sesión')?></th><?php if ($multi_account): ?><th><?=t('Account', 'Cuenta')?></th><?php endif; ?><th><?=t('Directory', 'Directorio')?></th><th><?=t('State', 'Estado')?></th><th></th></tr>
 <?php foreach ($rc_history as $rc_sid => $rc_info): ?>
-<tr><td><?=htmlspecialchars($rc_info['time'])?></td><td><code><?=htmlspecialchars($rc_sid)?></code></td>
+<tr><td title="<?=htmlspecialchars($rc_info['time'])?>"><?=htmlspecialchars(rc_when($rc_info['time']))?></td><td><code><?=htmlspecialchars($rc_sid)?></code></td>
 <?php if ($multi_account): ?><td><?php
 $rc_owner = $rc_info['profile'] ?? '';
 if ($rc_owner === '') {
@@ -6532,7 +6705,7 @@ if ($rc_owner === '') {
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeConfig.page">
-<SHA256>c9f67a4658393006406f2e7b5a12fb68d0ef662c79188f02df330d9e7fbfcabc</SHA256>
+<SHA256>165a7a6ddec7569f50516ffbd727dd23d8ddd5502255272e1526fd34d1e7d7cf</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:4"
@@ -6592,7 +6765,7 @@ $cc_fields = [
     'fields' => [
       ['key' => 'model', 'type' => 'choice',
        'options' => ['default', 'best', 'fable', 'opus', 'sonnet', 'haiku', 'opusplan', 'opus[1m]', 'sonnet[1m]',
-                     'claude-fable-5-1', 'claude-opus-5-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5'],
+                     'claude-fable-5-1', 'claude-opus-5-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-sonnet-5-5', 'claude-sonnet-5', 'claude-haiku-5-5', 'claude-haiku-4-5'],
        'labels' => [
          'default'    => t('default -- whatever your account uses', 'default -- el que use tu cuenta'),
          'best'       => t('best -- Fable where you have it, otherwise Opus', 'best -- Fable si lo tienes, si no Opus'),
@@ -6649,8 +6822,8 @@ $cc_fields = [
                     'Cambia el tono y las instrucciones con las que trabaja Claude. Sin definir es el estilo normal de Claude Code. «Otro» es para un estilo que hayas creado tú: escribe su nombre exacto, mayúsculas incluidas -- un nombre que no coincida exactamente vuelve sin avisar al estilo normal.')],
       ['key' => 'alwaysThinkingEnabled', 'type' => 'bool',
        'label' => t('Extended thinking', 'Pensamiento extendido'),
-       'help'  => t('Makes Claude "think out loud" before answering, on every message, on models that support it -- this is switched on by default on those models. Only set this to No if you would rather have quicker, more direct answers even on hard problems, in exchange for using fewer tokens.',
-                    'Hace que Claude «piense en voz alta» antes de responder, en todos los mensajes, en los modelos que lo permiten -- está activado de fábrica en esos modelos. Ponlo en No solo si prefieres respuestas más rápidas y directas, incluso en problemas difíciles, a cambio de gastar menos tokens.')],
+       'help'  => t('Makes Claude "think out loud" before answering, on every message, on models that support it -- switched on by default there. Opus 5.5, Sonnet 5.5, Haiku 5.5 and the Fable models always think, so No changes nothing on them. On other models, set it to No only if you would rather have quicker, more direct answers even on hard problems, in exchange for using fewer tokens.',
+                    'Hace que Claude «piense en voz alta» antes de responder, en todos los mensajes, en los modelos que lo permiten -- allí está activado de fábrica. Opus 5.5, Sonnet 5.5, Haiku 5.5 y los modelos Fable piensan siempre, así que en ellos No no cambia nada. En los demás, ponlo en No solo si prefieres respuestas más rápidas y directas, incluso en problemas difíciles, a cambio de gastar menos tokens.')],
       ['key' => 'showThinkingSummaries', 'type' => 'bool',
        'label' => t('Show what it is thinking', 'Mostrar lo que va pensando'),
        'help'  => t('Shows a readable summary of Claude\'s reasoning while it works, instead of a collapsed line. It changes nothing about how it thinks, only what you get to see.',
@@ -6724,8 +6897,8 @@ $cc_fields = [
                     'Permite que Claude organice varios agentes a la vez para un trabajo grande. Puede gastar bastante plan de golpe, así que conviene decidirlo a propósito. Sin definir, están activados -- salvo en el plan Pro, donde están desactivados.')],
       ['key' => 'ultracode', 'type' => 'bool',
        'label' => t('Ultracode', 'Ultracode'),
-       'help'  => t('Claude plans a workflow for every substantial task by itself, instead of waiting for you to ask for one, and every session runs at the highest effort (xhigh). It is the most expensive way to work. It needs workflows switched on, a model that supports xhigh effort and no effort ceiling below xhigh; without all three it still raises the effort as far as it is allowed. Unset, it is off -- /effort ultracode turns it on for a single session instead.',
-                    'Claude planifica por su cuenta un flujo de trabajo para cada tarea de cierta entidad, en vez de esperar a que se lo pidas, y todas las sesiones van al máximo esfuerzo (xhigh). Es la forma de trabajar más cara. Necesita los flujos de trabajo activados, un modelo que admita el esfuerzo xhigh y ningún tope de esfuerzo por debajo de xhigh; sin las tres cosas, igualmente sube el esfuerzo hasta donde se le permita. Sin definir, está apagado -- /effort ultracode lo enciende solo para una sesión.')],
+       'help'  => t('Claude plans a workflow for every substantial task by itself, instead of waiting for you to ask for one. It is the most expensive way to work. It needs workflows switched on and a model that supports xhigh effort. It no longer changes the effort level: that still comes from the Effort level and the levels saved per model. Unset, it is off -- /effort ultracode turns it on for a single session, and /effort ultracode off turns it off for one when this is on.',
+                    'Claude planifica por su cuenta un flujo de trabajo para cada tarea de cierta entidad, en vez de esperar a que se lo pidas. Es la forma de trabajar más cara. Necesita los flujos de trabajo activados y un modelo que admita el esfuerzo xhigh. Ya no cambia el nivel de esfuerzo: ese sigue saliendo del Nivel de esfuerzo y de los niveles guardados por modelo. Sin definir, está apagado -- /effort ultracode lo enciende solo para una sesión, y /effort ultracode off lo apaga para una cuando esto está encendido.')],
       ['key' => 'workflowSizeGuideline', 'type' => 'select', 'options' => ['small', 'medium', 'large', 'unrestricted'],
        'labels' => [
          'small'        => t('Small -- fewer than 5 agents', 'Pequeño -- menos de 5 agentes'),
@@ -6758,8 +6931,8 @@ $cc_fields = [
                     'Impide que las skills y los comandos personalizados ejecuten comandos de terminal por su cuenta. Un cierre razonable si instalas skills que no has escrito tú.')],
       ['key' => 'disableAllHooks', 'type' => 'bool',
        'label' => t('Disable all hooks', 'Desactivar todos los hooks'),
-       'help'  => t('Switches off, all at once, every custom automation you have set up: hooks (custom actions that run automatically), a custom status line, and any custom file-suggestion command.',
-                    'Desactiva de golpe todas las automatizaciones personalizadas que tengas: los hooks (acciones que se ejecutan automáticamente), la línea de estado personalizada, y cualquier comando propio de sugerencia de archivos.')],
+       'help'  => t('Switches off, all at once, every custom automation you have set up: hooks (custom actions that run automatically), mods (plugins whose code registers hooks), a custom status line, and any custom file-suggestion command. The mods built into Claude Code keep running.',
+                    'Desactiva de golpe todas las automatizaciones personalizadas que tengas: los hooks (acciones que se ejecutan automáticamente), los mods (plugins cuyo código registra hooks), la línea de estado personalizada, y cualquier comando propio de sugerencia de archivos. Los mods que trae Claude Code siguen funcionando.')],
     ],
   ],
   [
@@ -6773,7 +6946,7 @@ $cc_fields = [
          'default'           => t('default -- asks before anything but reading', 'default -- pregunta antes de todo salvo leer'),
          'acceptEdits'       => t('acceptEdits -- also edits files without asking', 'acceptEdits -- además edita archivos sin preguntar'),
          'plan'              => t('plan -- shows a plan and waits for your approval', 'plan -- enseña un plan y espera tu aprobación'),
-         'auto'              => t('auto -- does everything, with safety checks in the background', 'auto -- lo hace todo, con comprobaciones de seguridad de fondo'),
+         'auto'              => t('auto -- no routine questions; a background check reviews commands first', 'auto -- sin preguntas rutinarias; una revisión de fondo comprueba los comandos antes'),
          'dontAsk'           => t('dontAsk -- refuses whatever it would have asked about', 'dontAsk -- rechaza lo que habría preguntado'),
          'bypassPermissions' => t('bypassPermissions -- asks about nothing at all', 'bypassPermissions -- no pregunta absolutamente nada'),
        ],
@@ -6798,8 +6971,8 @@ $cc_fields = [
                     'Una ruta por línea. Carpetas donde Claude puede trabajar además de la carpeta desde la que arrancaste la sesión -- por ejemplo, /mnt/user/appdata.')],
       ['key' => 'permissions.blockReadsOutsideWorkingDirectories', 'type' => 'bool',
        'label' => t('Do not read outside the working folders', 'No leer fuera de las carpetas de trabajo'),
-       'help'  => t('Makes Claude refuse to read files outside the folder it is working in and the extra ones listed above. Worth turning on when sessions start from the root of the server, where everything is within reach by default.',
-                    'Hace que Claude se niegue a leer archivos fuera de la carpeta en la que trabaja y de las adicionales de arriba. Merece la pena activarlo cuando las sesiones arrancan desde la raíz del servidor, donde por defecto todo queda a su alcance.')],
+       'help'  => t('Makes Claude\'s file tools (reading, searching, listing) refuse files outside the folder it is working in and the extra ones listed above. Shell commands are not refused the same way: a command that reads such a path asks you first, as your permission mode decides. Worth turning on when sessions start from the root of the server, where everything is within reach by default.',
+                    'Hace que las herramientas de archivos de Claude (leer, buscar, listar) se nieguen a tocar archivos fuera de la carpeta en la que trabaja y de las adicionales de arriba. Los comandos de terminal no se rechazan igual: un comando que lea esas rutas te pregunta antes, según tu modo de permisos. Merece la pena activarlo cuando las sesiones arrancan desde la raíz del servidor, donde por defecto todo queda a su alcance.')],
       // Both keys take the one string "disable", not a boolean. Earlier
       // versions of this tab wrote true, which Claude Code does not document
       // for either; a true left in the file is read as the "forbidden" it was
@@ -7189,17 +7362,36 @@ function cc_quote($json) {
     return preg_replace('/^(.{77}).{4,}$/us', '$1...', $json);
 }
 
-// The effort levels saved per model under modelSettings. /effort writes there
-// since Claude Code 2.1.251, and a level saved there beats the top-level
-// effortLevel in the same file -- so with one present, the Effort level field
-// would otherwise change nothing for that model without saying why.
-function cc_model_efforts($settings) {
+// Values Claude Code saves per model under modelSettings, which beat the
+// top-level key of the same name in the same file: /effort saves the effort
+// level there since 2.1.251, and /autocompact the compaction window since
+// 2.1.288. With one present, the field above it would otherwise change
+// nothing for that model without saying why. Returns model => value.
+function cc_model_saved($settings, $field) {
     $out = [];
     foreach ((array)($settings['modelSettings'] ?? []) as $model => $entry) {
-        if (is_array($entry) && is_string($entry['effortLevel'] ?? null)) $out[$model] = $entry['effortLevel'];
+        if (is_array($entry) && isset($entry[$field]) && is_scalar($entry[$field])) $out[$model] = (string)$entry[$field];
     }
     return $out;
 }
+
+// The fields that have such per-model values, and what the row under each says.
+$cc_per_model = [
+    'effortLevel' => [
+        'label' => t('Levels saved per model', 'Niveles guardados por modelo'),
+        'note'  => t('Running /effort saved a level for %s. For those models it wins over the Effort level above, so changing that field alone does nothing for them.',
+                     'Al usar /effort se guardó un nivel para %s. En esos modelos manda sobre el Nivel de esfuerzo de arriba, así que cambiar solo ese campo no les hace nada.'),
+        'help'  => t('Removing them only takes out the level saved for each model. A per-model effort ceiling, if there is one, is kept.',
+                     'Quitarlos solo borra el nivel guardado para cada modelo. Si algún modelo tiene un tope de esfuerzo propio, se conserva.'),
+    ],
+    'autoCompactWindow' => [
+        'label' => t('Windows saved per model', 'Ventanas guardadas por modelo'),
+        'note'  => t('Running /autocompact saved a window for %s. For those models it wins over When to compact above, so changing that field alone does nothing for them.',
+                     'Al usar /autocompact se guardó una ventana para %s. En esos modelos manda sobre Cuándo compactar de arriba, así que cambiar solo ese campo no les hace nada.'),
+        'help'  => t('Removing them only takes out the window saved for each model; anything else saved for that model stays.',
+                     'Quitarlas solo borra la ventana guardada para cada modelo; lo demás que haya guardado para ese modelo se conserva.'),
+    ],
+];
 
 // The type of every field, for the browser: it decides there whether a value
 // travels as a string, a number, a boolean or a list, so a field cannot be
@@ -7317,7 +7509,7 @@ foreach ($cc_fields as $cc_g) foreach ($cc_g['fields'] as $cc_fd) $cc_types[$cc_
   <input type="text" id="<?=$cc_id?>-custom" value="<?=$cc_custom ? htmlspecialchars($cc_val) : ''?>" class="narrow"<?=$cc_custom ? '' : ' style="display:none;"'?>>
   <?php endif; ?>
 <?php elseif ($cc_fd['type'] === 'lines' || $cc_fd['type'] === 'kv'): ?>
-  <textarea <?=$cc_attrs?> rows="4" cols="60" spellcheck="false"><?=htmlspecialchars($cc_val)?></textarea>
+  <textarea <?=$cc_attrs?> rows="4" cols="60" spellcheck="false" class="cc-list" wrap="off"><?=htmlspecialchars($cc_val)?></textarea>
 <?php elseif ($cc_fd['type'] === 'number'): ?>
   <input type="number" min="<?=(int)($cc_fd['min'] ?? 1)?>"<?=isset($cc_fd['max']) ? ' max="' . (int)$cc_fd['max'] . '"' : ''?> step="1" <?=$cc_attrs?> value="<?=htmlspecialchars($cc_val)?>" class="narrow">
 <?php else: ?>
@@ -7336,21 +7528,19 @@ foreach ($cc_fields as $cc_g) foreach ($cc_g['fields'] as $cc_fd) $cc_types[$cc_
 </dd>
 </dl>
 <blockquote class="inline_help"><?=htmlspecialchars($cc_fd['help'])?></blockquote>
-<?php if ($cc_fd['key'] === 'effortLevel' && ($cc_efforts = cc_model_efforts($cc_f['settings']))): ?>
-<dl class="cc-model-effort">
-<dt><?=t('Levels saved per model', 'Niveles guardados por modelo')?></dt>
+<?php if (isset($cc_per_model[$cc_fd['key']]) && ($cc_saved = cc_model_saved($cc_f['settings'], $cc_fd['key']))): $cc_pm = $cc_per_model[$cc_fd['key']]; ?>
+<dl class="cc-per-model" data-field="<?=htmlspecialchars($cc_fd['key'])?>">
+<dt><?=htmlspecialchars($cc_pm['label'])?></dt>
 <dd>
-  <select id="cc-<?=htmlspecialchars($cc_f['slug'])?>-modelEffortClear">
+  <select id="cc-<?=htmlspecialchars($cc_f['slug'])?>-perModel-<?=htmlspecialchars($cc_fd['key'])?>">
     <option value=""><?=t('Keep them', 'Conservarlos')?></option>
     <option value="clear"><?=t('Remove them when saving', 'Quitarlos al guardar')?></option>
   </select>
-  <span class="warning"><i class="fa fa-warning fa-fw"></i> <?=htmlspecialchars(sprintf(t('Running /effort saved a level for %s. For those models it wins over the Effort level above, so changing that field alone does nothing for them.',
-                                                      'Al usar /effort se guardó un nivel para %s. En esos modelos manda sobre el Nivel de esfuerzo de arriba, así que cambiar solo ese campo no les hace nada.'),
-                                                    implode(', ', array_map(function ($m, $l) { return "$m ($l)"; }, array_keys($cc_efforts), $cc_efforts))))?></span>
+  <span class="warning"><i class="fa fa-warning fa-fw"></i> <?=htmlspecialchars(sprintf($cc_pm['note'],
+                                                    implode(', ', array_map(function ($m, $v) { return "$m ($v)"; }, array_keys($cc_saved), $cc_saved))))?></span>
 </dd>
 </dl>
-<blockquote class="inline_help"><?=t('Removing them only takes out the level saved for each model. A per-model effort ceiling, if there is one, is kept.',
-                                     'Quitarlos solo borra el nivel guardado para cada modelo. Si algún modelo tiene un tope de esfuerzo propio, se conserva.')?></blockquote>
+<blockquote class="inline_help"><?=htmlspecialchars($cc_pm['help'])?></blockquote>
 <?php endif; ?>
 <?php endforeach; ?>
 </div>
@@ -7579,21 +7769,27 @@ foreach ($cc_fields as $cc_g) foreach ($cc_g['fields'] as $cc_fd) $cc_types[$cc_
     var show = function (text, ok) { node.textContent = text; node.className = ok ? 'ok' : 'error'; };
     var values = collect(slug, show);
     if (values === null) return;
-    var clear = el('cc-' + slug + '-modelEffortClear');
+    // The per-model values asked to be removed, by field name.
+    var pane = el('cc-pane-' + slug), rows = pane.querySelectorAll('.cc-per-model'), cleared = [], i;
+    for (i = 0; i < rows.length; i++) {
+      var pick = rows[i].querySelector('select');
+      if (pick && pick.value === 'clear') cleared.push(rows[i].getAttribute('data-field'));
+    }
     var body = new URLSearchParams();
     body.set('action', 'save');
     body.set('profile', slug);
     body.set('values', JSON.stringify(values));
-    if (clear && clear.value === 'clear') body.set('clear_model_effort', '1');
+    if (cleared.length) body.set('clear_model_fields', cleared.join(','));
     post(body, node, function (d) {
       // Keep the JSON editor in step with what was just written, so the two
       // halves of this tab never show different files.
       var box = el('cc-raw-' + slug);
       if (box && typeof d.raw === 'string') box.value = d.raw;
       // What was just saved is now what the file holds: the corrections
-      // are written and the per-model levels, if asked, are gone.
-      var pane = el('cc-pane-' + slug), i, notes = pane.querySelectorAll('.cc-was, .cc-model-effort');
-      for (i = 0; i < notes.length; i++) if (notes[i].className.indexOf('cc-was') !== -1 || (clear && clear.value === 'clear')) notes[i].style.display = 'none';
+      // are written and the per-model values asked to go are gone.
+      var notes = pane.querySelectorAll('.cc-was');
+      for (i = 0; i < notes.length; i++) notes[i].style.display = 'none';
+      for (i = 0; i < rows.length; i++) if (cleared.indexOf(rows[i].getAttribute('data-field')) !== -1) rows[i].style.display = 'none';
       var dirty = pane.querySelectorAll('[data-dirty]');
       for (i = 0; i < dirty.length; i++) dirty[i].removeAttribute('data-dirty');
       snapshot(slug);
@@ -7615,7 +7811,7 @@ foreach ($cc_fields as $cc_g) foreach ($cc_g['fields'] as $cc_fd) $cc_types[$cc_
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodePermissions.page">
-<SHA256>aaad0ae137cd841b9477841638dbcd905716b05e58738c3d3ab5902049fabada</SHA256>
+<SHA256>72d08e60f01bcc9c06b95c044783aa4355063a1c034e173c82c720d47ff06959</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:5"
@@ -7746,7 +7942,9 @@ $ccp_lists = [
       foreach ($ccp_lists as $ccp_l) {
           $ccp_n[] = htmlspecialchars($ccp_l['label']) . ': <b>' . count($ccp_f['rules'][$ccp_l['key']]) . '</b>';
       }
-      echo implode(' &middot; ', $ccp_n);
+      // One element, not loose text and <b>s: Unraid stacks every child of a
+      // dd in its own row, which split this line into eight.
+      echo '<span>' . implode(' &middot; ', $ccp_n) . '</span>';
   }
 ?></dd>
 </dl>
@@ -7770,7 +7968,7 @@ $ccp_lists = [
 ?>
 <dl>
 <dt><?=htmlspecialchars($ccp_l['label'])?></dt>
-<dd><textarea id="<?=$ccp_id?>" data-list="<?=$ccp_l['key']?>" rows="8" cols="90" spellcheck="false" style="font-family:monospace;"><?=htmlspecialchars(implode("\n", $ccp_f['rules'][$ccp_l['key']]))?></textarea></dd>
+<dd><textarea id="<?=$ccp_id?>" data-list="<?=$ccp_l['key']?>" rows="8" cols="90" spellcheck="false" class="cc-list" wrap="off" style="font-family:monospace;"><?=htmlspecialchars(implode("\n", $ccp_f['rules'][$ccp_l['key']]))?></textarea></dd>
 </dl>
 <blockquote class="inline_help"><?=htmlspecialchars($ccp_l['help'])?></blockquote>
 <?php endforeach; ?>
@@ -7794,8 +7992,11 @@ foreach ($ccp_modes as $ccp_mv => $ccp_ml): ?>
     'What happens when nothing above matches. Leave it unset unless you have a reason: bypassPermissions means a session in this directory does whatever it decides to do, with nothing asked and nothing to stop it.',
     'Qué pasa cuando nada de lo de arriba encaja. Déjalo sin definir salvo que tengas un motivo: bypassPermissions significa que una sesión en esta carpeta hace lo que decida hacer, sin preguntar nada y sin nada que la detenga.'
 )?></blockquote>
-<input type="button" value="<?=t('Save rules', 'Guardar reglas')?>" onclick="ccpSave('<?=htmlspecialchars($ccp_f['key'])?>')">
-<span id="ccp-msg-<?=htmlspecialchars($ccp_f['key'])?>" style="margin-left:10px;"></span>
+<dl>
+<dt>&nbsp;</dt>
+<dd><span class="buttons-spaced"><input type="button" value="<?=t('Save rules', 'Guardar reglas')?>" onclick="ccpSave('<?=htmlspecialchars($ccp_f['key'])?>')">
+<span id="ccp-msg-<?=htmlspecialchars($ccp_f['key'])?>"></span></span></dd>
+</dl>
 <blockquote class="inline_help"><?=t('Saves only the rules on this tab. Anything else in the file is read, kept and written back unchanged.',
                                      'Guarda sólo las reglas de esta pestaña. Lo demás que haya en el archivo se lee, se conserva y se vuelve a escribir igual.')?></blockquote>
 </div>
@@ -7892,7 +8093,7 @@ foreach ($ccp_modes as $ccp_mv => $ccp_ml): ?>
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeSettings.page">
-<SHA256>8cdad622ffe5c3f7281d3c36e87e0b7531577fb527b5b21f456d069ba2359f34</SHA256>
+<SHA256>4be0bd0edb0c0b0a2798f442e498228378376dc5139e8cc885a10a9f9ae3be37</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:6"
@@ -7907,7 +8108,7 @@ Tag="cog"
 <input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh">
 <dl>
 <dt><?=t('Appdata Path:', 'Ruta de appdata:')?></dt>
-<dd><input type="text" name="APPDATA_PATH" value="<?=htmlspecialchars($appdata_path)?>" class="narrow"></dd>
+<dd><input type="text" name="APPDATA_PATH" value="<?=htmlspecialchars($appdata_path)?>"></dd>
 </dl>
 <blockquote class="inline_help"><?=t('Store Claude config on your array to avoid flash wear.', 'Guarda la configuración de Claude en tu array para no desgastar el flash drive.')?></blockquote>
 <dl>
@@ -7918,7 +8119,10 @@ Tag="cog"
     'Every update downloads a new copy of Claude Code, around 200 MB each, and they pile up in a folder that on Unraid lives in RAM. Updating and rebooting now delete the old ones, keeping this many. The version actually running is always kept, whatever you put here.',
     'Cada actualización se descarga una copia nueva de Claude Code, unos 200 MB cada una, y se van acumulando en una carpeta que en Unraid vive en la RAM. Al actualizar y al arrancar se borran las viejas, conservando estas. La versión que está funcionando se conserva siempre, pongas lo que pongas aquí.'
 )?></blockquote>
-<input type="submit" value="<?=t('Apply', 'Aplicar')?>">
+<dl>
+<dt>&nbsp;</dt>
+<dd><span class="buttons-spaced"><input type="submit" value="<?=t('Apply', 'Aplicar')?>"></span></dd>
+</dl>
 </form>
 </div>
 
@@ -7947,23 +8151,20 @@ Tag="cog"
 </div>
 
 <div class="claude-box">
-<h4><?=t('Update Claude Code', 'Actualizar Claude Code')?></h4>
-<p><?=t('Checks with Anthropic for a newer Claude Code release and installs it if available. Use this to get new versions -- once Claude Code is installed, Reinstall below will not fetch a newer one on its own.', 'Comprueba si hay una versión más reciente de Claude Code y la instala si la hay. Usa esto para obtener nuevas versiones -- una vez instalado, Reinstalar no busca una versión más nueva por sí solo.')?></p>
-<!-- openBox streams the script's output into a modal, line by line, and adds a
-     Close button when it exits; closing it reloads this page so the version
-     shown above is the one that just got installed. The alternative Unraid
-     offers, POSTing to update.php with target="progressFrame", shows the
-     output in a one-line strip at the bottom of the window, where an
-     installer's output is effectively unreadable. -->
-<input type="button" value="<?=t('Check for Updates', 'Buscar actualizaciones')?>"
-       onclick="openBox('/plugins/claude-code/scripts/update-claude.sh','<?=t('Updating Claude Code', 'Actualizando Claude Code')?>',600,900,true);">
-</div>
-
-<div class="claude-box">
-<h4><?=t('Reinstall Claude Code', 'Reinstalar Claude Code')?></h4>
-<p><?=t('Fixes a broken setup (missing symlink, stuck config) by re-running the installer. Does not check for a newer version -- use Update above for that.', 'Arregla una instalación rota (symlink perdido, configuración atascada) volviendo a ejecutar el instalador. No comprueba si hay una versión nueva -- usa Actualizar arriba para eso.')?></p>
-<input type="button" value="<?=t('Reinstall', 'Reinstalar')?>"
-       onclick="openBox('/plugins/claude-code/scripts/reinstall-and-log.sh','<?=t('Reinstalling Claude Code', 'Reinstalando Claude Code')?>',600,900,true);">
+<h4><?=t('Claude Code', 'Claude Code')?></h4>
+<!-- Both run in Unraid's own progress window (see ccRunScript in common.php):
+     the output streams in line by line, and closing the window when it is
+     done reloads this page so the version shown is the one just installed. -->
+<dl>
+<dt><?=t('Update:', 'Actualizar:')?></dt>
+<dd><span class="buttons-spaced"><input type="button" value="<?=t('Check for Updates', 'Buscar actualizaciones')?>"
+       onclick="ccRunScript('update-claude.sh','<?=t('Updating Claude Code', 'Actualizando Claude Code')?>');"></span>
+<span class="input-instructions"><?=t('Checks with Anthropic for a newer Claude Code release and installs it if there is one.', 'Comprueba si hay una versión más reciente de Claude Code y la instala si la hay.')?></span></dd>
+<dt><?=t('Reinstall:', 'Reinstalar:')?></dt>
+<dd><span class="buttons-spaced"><input type="button" value="<?=t('Reinstall', 'Reinstalar')?>"
+       onclick="ccRunScript('reinstall-and-log.sh','<?=t('Reinstalling Claude Code', 'Reinstalando Claude Code')?>');"></span>
+<span class="input-instructions"><?=t('Fixes a broken setup (missing symlink, stuck config) by running the installer again. It does not look for a newer version: that is what Update is for.', 'Arregla una instalación rota (symlink perdido, configuración atascada) volviendo a ejecutar el instalador. No busca una versión más nueva: para eso está Actualizar.')?></span></dd>
+</dl>
 </div>
 ]]>
 </INLINE>
