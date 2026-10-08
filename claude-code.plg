@@ -1,12 +1,18 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.10.08"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.10.08.2"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.10.08.2
+- New option on the Settings tab: an Unraid notification when a newer Claude
+  Code is published. Checked once a day after Unraid's own plugin checks, sent
+  through the same agents as plugin update notices, once per version.
+- Refresh account details reports every account on its own line and reloads
+  the page, so one stopped account no longer hides that the others updated.
 ###2026.10.08
 - Update and Reinstall run in Unraid's own progress window (openPlugin): the
   output streams in, closing the window leaves the job running with Unraid's
@@ -8394,7 +8400,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.10.08 has been installed!"
+    echo " Claude Code plugin v2026.10.08.2 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
