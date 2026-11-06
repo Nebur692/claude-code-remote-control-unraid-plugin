@@ -1,12 +1,35 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.10.08.2"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.11.06"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.11.06
+- The Spanish tab titles no longer make Unraid and Community Applications
+  report the Spanish language pack as installed on a server that does not
+  have it (issue #1). The translation is copied into Unraid's language folder
+  only while that pack is installed, comes back by itself after the pack is
+  updated (which used to wipe it until the next reboot), and a folder left
+  behind by an earlier version is removed on update.
+- New Changelog tab: what each Claude Code release changed, read from the
+  official changelog, with the releases newer than the installed one first,
+  a search across every release and an option to hide the fixes.
+- Update no longer stalls on an interrupted download. Claude Code leaves an
+  empty file for a version it did not finish downloading; Update took that as
+  the newest version and applied nothing without a word, and cleaning up old
+  versions counted it as a real one and deleted the newest good version. Both
+  now skip it, and empty leftovers and abandoned partial downloads older than
+  an hour are removed, which frees their space in RAM.
+- The Dashboard shows when each account's claude.ai sign-in ends, highlighted
+  from 10 days before, since after that date the account is signed out.
+- Up to date with Claude Code 2.1.318: new settings to compact a conversation
+  while idle and to refuse writes outside the working folders, "max" (no cap)
+  for the effort ceiling, notes on fast mode ending on Opus 4.8 and on how
+  subagents behave when a message is flagged, and Remote Control stops with a
+  clear message when its folder cannot be found.
 ###2026.10.08.2
 - New option on the Settings tab: an Unraid notification when a newer Claude
   Code is published. Checked once a day after Unraid's own plugin checks, sent
@@ -736,7 +759,7 @@ fi
 
 <!-- Install/setup script -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh" Mode="0755">
-<SHA256>5ecbadca5f5b8f7c946283db914e2a594db0b78c5ac296c2f88482664a2b446a</SHA256>
+<SHA256>0dec8cb9163907ba185567be3051ee07610c8238727ae1a0b61220ee422d2794</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1209,6 +1232,68 @@ CRONEOF
     fi
 }
 
+# The tab titles are translated through languages/LOCALE/claude-code.txt, in
+# Unraid's own language directory. That directory belongs to the language pack,
+# and three things follow from it:
+#  - Its mere existence is what Unraid and Community Applications take as "this
+#    pack is installed". Writing into it on a server without the pack made the
+#    pack look installed, and "language remove" then failed because there was
+#    nothing to remove (issue #1).
+#  - Installing or updating a pack empties the directory of every .txt and .dot
+#    before unpacking, which takes our file with it.
+#  - Installing a pack later does not run anything of this plugin.
+# So the file only goes there while the pack really is installed (Unraid's own
+# record of it is /var/log/plugins/lang-LOCALE.xml, written both by the
+# language manager and by a manual upload), it is put back whenever it went
+# missing (here at install and boot, and from common.php when a tab loads), and
+# a directory left behind by an older version on a server without the pack is
+# taken away again. rmdir, never rm -r: it only goes if nothing else is in it.
+setup_translations() {
+    local src dst loc
+    for src in /usr/local/emhttp/plugins/claude-code/languages/*/claude-code.txt; do
+        [ -f "$src" ] || continue
+        loc=$(basename "$(dirname "$src")")
+        dst="/usr/local/emhttp/languages/$loc"
+        if [ -e "/var/log/plugins/lang-$loc.xml" ] && [ -d "$dst" ]; then
+            if ! cmp -s "$src" "$dst/claude-code.txt"; then
+                # Unraid caches the parsed file beside it and only rebuilds the
+                # cache when it is missing.
+                cp "$src" "$dst/claude-code.txt" && rm -f "$dst/claude-code.dot"
+            fi
+        else
+            remove_translation "$loc"
+        fi
+    done
+}
+
+remove_translation() {
+    local dir="/usr/local/emhttp/languages/$1"
+    [ -d "$dir" ] || return 0
+    rm -f "$dir/claude-code.txt" "$dir/claude-code.dot"
+    # Only a directory that held nothing but our file, on a server without the
+    # pack. The script Unraid builds from it goes too, as Unraid's own removal
+    # does; it is rebuilt if the pack is ever installed.
+    if [ ! -e "/var/log/plugins/lang-$1.xml" ] && rmdir "$dir" 2>/dev/null; then
+        rm -f "/usr/local/emhttp/webGui/javascript/translate.$1.js"
+    fi
+}
+
+# Every install and update, and again from the removal script: a plugin update
+# is the only thing that reaches servers where an older version created the
+# directory.
+if [ "$1" = "translations" ]; then
+    setup_translations
+    exit 0
+fi
+
+if [ "$1" = "remove-translations" ]; then
+    for d in /usr/local/emhttp/languages/*/; do
+        [ -f "$d/claude-code.txt" ] || [ -f "$d/claude-code.dot" ] || continue
+        remove_translation "$(basename "$d")"
+    done
+    exit 0
+fi
+
 # Same reasoning as the "launcher" entry point right below: the post-install
 # block runs on every install and update, while the body of this script only
 # runs at boot or on a Reinstall. Without an entry point of its own, a new or
@@ -1242,6 +1327,7 @@ fi
 setup_persistence
 setup_claude_json
 setup_slash_project
+setup_translations
 
 # Old versions pile up, and on Unraid that is RAM. "claude update" downloads
 # every new version into $VERSIONS_DIR and the installer's own cleanup is
@@ -1271,8 +1357,12 @@ prune_versions() {
     running_ver="${running_ver%% *}"
 
     # The newest $keep, by version order rather than by date: a file's mtime is
-    # when it was downloaded, which is not the same thing.
-    keep_list=$(ls -1 "$VERSIONS_DIR" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n "$keep")
+    # when it was downloaded, which is not the same thing. Only complete ones:
+    # the installer creates versions/X empty before downloading and renames the
+    # finished file over it, so an interrupted download leaves an empty X behind.
+    # Counted as a version, two of those took both places and the newest real
+    # one was pruned.
+    keep_list=$(for f in "$VERSIONS_DIR"/*; do [ -s "$f" ] && [ -x "$f" ] && basename "$f"; done | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n "$keep")
     [ -n "$running_ver" ] && keep_list="$keep_list
 $running_ver"
 
@@ -1292,6 +1382,10 @@ $base" ;;
         # Only ever a plain version number inside this one directory.
         echo "$base" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || continue
         if echo "$keep_list" | grep -qxF "$base"; then continue; fi
+        # An empty placeholder less than an hour old may be a download still in
+        # progress. Older than that it was abandoned (the CLI's own cleanup uses
+        # the same hour) and is removed like any old version.
+        if [ ! -s "$f" ] && [ -n "$(find "$f" -mmin -60 2>/dev/null)" ]; then continue; fi
         # Identical to what is running, under a different name. Belt and braces
         # with the version check above, and cheap next to the cost of getting
         # this wrong.
@@ -1312,8 +1406,36 @@ $base" ;;
         fi
     done
 
+    # The partial downloads behind those placeholders, in the CLI's staging
+    # folder: a few hundred MB each, in RAM. The CLI only sweeps them after an
+    # install it completed itself, which on this plugin never happens, so they
+    # stayed until the next reboot. Only folders named the way the CLI names
+    # them (version.pid.timestamp.hex), whose process is gone and in which
+    # nothing has been written for an hour.
+    local stage="/root/.cache/claude/staging" d pid
+    for d in "$stage"/*; do
+        [ -d "$d" ] || continue
+        base=$(basename "$d")
+        echo "$base" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.[0-9a-f]+$' || continue
+        pid=$(echo "$base" | cut -d. -f4)
+        [ -d "/proc/$pid" ] && continue
+        [ -n "$(find "$d" -mmin -60 2>/dev/null | head -n 1)" ] && continue
+        if [ "$dry" = "dry" ]; then
+            echo "  would remove the unfinished download $base"
+            removed=$((removed + 1))
+            continue
+        fi
+        p=$(du -sb "$d" 2>/dev/null | cut -f1)
+        freed=$((freed + ${p:-0}))
+        if rm -rf -- "$d"; then
+            removed=$((removed + 1))
+        else
+            echo "WARNING: could not remove the unfinished download $base."
+        fi
+    done
+
     if [ "$removed" -gt 0 ] && [ "$dry" != "dry" ]; then
-        echo "Removed $removed old version(s) of Claude Code, freeing $((freed / 1024 / 1024)) MB."
+        echo "Removed $removed old version(s) or unfinished download(s) of Claude Code, freeing $((freed / 1024 / 1024)) MB."
         echo "Kept: $(ls -1 "$VERSIONS_DIR" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tr '\n' ' ')"
         echo "On Unraid this space is RAM, not disk."
     fi
@@ -1440,7 +1562,7 @@ publish "_DONE_" ""
      restore_cached_binary() restores from on every boot, so without
      re-caching here, any update would silently be reverted on next reboot. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/update-claude.sh" Mode="0755">
-<SHA256>bb7f8eb2395675b82d2654649de4a67f2aec0bc2ef2abe3159e03de66b627c7c</SHA256>
+<SHA256>7dadedc431a5f73a6c85edf3703f63ddb71d1ba8e60f350fac844ca7cb7974c5</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1558,8 +1680,12 @@ prune_versions() {
     running_ver="${running_ver%% *}"
 
     # The newest $keep, by version order rather than by date: a file's mtime is
-    # when it was downloaded, which is not the same thing.
-    keep_list=$(ls -1 "$VERSIONS_DIR" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n "$keep")
+    # when it was downloaded, which is not the same thing. Only complete ones:
+    # the installer creates versions/X empty before downloading and renames the
+    # finished file over it, so an interrupted download leaves an empty X behind.
+    # Counted as a version, two of those took both places and the newest real
+    # one was pruned.
+    keep_list=$(for f in "$VERSIONS_DIR"/*; do [ -s "$f" ] && [ -x "$f" ] && basename "$f"; done | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n "$keep")
     [ -n "$running_ver" ] && keep_list="$keep_list
 $running_ver"
 
@@ -1579,6 +1705,10 @@ $base" ;;
         # Only ever a plain version number inside this one directory.
         echo "$base" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || continue
         if echo "$keep_list" | grep -qxF "$base"; then continue; fi
+        # An empty placeholder less than an hour old may be a download still in
+        # progress. Older than that it was abandoned (the CLI's own cleanup uses
+        # the same hour) and is removed like any old version.
+        if [ ! -s "$f" ] && [ -n "$(find "$f" -mmin -60 2>/dev/null)" ]; then continue; fi
         # Identical to what is running, under a different name. Belt and braces
         # with the version check above, and cheap next to the cost of getting
         # this wrong.
@@ -1599,8 +1729,36 @@ $base" ;;
         fi
     done
 
+    # The partial downloads behind those placeholders, in the CLI's staging
+    # folder: a few hundred MB each, in RAM. The CLI only sweeps them after an
+    # install it completed itself, which on this plugin never happens, so they
+    # stayed until the next reboot. Only folders named the way the CLI names
+    # them (version.pid.timestamp.hex), whose process is gone and in which
+    # nothing has been written for an hour.
+    local stage="/root/.cache/claude/staging" d pid
+    for d in "$stage"/*; do
+        [ -d "$d" ] || continue
+        base=$(basename "$d")
+        echo "$base" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.[0-9a-f]+$' || continue
+        pid=$(echo "$base" | cut -d. -f4)
+        [ -d "/proc/$pid" ] && continue
+        [ -n "$(find "$d" -mmin -60 2>/dev/null | head -n 1)" ] && continue
+        if [ "$dry" = "dry" ]; then
+            echo "  would remove the unfinished download $base"
+            removed=$((removed + 1))
+            continue
+        fi
+        p=$(du -sb "$d" 2>/dev/null | cut -f1)
+        freed=$((freed + ${p:-0}))
+        if rm -rf -- "$d"; then
+            removed=$((removed + 1))
+        else
+            echo "WARNING: could not remove the unfinished download $base."
+        fi
+    done
+
     if [ "$removed" -gt 0 ] && [ "$dry" != "dry" ]; then
-        echo "Removed $removed old version(s) of Claude Code, freeing $((freed / 1024 / 1024)) MB."
+        echo "Removed $removed old version(s) or unfinished download(s) of Claude Code, freeing $((freed / 1024 / 1024)) MB."
         echo "Kept: $(ls -1 "$VERSIONS_DIR" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tr '\n' ' ')"
         echo "On Unraid this space is RAM, not disk."
     fi
@@ -1614,7 +1772,14 @@ $base" ;;
 # by hand below, or "Now running" would still show the old version.
 applied=""
 if [ -d "$VERSIONS_DIR" ]; then
-    latest=$(ls -1 "$VERSIONS_DIR" 2>/dev/null | sort -V | tail -1)
+    # The newest complete one. An interrupted download leaves its version as an
+    # empty file (see prune_versions), and taking that as the newest meant
+    # nothing was applied and nothing was said.
+    latest=$(for f in "$VERSIONS_DIR"/*; do [ -s "$f" ] && [ -x "$f" ] && basename "$f"; done | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+    newest=$(ls -1 "$VERSIONS_DIR" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+    if [ -n "$newest" ] && [ "$newest" != "$latest" ]; then
+        echo "Note: version $newest is an unfinished download (empty or not executable), so it is skipped."
+    fi
     if [ -n "$latest" ] && [ -x "$VERSIONS_DIR/$latest" ]; then
         if cmp -s "$VERSIONS_DIR/$latest" "$RUNTIME_BIN"; then
             echo "Version $latest is already the one installed at $RUNTIME_BIN."
@@ -1696,7 +1861,7 @@ prune_versions
      taken over as "most recent"; see the connect subcommand and the
      Settings page's Session ID field. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh" Mode="0755">
-<SHA256>bd4d095f4ebc485efb30e6825f40c602856cb63e0c916faa2767271b25cb5bc6</SHA256>
+<SHA256>e0c7ecf98c5048c6d7d79e2de45bf26ea8875d895846daa8c0a772baffb56996</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -2091,6 +2256,18 @@ do_run() {
         if printf '%s\n' "$output" | grep -q "Workspace not trusted"; then
             echo "=== Remote Control cannot start in $rc_dir: Claude Code has not been told to trust this folder. Open a terminal, run claude in $rc_dir once and accept the question about trusting it, then start Remote Control again. If $rc_dir is your home directory, pick another folder: trust is never saved for that one. $(date) ===" >> "$LOGFILE"
             cc_log "Remote Control for account '$PROFILE' stopped: $rc_dir is not a trusted folder (run claude there once, then start it again)"
+            rm -f "$ENABLED_FLAG"
+            break
+        fi
+
+        # The folder itself is gone. The loop creates it before every start, so
+        # this means it vanished in between or cannot be entered -- a share that
+        # was unmounted, say. Since 2.1.318 the CLI says so by name ("Session
+        # failed: working folder not found: '<dir>'") instead of "spawn error:
+        # ENOENT"; retrying every five seconds would only repeat it.
+        if printf '%s\n' "$output" | grep -qa "working folder not found"; then
+            echo "=== Remote Control cannot start in $rc_dir: Claude Code cannot find or enter that folder. Check that the share it is on is mounted (the array started), then start Remote Control again. $(date) ===" >> "$LOGFILE"
+            cc_log "Remote Control for account '$PROFILE' stopped: its folder $rc_dir could not be found (is its share mounted?)"
             rm -f "$ENABLED_FLAG"
             break
         fi
@@ -3354,6 +3531,137 @@ echo json_encode([
 </INLINE>
 </FILE>
 
+<!-- Claude Code's changelog, for the Changelog tab -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-changelog.php" Mode="0644">
+<SHA256>bc0b83caaf97110403d10bc36dea8a24f7e2b409783fa46a4158699c965c542a</SHA256>
+<INLINE>
+<![CDATA[
+<?php
+// Claude Code's changelog, for the Changelog tab.
+//
+// The source is the CHANGELOG.md published in the public anthropics/claude-code
+// repository: one "## x.y.z" heading per release, newest first, each followed
+// by a list of "- " entries. It is over a megabyte and hundreds of releases, so
+// it is downloaded at most every six hours (a quarter of an hour after a failed
+// download, which keeps the last good copy), parsed once into /var/tmp, and the
+// page only ever receives the slice it shows:
+//   newer   every release after the one installed here, the part worth reading
+//   page    the installed release and older ones, `limit` at a time from `offset`
+//   q       instead of the page, the releases with an entry containing q, and
+//           only those entries
+// Read-only and GET-only: nothing here changes anything on the server.
+
+header('Content-Type: application/json');
+header('Cache-Control: no-store');
+
+const CL_URL   = 'https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md';
+const CL_CACHE = '/var/tmp/claude-code-changelog.json';
+
+function cl_version($s) {
+    return preg_match('/^(\d+\.\d+\.\d+)(?:\s|$)/', trim((string)$s), $m) ? $m[1] : null;
+}
+
+// Returns [[v, [entry, ...]], ...] in file order, or null if this does not look
+// like the changelog at all (an error page, a truncated download).
+function cl_parse($md) {
+    $out = [];
+    $cur = -1;
+    foreach (preg_split('/\r?\n/', (string)$md) as $line) {
+        if (preg_match('/^##\s+(\d+\.\d+\.\d+)\b/', $line, $m)) {
+            $out[] = ['v' => $m[1], 'items' => []];
+            $cur = count($out) - 1;
+            continue;
+        }
+        if ($cur < 0 || trim($line) === '') continue;
+        if (preg_match('/^- (.*)$/', $line, $m)) {
+            $out[$cur]['items'][] = $m[1];
+        } elseif (preg_match('/^\s+- (.*)$/', $line, $m) && $out[$cur]['items']) {
+            // A nested entry belongs to the one above it.
+            $out[$cur]['items'][count($out[$cur]['items']) - 1] .= "\n" . $m[1];
+        } elseif ($out[$cur]['items']) {
+            // A wrapped line continues the entry above it.
+            $out[$cur]['items'][count($out[$cur]['items']) - 1] .= ' ' . trim($line);
+        }
+    }
+    return count($out) >= 10 ? $out : null;
+}
+
+$c = @json_decode((string)@file_get_contents(CL_CACHE), true);
+if (!is_array($c)) $c = [];
+$ttl = !empty($c['ok']) ? 6 * 3600 : 15 * 60;
+if (time() - (int)($c['checked_at'] ?? 0) > $ttl) {
+    $ch = curl_init(CL_URL);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_CONNECTTIMEOUT => 5,
+        CURLOPT_TIMEOUT        => 20,
+    ]);
+    $body = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    $parsed = ($code === 200 && is_string($body)) ? cl_parse($body) : null;
+    if ($parsed !== null) {
+        $c = ['ok' => true, 'checked_at' => time(), 'fetched_at' => time(), 'versions' => $parsed];
+    } else {
+        $c['ok'] = false;
+        $c['checked_at'] = time();
+    }
+    $tmp = CL_CACHE . '.tmp.' . getmypid();
+    if (@file_put_contents($tmp, json_encode($c)) !== false) @rename($tmp, CL_CACHE);
+}
+
+$versions  = is_array($c['versions'] ?? null) ? $c['versions'] : [];
+$installed = cl_version(shell_exec('claude --version 2>/dev/null'));
+$offset = max(0, (int)($_GET['offset'] ?? 0));
+$limit  = min(50, max(1, (int)($_GET['limit'] ?? 10)));
+$q = trim(substr((string)($_GET['q'] ?? ''), 0, 100));
+
+$newer = [];
+$older = [];
+foreach ($versions as $r) {
+    if ($installed !== null && version_compare($r['v'], $installed, '>')) $newer[] = $r;
+    else $older[] = $r;
+}
+
+$res = [
+    'ok'         => !empty($c['ok']),
+    'fetched_at' => (int)($c['fetched_at'] ?? 0),
+    'source'     => 'https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md',
+    'installed'  => $installed,
+    'latest'     => $versions[0]['v'] ?? null,
+    'releases'   => count($versions),
+];
+if ($q !== '') {
+    $hits = [];
+    $count = 0;
+    foreach ($versions as $r) {
+        $items = array_values(array_filter($r['items'], function ($i) use ($q) {
+            return stripos($i, $q) !== false;
+        }));
+        if (!$items) continue;
+        $count += count($items);
+        $hits[] = ['v' => $r['v'], 'items' => $items];
+    }
+    $res['q']        = $q;
+    $res['matches']  = $count;
+    $res['total']    = count($hits);
+    $res['page']     = array_slice($hits, $offset, $limit);
+} else {
+    // Capped so that a server many months behind still gets a page that loads;
+    // the rest is not lost, it heads the paged list below.
+    $res['newer']       = array_slice($newer, 0, 60);
+    $res['newer_count'] = count($newer);
+    $older = array_merge(array_slice($newer, 60), $older);
+    $res['total']       = count($older);
+    $res['page']        = array_slice($older, $offset, $limit);
+}
+$res['has_more'] = $offset + $limit < $res['total'];
+echo json_encode($res);
+]]>
+</INLINE>
+</FILE>
+
 <!-- Plan pace: how fast each usage window is filling, from the sampler history -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-pace.php" Mode="0644">
 <SHA256>b2882d91452c7ec61b0a52abf427fe33039f500a1cfc7819945cae06e7e3b2c4</SHA256>
@@ -3977,7 +4285,7 @@ respond([
 <!-- Shared preamble and styling for the tabs. Every tab requires this once,
      so the state it computes is worked out a single time per request. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/common.php" Mode="0644">
-<SHA256>f2316c4ddbb26bc18f8a3a83b3a3d87e3af8645f8c35501b978ff76c7d6dd713</SHA256>
+<SHA256>b8b4c0e4739c7dfcdfc9f8bd9c4e3f882f6068f8dd9cd6eb06d3a740d9d93344</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -4001,6 +4309,25 @@ $isSpanish = stripos($dynamixCfg['locale'] ?? 'en_US', 'es_') === 0;
 function t($en, $es) {
     global $isSpanish;
     return $isSpanish ? $es : $en;
+}
+
+// The tab titles' translation (see setup_translations in install-claude.sh).
+// Installing or updating a language pack empties its directory, and nothing of
+// this plugin runs at that moment, so the file is put back from here when the
+// language in use has its pack installed and the file went missing. Never
+// creates the directory: that is the language pack's to create. Takes effect
+// from the next page load, since this one already has its titles.
+$cc_locale = (string)($dynamixCfg['locale'] ?? '');
+if (preg_match('/^[a-z]{2}_[A-Z]{2}$/', $cc_locale)) {
+    $cc_lang_src = "/usr/local/emhttp/plugins/claude-code/languages/$cc_locale/claude-code.txt";
+    $cc_lang_dir = "/usr/local/emhttp/languages/$cc_locale";
+    if (is_file($cc_lang_src) && is_dir($cc_lang_dir)
+        && file_exists("/var/log/plugins/lang-$cc_locale.xml")
+        && !is_file("$cc_lang_dir/claude-code.txt")) {
+        if (@copy($cc_lang_src, "$cc_lang_dir/claude-code.txt")) {
+            @unlink("$cc_lang_dir/claude-code.dot");
+        }
+    }
 }
 
 $cfg = file_exists($cfg_file) ? parse_ini_file($cfg_file) : [];
@@ -4075,6 +4402,28 @@ foreach ($profiles as $i => $prow) {
     }
 }
 
+// When an account's claude.ai sign-in ends: the refresh token's expiry in its
+// .credentials.json, in milliseconds. Claude Code renews the short-lived access
+// token by itself, but not the sign-in; once this date passes the account is
+// signed out (Remote Control and the usage panel stop with it) until someone
+// runs `claude auth login` again. It is the same date Claude Code 2.1.318 and
+// later report as loginExpiresAt and warn about 10 days ahead -- only in a
+// terminal, though, which on a server nobody may be looking at. Same paths as
+// claude-usage.php. Never reads or passes on anything but the date.
+function cc_login_expires($slug, $appdata_path) {
+    $paths = $slug === 'default'
+        ? ['/root/.claude/.credentials.json', "$appdata_path/.claude/.credentials.json"]
+        : ["$appdata_path/profiles/$slug/.credentials.json"];
+    foreach ($paths as $path) {
+        if (!is_readable($path)) continue;
+        $oauth = json_decode((string)@file_get_contents($path), true)['claudeAiOauth'] ?? null;
+        if (is_array($oauth) && is_numeric($oauth['refreshTokenExpiresAt'] ?? null)) {
+            return intdiv((int)$oauth['refreshTokenExpiresAt'], 1000);
+        }
+    }
+    return null;
+}
+
 // The accounts the usage panel reports on. Always at least one entry: the plan
 // figures belong to an account even when there is only one of them, and saying
 // which is the point of the panel.
@@ -4083,12 +4432,14 @@ foreach ($profiles as $prow) {
     $usage_accounts[] = [
         'slug'  => $prow['slug'],
         'label' => $prow['email'] !== '' ? $prow['email'] : $prow['label'],
+        'login_expires' => cc_login_expires($prow['slug'], $appdata_path),
     ];
 }
 if (!$usage_accounts) {
     $usage_accounts[] = [
         'slug'  => 'default',
         'label' => $account_email !== '' ? $account_email : t('Main account', 'Cuenta principal'),
+        'login_expires' => cc_login_expires('default', $appdata_path),
     ];
 }
 
@@ -5736,7 +6087,7 @@ Tabs="true"
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeDashboard.page">
-<SHA256>99b5b885780329c4a055073fd1b20f72dd459d03fea317f58515ea00335cee7e</SHA256>
+<SHA256>0ba4fec5c37db344b3fb2b530feae405675e5f8a79cb4f6aba56149bf1b1f477</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:1"
@@ -5840,6 +6191,12 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
       // a current one, so a number on this line is never mistaken for live.
       'last'      => t('last reading', 'última lectura'),
       'sub'       => t('Subscription', 'Suscripción'),
+      'login'     => t('Sign-in', 'Inicio de sesión'),
+      'login_until' => t('valid until', 'válido hasta'),
+      'login_soon'  => t('ends', 'caduca el'),
+      'login_gone'  => t('ended', 'caducó el'),
+      'login_help'  => t('When this account\'s claude.ai sign-in ends. Claude Code renews its access by itself, but not the sign-in: after this date the account is signed out, and Remote Control and these figures stop for it, until you sign in again from the Accounts tab or with claude auth login in a terminal. Highlighted from 10 days before.',
+                         'Cuándo caduca el inicio de sesión de esta cuenta en claude.ai. Claude Code renueva su acceso por su cuenta, pero no el inicio de sesión: pasada esta fecha la cuenta queda desconectada, y con ella el Control Remoto y estas cifras, hasta que vuelvas a iniciar sesión desde la pestaña Cuentas o con claude auth login en una terminal. Se resalta desde 10 días antes.'),
       'renews'    => t('renews', 'renueva'),
       'trial'     => t('trial ends', 'prueba acaba'),
       // The states Stripe reports for a Claude subscription. Anything else is
@@ -5972,6 +6329,19 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
     return row;
   }
 
+  // The sign-in's end date, on every line that has one -- also, and above all,
+  // on a line whose figures could not be read, since an ended sign-in is one of
+  // the reasons why.
+  function loginPart(acct) {
+    if (!acct.login_expires) return '';
+    var left = acct.login_expires - Date.now() / 1000;
+    var when = esc(stamp(acct.login_expires, false));
+    var text = left < 0 ? '<span class="error">' + esc(L.login_gone) + ' ' + when + '</span>'
+             : left < 10 * 86400 ? '<span class="warn">' + esc(L.login_soon) + ' ' + when + '</span>'
+             : '<span class="dim-text">' + esc(L.login_until) + ' ' + when + '</span>';
+    return '<span class="sep">&middot;</span><span title="' + esc(L.login_help) + '"><b>' + esc(L.login) + ':</b> ' + text + '</span>';
+  }
+
   function renderAccount(acct, d) {
     var row = rowFor(acct.slug);
     var who = '<b>' + esc(L.plan) + '</b> <span class="sep">&middot;</span> <span class="ok">' + esc(acct.label) + '</span>: ';
@@ -5981,7 +6351,7 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
       // Only no-auth means nobody is signed in; a page that could not reach
       // the endpoint, or an endpoint that could not reach Anthropic, says so.
       var why = !d ? L.unreachable : d.state === 'expired' ? L.expired : d.state === 'no-auth' ? L.nodata : L.failed;
-      row.innerHTML = who + '<span class="dim-text">' + esc(why) + '</span>';
+      row.innerHTML = who + '<span class="dim-text">' + esc(why) + '</span>' + loginPart(acct);
       return;
     }
     var figures = usageParts(d);
@@ -5993,7 +6363,7 @@ Symlink: <span class="<?=$symlink_ok ? 'ok' : 'warn'?>"><?=$symlink_ok ? 'OK' : 
       age = '<span class="sep">&middot;</span><span class="warn" title="' + esc(L.stale_help) + '">' +
             esc(L.last) + ': ' + esc(stamp(d.measured_at)) + '</span>';
     }
-    row.innerHTML = who + (figures || '<span class="dim-text">' + esc(L.nodata) + '</span>') + age;
+    row.innerHTML = who + (figures || '<span class="dim-text">' + esc(L.nodata) + '</span>') + age + loginPart(acct);
   }
 
   function pollAccounts() {
@@ -6802,7 +7172,7 @@ if ($rc_owner === '') {
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeConfig.page">
-<SHA256>165a7a6ddec7569f50516ffbd727dd23d8ddd5502255272e1526fd34d1e7d7cf</SHA256>
+<SHA256>4f17390573c057b6f1e7ce0ec70b982a280d58d9471362dddeae027b7ae65c81</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:4"
@@ -6896,16 +7266,17 @@ $cc_fields = [
          'false' => t('Stop and ask me', 'Pararse y preguntarme'),
        ],
        'label' => t('If a message is flagged', 'Si se marca un mensaje'),
-       'help'  => t('What happens when a safety check flags a message: Claude Code can switch to the fallback model and carry on, or stop so that you choose between switching and rewording the message. Unset, it switches by itself. Stopping means the session waits until you answer.',
-                    'Qué pasa cuando un control de seguridad marca un mensaje: Claude Code puede cambiar al modelo de respaldo y seguir, o pararse para que elijas entre cambiar o reescribir el mensaje. Sin definir, cambia por su cuenta. Pararse significa que la sesión espera hasta que contestes.')],
+       'help'  => t('What happens when a safety check flags a message: Claude Code can switch to the fallback model and carry on, or stop so that you choose between switching and rewording the message. Unset, it switches by itself. Stopping means the session waits until you answer. A subagent cannot stop to ask: with "Stop and ask me" it fails instead, and the main session decides what to do with the unfinished task (Claude Code 2.1.318 and later; before that a subagent switched either way).',
+                    'Qué pasa cuando un control de seguridad marca un mensaje: Claude Code puede cambiar al modelo de respaldo y seguir, o pararse para que elijas entre cambiar o reescribir el mensaje. Sin definir, cambia por su cuenta. Pararse significa que la sesión espera hasta que contestes. Un subagente no puede pararse a preguntar: con «Pararse y preguntarme» falla, y la sesión principal decide qué hacer con la tarea a medias (Claude Code 2.1.318 y posteriores; antes un subagente cambiaba de modelo en los dos casos).')],
       ['key' => 'effortLevel', 'type' => 'select', 'options' => ['low', 'medium', 'high', 'xhigh'],
        'label' => t('Effort level', 'Nivel de esfuerzo'),
        'help'  => t('How hard Claude thinks before answering, by default. Higher means it reasons more thoroughly through difficult steps, but takes longer and uses more of your plan; lower answers faster and uses less, at the cost of thinking less on hard steps. If you are not sure, leave it empty -- Claude Code already picks a sensible level on its own.',
                     'Cuánto se «piensa» una respuesta antes de darla. Más alto significa que Claude razona más a fondo los pasos difíciles, pero tarda más y gasta más de tu plan; más bajo responde antes y gasta menos, a cambio de pensar menos en esos pasos. Si no sabes cuál elegir, déjalo vacío: Claude Code ya elige por su cuenta un nivel que funciona bien en la mayoría de los casos.')],
-      ['key' => 'maxEffortLevel', 'type' => 'select', 'options' => ['low', 'medium', 'high', 'xhigh'],
+      ['key' => 'maxEffortLevel', 'type' => 'select', 'options' => ['low', 'medium', 'high', 'xhigh', 'max'],
+       'labels' => ['max' => t('max (no cap)', 'max (sin tope)')],
        'label' => t('Effort ceiling', 'Tope de esfuerzo'),
-       'help'  => t('A hard cap on how hard Claude may think, whatever the session asks for. Careful with this one: it is not a saving, it is a limit on capability -- a hard problem that needed more thinking will simply be answered with less. Leave it empty unless you are deliberately capping spend and accept worse answers on hard steps.',
-                    'Un techo fijo a cuánto puede pensar Claude, pida lo que pida la sesión. Cuidado con este: no es un ahorro, es un límite de capacidad -- un problema difícil que necesitaba pensar más simplemente se responderá pensando menos. Déjalo vacío salvo que estés limitando el gasto a propósito y aceptes peores respuestas en los pasos difíciles.')],
+       'help'  => t('A hard cap on how hard Claude may think, whatever the session asks for. Careful with this one: it is not a saving, it is a limit on capability -- a hard problem that needed more thinking will simply be answered with less. Leave it empty unless you are deliberately capping spend and accept worse answers on hard steps. "max" sets no cap, the same as leaving it empty here; it matters per model, to exempt one model from a cap set for all.',
+                    'Un techo fijo a cuánto puede pensar Claude, pida lo que pida la sesión. Cuidado con este: no es un ahorro, es un límite de capacidad -- un problema difícil que necesitaba pensar más simplemente se responderá pensando menos. Déjalo vacío salvo que estés limitando el gasto a propósito y aceptes peores respuestas en los pasos difíciles. «max» no pone tope, igual que dejarlo vacío aquí; sirve por modelo, para librar a uno del tope puesto a todos.')],
       ['key' => 'outputStyle', 'type' => 'choice',
        'options' => ['Proactive', 'Concise', 'Explanatory', 'Learning'],
        'labels' => [
@@ -6944,8 +7315,8 @@ $cc_fields = [
                     'Claude te responderá en este idioma, y pondrá los nombres de las sesiones en él. Sin definir, sigue el idioma en el que le escribas. «Otro» acepta cualquier idioma, escrito en inglés (por ejemplo swedish).')],
       ['key' => 'fastMode', 'type' => 'bool',
        'label' => t('Fast mode', 'Modo rápido'),
-       'help'  => t('Runs the same model noticeably faster where it is available (Opus 5.5, Opus 5 and Opus 4.8). It is the same intelligence, not less -- what changes is the price: fast mode is charged at a premium rate, so it eats through your plan faster. Leave it unset unless speed is worth that to you.',
-                    'Ejecuta el mismo modelo bastante más rápido donde está disponible (Opus 5.5, Opus 5 y Opus 4.8). Es la misma inteligencia, no menos -- lo que cambia es el precio: el modo rápido se cobra a tarifa premium, así que consume tu plan más deprisa. Déjalo sin definir salvo que la velocidad te compense.')],
+       'help'  => t('Runs the same model noticeably faster where it is available (Opus 5.5, Opus 5 and Opus 4.8). It is the same intelligence, not less -- what changes is the price: fast mode is charged at a premium rate, so it eats through your plan faster. Leave it unset unless speed is worth that to you. Fast mode on Opus 4.8 is deprecated and goes away on 30 November 2026: after that, a session still on Opus 4.8 with fast mode on has its requests refused, so move it to Opus 5.5 or turn fast mode off.',
+                    'Ejecuta el mismo modelo bastante más rápido donde está disponible (Opus 5.5, Opus 5 y Opus 4.8). Es la misma inteligencia, no menos -- lo que cambia es el precio: el modo rápido se cobra a tarifa premium, así que consume tu plan más deprisa. Déjalo sin definir salvo que la velocidad te compense. El modo rápido en Opus 4.8 está obsoleto y desaparece el 30 de noviembre de 2026: a partir de entonces, una sesión que siga en Opus 4.8 con el modo rápido puesto verá rechazadas sus peticiones, así que pásala a Opus 5.5 o quita el modo rápido.')],
       ['key' => 'fastModePerSessionOptIn', 'type' => 'bool',
        'label' => t('Ask for fast mode each session', 'Pedir el modo rápido en cada sesión'),
        'help'  => t('Makes fast mode something you turn on session by session instead of it being on by default. A sensible companion to the setting above if you only want it now and then.',
@@ -6973,6 +7344,10 @@ $cc_fields = [
        'label' => t('Auto-compact conversation', 'Compactar conversación automáticamente'),
        'help'  => t('When a conversation runs long, Claude summarises the older part of it by itself so it can keep working without running out of room to remember things. Switched on by default.',
                     'Cuando una conversación se alarga mucho, Claude resume por su cuenta la parte más antigua para poder seguir trabajando sin quedarse sin espacio para recordar cosas. Activado de fábrica.')],
+      ['key' => 'idleCompaction', 'type' => 'bool',
+       'label' => t('Compact while idle', 'Compactar en reposo'),
+       'help'  => t('When you step away from a long conversation (over 200,000 tokens) for about an hour, Claude summarises it before the prompt cache expires, so your next message sends the summary instead of the whole conversation. Switched on by default, and only while auto-compact above is on. Turn it off to keep the full conversation however long you are away.',
+                    'Cuando dejas una conversación larga (más de 200.000 tokens) sin tocar durante una hora más o menos, Claude la resume antes de que caduque la caché, y así tu siguiente mensaje envía el resumen en vez de la conversación entera. Activado de fábrica, y sólo mientras esté activada la compactación automática de arriba. Desactívalo para conservar la conversación completa, te ausentes lo que te ausentes.')],
       ['key' => 'autoCompactWindow', 'type' => 'number', 'min' => 100000, 'max' => 1000000,
        'label' => t('When to compact (tokens)', 'Cuándo compactar (tokens)'),
        'help'  => t('How full the conversation gets, in tokens, before Claude summarises the older part of it: between 100000 and 1000000, and never more than the model can hold. Leave it empty unless you have a reason -- Claude Code already picks a size that suits each model, and compacting sooner means doing it more often and with a coarser summary.',
@@ -7070,6 +7445,10 @@ $cc_fields = [
        'label' => t('Do not read outside the working folders', 'No leer fuera de las carpetas de trabajo'),
        'help'  => t('Makes Claude\'s file tools (reading, searching, listing) refuse files outside the folder it is working in and the extra ones listed above. Shell commands are not refused the same way: a command that reads such a path asks you first, as your permission mode decides. Worth turning on when sessions start from the root of the server, where everything is within reach by default.',
                     'Hace que las herramientas de archivos de Claude (leer, buscar, listar) se nieguen a tocar archivos fuera de la carpeta en la que trabaja y de las adicionales de arriba. Los comandos de terminal no se rechazan igual: un comando que lea esas rutas te pregunta antes, según tu modo de permisos. Merece la pena activarlo cuando las sesiones arrancan desde la raíz del servidor, donde por defecto todo queda a su alcance.')],
+      ['key' => 'permissions.blockWritesOutsideWorkingDirectories', 'type' => 'bool',
+       'label' => t('Do not write outside the working folders', 'No escribir fuera de las carpetas de trabajo'),
+       'help'  => t('Makes Claude\'s file editing tools (write, edit) refuse paths outside the folder it is working in and the extra ones listed above, in every permission mode, bypass included. It also removes the worktree tools. Shell commands are not limited by it. Careful on this server: a session started in one folder could no longer edit files under /boot or /mnt/user unless they are listed above. "No" is the same as unset, and a "Yes" in any other settings file still applies. Needs Claude Code 2.1.314 or later.',
+                    'Hace que las herramientas de edición de archivos de Claude (escribir, editar) se nieguen a tocar rutas fuera de la carpeta en la que trabaja y de las adicionales de arriba, en cualquier modo de permisos, también en el que se salta los permisos. Además quita las herramientas de worktree. A los comandos de terminal no los limita. Cuidado en este servidor: una sesión arrancada en una carpeta ya no podría editar archivos de /boot o /mnt/user salvo que estén en la lista de arriba. «No» equivale a sin definir, y un «Sí» en cualquier otro archivo de ajustes sigue valiendo. Necesita Claude Code 2.1.314 o posterior.')],
       // Both keys take the one string "disable", not a boolean. Earlier
       // versions of this tab wrote true, which Claude Code does not document
       // for either; a true left in the file is read as the "forbidden" it was
@@ -8189,11 +8568,188 @@ foreach ($ccp_modes as $ccp_mv => $ccp_ml): ?>
 </INLINE>
 </FILE>
 
-<FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeSettings.page">
-<SHA256>9d869f38cfc20c4864c87b6c0fc8ff2d65a23d87f32ff32777114b811618db50</SHA256>
+<!-- Changelog tab: what each Claude Code release changed, with the releases
+     newer than the installed one up front -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeChangelog.page">
+<SHA256>0feec3468ab63f877d54e89165f64752b117581fb9ed4406a06241a8b9705cb4</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:6"
+Title="Changelog"
+Tag="list-alt"
+---
+<?php require_once "/usr/local/emhttp/plugins/claude-code/include/common.php"; ?>
+<style>
+#cc-cl .cc-cl-tools { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 6px 0 10px; }
+#cc-cl .cc-cl-tools input[type=search] { width: 260px; max-width: 100%; margin: 0; }
+#cc-cl .cc-cl-tools label { cursor: pointer; }
+#cc-cl h5 { margin: 14px 0 6px; font-size: 1.05em; }
+#cc-cl details { border-top: 1px solid var(--table-border-color, rgba(128,128,128,0.25)); padding: 4px 0; }
+#cc-cl details > summary { cursor: pointer; padding: 3px 0; }
+#cc-cl details.cc-cl-new > summary b { color: var(--orange-300, #ff9800); }
+#cc-cl details.cc-cl-here > summary b { color: var(--green-800, #4caf50); }
+#cc-cl ul { margin: 4px 0 8px 18px; padding: 0; }
+#cc-cl li { margin: 3px 0; line-height: 1.45; }
+#cc-cl code { font-size: 0.95em; padding: 0 3px; border-radius: 3px;
+  background: var(--mild-background-color, rgba(128,128,128,0.15)); }
+#cc-cl .cc-cl-kind { font-weight: bold; }
+#cc-cl .cc-cl-kind.added { color: var(--green-800, #4caf50); }
+#cc-cl .cc-cl-kind.fixed { color: var(--orange-300, #ff9800); }
+#cc-cl .cc-cl-kind.removed, #cc-cl .cc-cl-kind.deprecated { color: var(--red-600, #f44336); }
+#cc-cl.cc-cl-nofix li.cc-cl-fixed { display: none; }
+#cc-cl .cc-cl-sub { display: block; margin-left: 14px; }
+</style>
+<div class="claude-box" id="cc-cl">
+<h4><?=t('Claude Code changelog', 'Novedades de Claude Code')?></h4>
+<div id="cc-cl-status" class="dim-text"><?=t('Reading the changelog...', 'Leyendo el registro de cambios...')?></div>
+<div class="cc-cl-tools">
+<form id="cc-cl-search" style="display:contents">
+<input type="search" id="cc-cl-q" maxlength="100" placeholder="<?=t('Search every release', 'Buscar en todas las versiones')?>">
+<span class="buttons-spaced"><input type="submit" value="<?=t('Search', 'Buscar')?>"><input type="button" id="cc-cl-clear" value="<?=t('Clear', 'Limpiar')?>"></span>
+</form>
+<label><input type="checkbox" id="cc-cl-nofix"> <?=t('Hide fixes', 'Ocultar arreglos')?></label>
+</div>
+<div id="cc-cl-newer"></div>
+<div id="cc-cl-list"></div>
+<div class="buttons-spaced"><input type="button" id="cc-cl-more" value="<?=t('Show older releases', 'Mostrar versiones anteriores')?>" style="display:none"></div>
+<blockquote class="inline_help"><?=t(
+    'The changelog Anthropic publishes for Claude Code, read from its public repository on GitHub and kept for six hours. The releases newer than the one installed on this server come first: they are what the Update button on the Settings tab would bring. The text is published in English only.',
+    'El registro de cambios que publica Anthropic para Claude Code, leído de su repositorio público en GitHub y guardado seis horas. Primero salen las versiones más nuevas que la instalada en este servidor: son lo que traería el botón Actualizar de la pestaña Ajustes. El texto sólo se publica en inglés.'
+)?></blockquote>
+</div>
+
+<script>
+(function () {
+  var ENDPOINT = '/plugins/claude-code/include/claude-changelog.php';
+  var PAGE = 10;
+  var L = <?=json_encode([
+      'installed' => t('Installed', 'Instalada'),
+      'latest'    => t('Latest published', 'Última publicada'),
+      'read'      => t('changelog read', 'registro leído'),
+      'source'    => t('View on GitHub', 'Ver en GitHub'),
+      'stale'     => t('could not be refreshed, showing the last copy read', 'no se ha podido actualizar, se muestra la última copia leída'),
+      'failed'    => t('The changelog could not be downloaded. Try again later.', 'No se ha podido descargar el registro de cambios. Vuelve a probar más tarde.'),
+      'noVersion' => t('The installed version could not be read.', 'No se ha podido leer la versión instalada.'),
+      'newer'     => t('Not installed yet', 'Aún sin instalar'),
+      'uptodate'  => t('This server runs the latest release.', 'Este servidor tiene la última versión.'),
+      'capped'    => t('Showing the newest 60; the rest follow below.', 'Se muestran las 60 más nuevas; el resto sigue debajo.'),
+      'older'     => t('Installed and earlier', 'La instalada y anteriores'),
+      'all'       => t('All releases', 'Todas las versiones'),
+      'here'      => t('installed', 'instalada'),
+      'changes'   => t('changes', 'cambios'),
+      'change'    => t('change', 'cambio'),
+      'results'   => t('Search results', 'Resultados de la búsqueda'),
+      'matches'   => t('entries in', 'entradas en'),
+      'releases'  => t('releases', 'versiones'),
+      'none'      => t('Nothing matches.', 'No hay coincidencias.'),
+  ])?>;
+  var box = document.getElementById('cc-cl');
+  var status = document.getElementById('cc-cl-status');
+  var newerEl = document.getElementById('cc-cl-newer');
+  var listEl = document.getElementById('cc-cl-list');
+  var more = document.getElementById('cc-cl-more');
+  var qEl = document.getElementById('cc-cl-q');
+  var state = { q: '', offset: 0, installed: null };
+
+  function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+  // The little Markdown the changelog uses: `code`, **bold** and links. The text
+  // is escaped first, and only http(s) links become links.
+  function inline(s) {
+    return esc(s)
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  }
+  // Entries open with what kind of change they are ("Added", "Fixed"...), now
+  // and then after an area ("Remote Control: Fixed", "[VSCode] Added"): that
+  // word is coloured, and fixes can be hidden.
+  function item(text) {
+    var lines = String(text).split('\n');
+    var first = lines.shift();
+    var m = /^((?:\[[^\]]{1,40}\]|[A-Z][\w .\/-]{1,40}:)\s*)?(Added|Fixed|Improved|Changed|Removed|Deprecated)\b/.exec(first);
+    var kind = m ? m[2].toLowerCase() : '';
+    var pre = m && m[1] ? m[1] : '';
+    var head = kind ? inline(pre) + '<span class="cc-cl-kind ' + kind + '">' + esc(m[2]) + '</span>' + inline(first.slice(pre.length + m[2].length)) : inline(first);
+    var sub = lines.map(function (l) { return '<span class="cc-cl-sub">&bull; ' + inline(l) + '</span>'; }).join('');
+    return '<li' + (kind === 'fixed' ? ' class="cc-cl-fixed"' : '') + '>' + head + sub + '</li>';
+  }
+  function release(r, cls, open) {
+    var here = state.installed && r.v === state.installed;
+    var d = document.createElement('details');
+    d.className = here ? 'cc-cl-here' : (cls || '');
+    if (open) d.open = true;
+    d.innerHTML = '<summary><b>' + esc(r.v) + '</b>' + (here ? ' <span class="ok">(' + esc(L.here) + ')</span>' : '') +
+      ' <span class="dim-text">&middot; ' + r.items.length + ' ' + esc(r.items.length === 1 ? L.change : L.changes) + '</span></summary>' +
+      '<ul>' + r.items.map(item).join('') + '</ul>';
+    return d;
+  }
+  function heading(text) { var h = document.createElement('h5'); h.textContent = text; return h; }
+
+  function load(append) {
+    var url = ENDPOINT + '?limit=' + PAGE + '&offset=' + state.offset + (state.q ? '&q=' + encodeURIComponent(state.q) : '');
+    more.disabled = true;
+    fetch(url, { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        more.disabled = false;
+        if (!d.releases) { status.className = 'error'; status.textContent = L.failed; return; }
+        state.installed = d.installed;
+        if (!append) {
+          var when = d.fetched_at ? new Date(d.fetched_at * 1000).toLocaleString() : '';
+          status.className = '';
+          status.innerHTML = '<b>' + esc(L.installed) + ':</b> ' + (d.installed ? esc(d.installed) : '<span class="warn">' + esc(L.noVersion) + '</span>') +
+            '<span class="sep">&middot;</span><b>' + esc(L.latest) + ':</b> ' + esc(d.latest || '?') +
+            '<span class="sep">&middot;</span><span class="dim-text">' + esc(L.read) + ' ' + esc(when) + '</span>' +
+            (d.ok ? '' : ' <span class="warn">(' + esc(L.stale) + ')</span>') +
+            '<span class="sep">&middot;</span><a href="' + esc(d.source) + '" target="_blank" rel="noopener">' + esc(L.source) + '</a>';
+          newerEl.innerHTML = '';
+          listEl.innerHTML = '';
+          if (d.q) {
+            listEl.appendChild(heading(L.results + ': ' + d.matches + ' ' + L.matches + ' ' + d.total + ' ' + L.releases));
+            if (!d.total) { var p = document.createElement('p'); p.textContent = L.none; listEl.appendChild(p); }
+          } else {
+            if (d.newer_count) {
+              newerEl.appendChild(heading(L.newer + ' (' + d.newer_count + ')'));
+              d.newer.forEach(function (r, i) { newerEl.appendChild(release(r, 'cc-cl-new', i === 0)); });
+              if (d.newer_count > d.newer.length) { var c = document.createElement('p'); c.className = 'dim-text'; c.textContent = L.capped; newerEl.appendChild(c); }
+            } else if (d.installed) {
+              var u = document.createElement('p'); u.className = 'ok'; u.textContent = L.uptodate; newerEl.appendChild(u);
+            }
+            listEl.appendChild(heading(d.installed ? L.older : L.all));
+          }
+        }
+        // Search results are short, so they open; otherwise only the newest one
+        // shown does, when nothing newer is waiting above it.
+        d.page.forEach(function (r, i) { listEl.appendChild(release(r, '', !!d.q || (!append && i === 0 && !d.newer_count))); });
+        state.offset += d.page.length;
+        more.style.display = d.has_more ? '' : 'none';
+      })
+      .catch(function () { more.disabled = false; status.className = 'error'; status.textContent = L.failed; });
+  }
+
+  document.getElementById('cc-cl-search').addEventListener('submit', function (e) {
+    e.preventDefault();
+    state.q = qEl.value.trim(); state.offset = 0; load(false);
+  });
+  document.getElementById('cc-cl-clear').addEventListener('click', function () {
+    qEl.value = ''; state.q = ''; state.offset = 0; load(false);
+  });
+  more.addEventListener('click', function () { load(true); });
+  document.getElementById('cc-cl-nofix').addEventListener('change', function () {
+    box.classList.toggle('cc-cl-nofix', this.checked);
+  });
+  load(false);
+})();
+</script>
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeSettings.page">
+<SHA256>b4b9884944056ef7ede29f7e398e424ee51a536c956b7825f743402eae46bd04</SHA256>
+<INLINE>
+<![CDATA[
+Menu="claude-code:7"
 Title="Settings"
 Tag="cog"
 ---
@@ -8281,9 +8837,15 @@ Tag="cog"
 <!-- Tab titles live in the page headers, which are plain text with no PHP,
      so the inline t() helper cannot reach them. Unraid loads
      languages/LOCALE/SEGMENT.txt for each segment of the request URI, and
-     this page sits under a segment named claude-code. -->
-<FILE Name="/usr/local/emhttp/languages/es_ES/claude-code.txt" Mode="0644">
-<SHA256>d6cc3800a79fb46a1dc0562d38986b6a71feb0d81c3dc2781e8ac319eb50c5d7</SHA256>
+     this page sits under a segment named claude-code.
+
+     The file ships inside the plugin's own directory, not straight into
+     languages/LOCALE: that directory belongs to the language pack, and merely
+     creating it makes Unraid and Community Applications report the pack as
+     installed on a server that never installed it. setup_translations in
+     install-claude.sh copies it across only while the pack is installed. -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/languages/es_ES/claude-code.txt" Mode="0644">
+<SHA256>cc9df02159c756ebdcb5b641569da538795b6327954efa4e29a63a293ec1a69f</SHA256>
 <INLINE>
 <![CDATA[
 Dashboard=Panel
@@ -8291,6 +8853,7 @@ Accounts=Cuentas
 Remote Control=Control Remoto
 Claude Code Config=Config. de Claude
 Permissions=Permisos
+Changelog=Novedades
 Settings=Ajustes
 ]]>
 </INLINE>
@@ -8400,7 +8963,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.10.08.2 has been installed!"
+    echo " Claude Code plugin v2026.11.06 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
@@ -8423,10 +8986,10 @@ fi
 # appdata before the next reboot, not after it.
 /usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh slash-project
 
-# Unraid parses a translation file once and caches the result beside it,
-# rebuilding that cache only when it is missing. Without this, a version that
-# changes the tab titles would keep showing the previous ones until a reboot.
-rm -f /usr/local/emhttp/languages/*/claude-code.dot
+# The tab titles' translation: copied into Unraid's language directory only
+# where that language pack is installed, and taken back out of a directory an
+# older version of this plugin created on a server without it (issue #1).
+/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh translations
 ]]>
 </INLINE>
 </FILE>
@@ -8484,18 +9047,25 @@ rm -rf "$CLAUDE_REAL_DIR/local" 2>/dev/null || true
 # Remove config symlink
 rm -f /root/.claude 2>/dev/null || true
 
-# Remove plugin runtime files
-rm -rf /usr/local/emhttp/plugins/claude-code
-# The tab titles are translated through a file this plugin drops into Unraid's
+# The tab titles are translated through a file this plugin copies into Unraid's
 # own language directory, along with the parsed copy Unraid caches beside it.
+# Before the plugin directory goes, since the script doing it lives there; and
+# a language directory left empty without its pack goes too (issue #1). The
+# plain rm lines are the fallback if the script is already missing.
+/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh remove-translations 2>/dev/null
 rm -f /usr/local/emhttp/languages/*/claude-code.txt
 rm -f /usr/local/emhttp/languages/*/claude-code.dot
+
+# Remove plugin runtime files
+rm -rf /usr/local/emhttp/plugins/claude-code
 rm -f /usr/local/bin/claude
 rm -f /var/tmp/claude-code-stats-sample.json
 # Cached figures, including the one file per account the usage panel writes.
 rm -f /var/tmp/claude-code-usage-cache*.json
 # Last known plan figures and the subscription details behind them.
 rm -f /var/tmp/claude-code-usage-last-*.json /var/tmp/claude-code-profile-*.json
+# The Changelog tab's parsed copy of the changelog.
+rm -f /var/tmp/claude-code-changelog.json /var/tmp/claude-code-changelog.json.tmp.*
 rm -f /var/tmp/claude-login-*.log /var/tmp/claude-login-*.fifo
 
 # Note: We keep config and appdata for potential reinstall

@@ -133,9 +133,14 @@ claim of authorship over the base plugin.
   `/usage` command uses — which is a metadata endpoint: **it runs no inference and costs no
   tokens**. Credentials are never rewritten by the page, and the token is never passed on a
   command line where `ps` could read it.
-- **A tabbed Settings page**: Dashboard, Accounts, Remote Control, Claude Code Config and Settings, instead of one
-  long scroll. The Dashboard carries the state — versions, array, resources, plan usage — and
-  everything you configure lives under its own tab.
+- **A tabbed Settings page**: Dashboard, Accounts, Remote Control, Claude Code Config, Permissions,
+  Changelog and Settings, instead of one long scroll. The Dashboard carries the state — versions,
+  array, resources, plan usage, when each account's sign-in ends — and everything you configure
+  lives under its own tab.
+- **Claude Code's changelog, in the page**: the Changelog tab reads the official changelog and
+  puts the releases newer than the one installed first, so you can see what Update would bring
+  before pressing it. It searches every release and can hide the fixes. The changelog is
+  published in English only.
 - **Claude Code's own configuration, from the browser**: the Claude Code Config tab edits the
   `settings.json` Claude Code reads — model and fallback models, effort level, output style,
   extended thinking, response language, theme, editor mode, the permission mode and the
@@ -375,9 +380,14 @@ claro al autor original, sin reclamar autoría del plugin base.
   uso de Anthropic, el mismo que usa el comando `/usage` del CLI, que es un endpoint de metadatos:
   **no ejecuta inferencia y no consume tokens**. La página nunca reescribe las credenciales, y el
   token jamás viaja en una línea de comandos donde `ps` pudiera leerlo.
-- **Página de ajustes con pestañas**: Panel, Cuentas, Control Remoto, Config. de Claude y Ajustes, en vez de un único
-  scroll interminable. El Panel reúne el estado — versiones, array, recursos, uso del plan — y todo
-  lo que se configura vive en su propia pestaña.
+- **Página de ajustes con pestañas**: Panel, Cuentas, Control Remoto, Config. de Claude, Permisos,
+  Novedades y Ajustes, en vez de un único scroll interminable. El Panel reúne el estado —
+  versiones, array, recursos, uso del plan, cuándo caduca el inicio de sesión de cada cuenta — y
+  todo lo que se configura vive en su propia pestaña.
+- **Las novedades de Claude Code, en la página**: la pestaña Novedades lee el registro de cambios
+  oficial y pone primero las versiones más nuevas que la instalada, para ver qué traería Actualizar
+  antes de pulsarlo. Busca en todas las versiones y puede ocultar los arreglos. El registro de
+  cambios sólo se publica en inglés.
 - **La configuración del propio Claude Code, desde el navegador**: la pestaña Config. de Claude
   edita el `settings.json` que lee Claude Code — modelo y modelos de respaldo, nivel de esfuerzo,
   estilo de salida, pensamiento extendido, idioma de las respuestas, tema, modo de edición, el modo
