@@ -1,12 +1,21 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.11.06"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.11.11"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.11.11
+- Up to date with Claude Code 2.1.322. Claude Code Config tab: Fable 5.2
+  (claude-fable-5-2) in the model list; a new "Deny instead of asking"
+  setting, for sessions nobody is watching, that refuses what would wait on a
+  permission prompt instead of stopping there (with a warning that, under
+  Remote Control, you are then no longer asked from the phone); and the fast
+  mode note now covers Fable 5.2, where the setting alone does not turn it on.
+- The Ultra plan is listed with Pro, Max, Team and Enterprise among the
+  claude.ai plans that Remote Control works with.
 ###2026.11.06
 - The Spanish tab titles no longer make Unraid and Community Applications
   report the Spanish language pack as installed on a server that does not
@@ -6950,7 +6959,7 @@ function cc_sync_value($v) {
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeRemote.page">
-<SHA256>76e796a5bb75ba0e25ddc41ed9572a608ee895ef79a0300c5da866f076b9417f</SHA256>
+<SHA256>cc4d114e54757c69972e337c968af32794d1f966aa75381c4f7fe2615ace51fd</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:3"
@@ -6961,8 +6970,8 @@ Tag="desktop"
 <div class="claude-box">
 <h4><?=t('Remote Control', 'Control Remoto')?></h4>
 <p><?=t(
-    'Runs "claude remote-control" in the background so you can drive a Claude Code session on this NAS from claude.ai/code or the Claude mobile app -- outbound HTTPS only, no inbound ports opened. Requires being signed in with a claude.ai account (Pro/Max/Team/Enterprise); API key auth does not support this.',
-    'Ejecuta "claude remote-control" en segundo plano para que puedas controlar una sesión de Claude Code en este NAS desde claude.ai/code o la app móvil de Claude -- solo conexiones HTTPS salientes, sin abrir puertos entrantes. Requiere haber iniciado sesión con una cuenta de claude.ai (Pro/Max/Team/Enterprise); la autenticación por API key no es compatible.'
+    'Runs "claude remote-control" in the background so you can drive a Claude Code session on this NAS from claude.ai/code or the Claude mobile app -- outbound HTTPS only, no inbound ports opened. Requires being signed in with a claude.ai account (Pro/Max/Ultra/Team/Enterprise); API key auth does not support this.',
+    'Ejecuta "claude remote-control" en segundo plano para que puedas controlar una sesión de Claude Code en este NAS desde claude.ai/code o la app móvil de Claude -- solo conexiones HTTPS salientes, sin abrir puertos entrantes. Requiere haber iniciado sesión con una cuenta de claude.ai (Pro/Max/Ultra/Team/Enterprise); la autenticación por API key no es compatible.'
 )?></p>
 <blockquote class="inline_help">
 <p><?=t(
@@ -7172,7 +7181,7 @@ if ($rc_owner === '') {
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeConfig.page">
-<SHA256>4f17390573c057b6f1e7ce0ec70b982a280d58d9471362dddeae027b7ae65c81</SHA256>
+<SHA256>5a2ded94de14d91ced02bb75d643f2bcaa3554efd3b71d86e18b3809beee6f56</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:4"
@@ -7232,7 +7241,7 @@ $cc_fields = [
     'fields' => [
       ['key' => 'model', 'type' => 'choice',
        'options' => ['default', 'best', 'fable', 'opus', 'sonnet', 'haiku', 'opusplan', 'opus[1m]', 'sonnet[1m]',
-                     'claude-fable-5-1', 'claude-opus-5-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-sonnet-5-5', 'claude-sonnet-5', 'claude-haiku-5-5', 'claude-haiku-4-5'],
+                     'claude-fable-5-2', 'claude-fable-5-1', 'claude-opus-5-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-sonnet-5-5', 'claude-sonnet-5', 'claude-haiku-5-5', 'claude-haiku-4-5'],
        'labels' => [
          'default'    => t('default -- whatever your account uses', 'default -- el que use tu cuenta'),
          'best'       => t('best -- Fable where you have it, otherwise Opus', 'best -- Fable si lo tienes, si no Opus'),
@@ -7315,8 +7324,8 @@ $cc_fields = [
                     'Claude te responderá en este idioma, y pondrá los nombres de las sesiones en él. Sin definir, sigue el idioma en el que le escribas. «Otro» acepta cualquier idioma, escrito en inglés (por ejemplo swedish).')],
       ['key' => 'fastMode', 'type' => 'bool',
        'label' => t('Fast mode', 'Modo rápido'),
-       'help'  => t('Runs the same model noticeably faster where it is available (Opus 5.5, Opus 5 and Opus 4.8). It is the same intelligence, not less -- what changes is the price: fast mode is charged at a premium rate, so it eats through your plan faster. Leave it unset unless speed is worth that to you. Fast mode on Opus 4.8 is deprecated and goes away on 30 November 2026: after that, a session still on Opus 4.8 with fast mode on has its requests refused, so move it to Opus 5.5 or turn fast mode off.',
-                    'Ejecuta el mismo modelo bastante más rápido donde está disponible (Opus 5.5, Opus 5 y Opus 4.8). Es la misma inteligencia, no menos -- lo que cambia es el precio: el modo rápido se cobra a tarifa premium, así que consume tu plan más deprisa. Déjalo sin definir salvo que la velocidad te compense. El modo rápido en Opus 4.8 está obsoleto y desaparece el 30 de noviembre de 2026: a partir de entonces, una sesión que siga en Opus 4.8 con el modo rápido puesto verá rechazadas sus peticiones, así que pásala a Opus 5.5 o quita el modo rápido.')],
+       'help'  => t('Runs the same model noticeably faster where it is available (Fable 5.2, Opus 5.5, Opus 5 and Opus 4.8). It is the same intelligence, not less -- what changes is the price: fast mode is charged at a premium rate, so it eats through your plan faster. Leave it unset unless speed is worth that to you. On Fable 5.2 this setting alone does nothing: fast mode stays on there only once you have turned it on with /fast while using Fable 5.2. Fast mode on Opus 4.8 is deprecated and goes away on 30 November 2026: after that, a session still on Opus 4.8 with fast mode on has its requests refused, so move it to Opus 5.5 or turn fast mode off.',
+                    'Ejecuta el mismo modelo bastante más rápido donde está disponible (Fable 5.2, Opus 5.5, Opus 5 y Opus 4.8). Es la misma inteligencia, no menos -- lo que cambia es el precio: el modo rápido se cobra a tarifa premium, así que consume tu plan más deprisa. Déjalo sin definir salvo que la velocidad te compense. En Fable 5.2 este ajuste por sí solo no hace nada: allí el modo rápido solo se mantiene cuando lo has encendido con /fast estando en Fable 5.2. El modo rápido en Opus 4.8 está obsoleto y desaparece el 30 de noviembre de 2026: a partir de entonces, una sesión que siga en Opus 4.8 con el modo rápido puesto verá rechazadas sus peticiones, así que pásala a Opus 5.5 o quita el modo rápido.')],
       ['key' => 'fastModePerSessionOptIn', 'type' => 'bool',
        'label' => t('Ask for fast mode each session', 'Pedir el modo rápido en cada sesión'),
        'help'  => t('Makes fast mode something you turn on session by session instead of it being on by default. A sensible companion to the setting above if you only want it now and then.',
@@ -7449,6 +7458,10 @@ $cc_fields = [
        'label' => t('Do not write outside the working folders', 'No escribir fuera de las carpetas de trabajo'),
        'help'  => t('Makes Claude\'s file editing tools (write, edit) refuse paths outside the folder it is working in and the extra ones listed above, in every permission mode, bypass included. It also removes the worktree tools. Shell commands are not limited by it. Careful on this server: a session started in one folder could no longer edit files under /boot or /mnt/user unless they are listed above. "No" is the same as unset, and a "Yes" in any other settings file still applies. Needs Claude Code 2.1.314 or later.',
                     'Hace que las herramientas de edición de archivos de Claude (escribir, editar) se nieguen a tocar rutas fuera de la carpeta en la que trabaja y de las adicionales de arriba, en cualquier modo de permisos, también en el que se salta los permisos. Además quita las herramientas de worktree. A los comandos de terminal no los limita. Cuidado en este servidor: una sesión arrancada en una carpeta ya no podría editar archivos de /boot o /mnt/user salvo que estén en la lista de arriba. «No» equivale a sin definir, y un «Sí» en cualquier otro archivo de ajustes sigue valiendo. Necesita Claude Code 2.1.314 o posterior.')],
+      ['key' => 'permissions.denyInsteadOfPrompting', 'type' => 'bool',
+       'label' => t('Deny instead of asking', 'Denegar en vez de preguntar'),
+       'help'  => t('For sessions nobody is watching: a tool call that would wait on a permission prompt is denied and the turn carries on, instead of the session sitting there until someone answers. Calls that an allow rule, the permission mode or auto mode approve still go ahead. It also takes away the question and plan tools (so a session in plan mode cannot leave it by itself) and cancels requests for input from MCP servers. Careful with Remote Control: with this on, you are no longer asked from the phone or claude.ai -- whatever would have asked you is refused. "No" is the same as unset, and a "Yes" in another settings file still applies. Needs Claude Code 2.1.319 or later.',
+                    'Para sesiones que nadie está mirando: una herramienta que se quedaría esperando a que le des permiso se deniega y el turno sigue, en vez de quedarse la sesión parada hasta que alguien conteste. Lo que aprueben una regla de permitir, el modo de permisos o el modo automático sigue adelante. También quita las herramientas de preguntar y de plan (así que una sesión en modo plan no puede salir de él sola) y cancela las peticiones de datos de los servidores MCP. Cuidado con el Control Remoto: con esto puesto ya no se te pregunta desde el móvil ni desde claude.ai -- lo que te habría preguntado se rechaza. «No» equivale a sin definir, y un «Sí» en otro archivo de ajustes sigue valiendo. Necesita Claude Code 2.1.319 o posterior.')],
       // Both keys take the one string "disable", not a boolean. Earlier
       // versions of this tab wrote true, which Claude Code does not document
       // for either; a true left in the file is read as the "forbidden" it was
@@ -8963,7 +8976,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.11.06 has been installed!"
+    echo " Claude Code plugin v2026.11.11 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
