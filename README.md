@@ -227,6 +227,11 @@ This covers the permission rules too. Claude Code keeps them per working directo
 Control works in `/`, which on Unraid is a filesystem held in RAM — so that list is moved into
 appdata and linked back at boot, instead of being lost and asked for again after every reboot.
 
+While the array is stopped the plugin writes nothing under `/mnt`: anything created there before
+the array starts would land in RAM and stop Unraid from mounting the user shares. Remote Control is
+stopped when the array stops, so the disks unmount cleanly, and comes back by itself for every
+account that was running once the array is started again.
+
 ### 🩹 Troubleshooting
 
 Check the install log:
@@ -480,6 +485,11 @@ Los permisos concedidos también. Claude Code los guarda por carpeta de trabajo,
 trabaja en `/`, que en Unraid es un sistema de ficheros que vive en RAM: por eso esa lista se
 traslada a appdata y se enlaza de vuelta en cada arranque, en lugar de perderse y volver a
 pedirse tras cada reinicio.
+
+Con el array parado, el plugin no escribe nada en `/mnt`: lo que se creara ahí antes de arrancar
+el array acabaría en la RAM y Unraid ya no montaría los recursos compartidos. El Control Remoto se
+para al detener el array, para que los discos se desmonten limpiamente, y vuelve solo, en cada
+cuenta que estaba funcionando, en cuanto el array se arranca de nuevo.
 
 ### 🩹 Solución de problemas
 

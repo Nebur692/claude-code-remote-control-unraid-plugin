@@ -1,12 +1,32 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.11.11"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.11.13"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.11.13
+- Nothing is written under /mnt any more while the array is stopped (issue #2).
+  The usage sampler, which runs every five minutes from boot, created the
+  appdata folder in RAM before the array was started; Unraid then did not
+  mount the user shares at all, Docker came up empty and the array could not
+  be stopped. The sampler, the Remote Control watchdog, the binary cache, the
+  "/" project, the Config and Permissions tabs and account creation now check
+  that the disk appdata is on is mounted, and skip until it is. This covers a
+  pool of any name and Unassigned Devices disks, not only /mnt/user and cache.
+- Remote Control is stopped, with the MCP servers it started, when the array
+  stops (Unraid's unmounting_disks event), so the disks can be unmounted and
+  the shutdown is a clean one. It comes back by itself, for every account that
+  was running, as soon as the array is started again (disks_mounted).
+- An array started after boot, by hand or after typing an encryption
+  passphrase, now finishes the setup that needed appdata: persistence of the
+  sign-in and memory, the "/" project and the cached binary.
+- Remote Control reads the exit status Claude Code 2.1.325 gives it: when the
+  server cannot register with Anthropic (signed out, or no connection) it waits
+  longer between attempts, up to five minutes, instead of retrying every five
+  seconds.
 ###2026.11.11
 - Up to date with Claude Code 2.1.322. Claude Code Config tab: Fable 5.2
   (claude-fable-5-2) in the model list; a new "Deny instead of asking"
@@ -606,6 +626,7 @@ NAS from claude.ai/code or the Claude mobile app via Anthropic's Remote Control 
 mkdir -p /boot/config/plugins/claude-code
 mkdir -p /usr/local/emhttp/plugins/claude-code/scripts
 mkdir -p /usr/local/emhttp/plugins/claude-code/images
+mkdir -p /usr/local/emhttp/plugins/claude-code/event
 </INLINE>
 </FILE>
 
@@ -766,9 +787,59 @@ fi
 </INLINE>
 </FILE>
 
+<!-- Is the filesystem a path lives on mounted? Sourced by the shell scripts
+     below before anything is written under the appdata path (issue #2). -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/appdata-mount.sh" Mode="0644">
+<SHA256>0bad900817405e1d56b9151a9436d72f04ac70d36a05bda5c87921707ebdd8fa</SHA256>
+<INLINE>
+<![CDATA[
+# Sourced, not run.
+#
+# Everything under /mnt on Unraid is a mount point that only exists while the
+# array (or a pool, or an Unassigned Devices disk) is started. Until then the
+# directory underneath is plain rootfs, which is RAM. Writing there is not just
+# lost on reboot: if anything appears under /mnt/user before the array starts,
+# emhttpd does not mount the user shares over it at all, Docker starts with an
+# empty docker.img and the array cannot be stopped again until it is removed by
+# hand (issue #2). So nothing in this plugin creates a directory under /mnt
+# without asking here first, and when the answer is no it skips and tries again
+# later instead of creating it.
+
+# The mount point a path depends on, or nothing for a path outside /mnt (which
+# is never on the array, so there is nothing to wait for).
+#   /mnt/user/..., /mnt/user0/...            -> /mnt/user, /mnt/user0
+#   /mnt/cache/..., /mnt/disk1/..., any pool  -> /mnt/<name>
+#   /mnt/disks/X/..., /mnt/remotes/X/...      -> /mnt/disks/X, /mnt/remotes/X
+cc_mount_root() {
+    local p="$1" a b c
+    case "$p" in
+        /mnt/*) ;;
+        *) return 0 ;;
+    esac
+    IFS=/ read -r _ a b c _ <<< "$p"
+    case "$b" in
+        disks|remotes|addons|rootshare)
+            [ -n "$c" ] && echo "/$a/$b/$c" ;;
+        "") ;;
+        *) echo "/$a/$b" ;;
+    esac
+}
+
+# True when the filesystem the path depends on is mounted, or when it does not
+# depend on one. Never creates anything.
+cc_path_mounted() {
+    local root
+    root=$(cc_mount_root "$1")
+    [ -z "$root" ] && return 0
+    mountpoint -q "$root" 2>/dev/null
+}
+]]>
+</INLINE>
+</FILE>
+
 <!-- Install/setup script -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh" Mode="0755">
-<SHA256>0dec8cb9163907ba185567be3051ee07610c8238727ae1a0b61220ee422d2794</SHA256>
+<SHA256>63e23d31282f0e60cca9ab2a2efa42011f27a632ff52e3c80e8232f787e361a4</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -786,6 +857,10 @@ export PATH="/usr/local/bin:/root/.local/bin:$PATH"
 PLUGIN_CFG="/boot/config/plugins/claude-code/claude-code.cfg"
 CLAUDE_CONFIG_RUNTIME="/root/.claude"
 SLASH_PROJECT_RUNTIME="/.claude"
+
+# cc_mount_root / cc_path_mounted: nothing below may create a directory under
+# /mnt while the filesystem it belongs to is not mounted (issue #2).
+. /usr/local/emhttp/plugins/claude-code/scripts/appdata-mount.sh
 
 # Load config
 if [ -f "$PLUGIN_CFG" ]; then
@@ -952,7 +1027,14 @@ restore_cached_binary() {
 }
 
 cache_binary() {
-    # Cache the binary to appdata so it survives reboots
+    # Cache the binary to appdata so it survives reboots. Not while appdata is
+    # unmounted: the mkdir below would build the path in RAM, under the very
+    # mount point Unraid is about to mount, and then it refuses to (issue #2).
+    # The array coming up runs this again (event/disks_mounted).
+    if ! cc_path_mounted "$APPDATA_PATH"; then
+        echo "Appdata ($APPDATA_PATH) is not mounted yet; the binary will be cached once the array is started."
+        return 0
+    fi
     if [ -x /root/.local/bin/claude ]; then
         mkdir -p "$APPDATA_PATH/bin"
         if apply_binary /root/.local/bin/claude "$CACHED_BINARY"; then
@@ -1012,17 +1094,11 @@ install_claude_code() {
 }
 
 wait_for_appdata_mount() {
-    # Determine the mount point for our appdata path
-    local wait_mount="/mnt/user"
-    case "$APPDATA_PATH" in
-        /mnt/disks/*)
-            # Unassigned Devices: extract mount like /mnt/disks/vms
-            wait_mount=$(echo "$APPDATA_PATH" | cut -d/ -f1-4)
-            ;;
-        /mnt/cache/*)
-            wait_mount="/mnt/cache"
-            ;;
-    esac
+    # The mount point our appdata path depends on: /mnt/user, a pool of any
+    # name (it used to know only "cache"), or an Unassigned Devices disk.
+    local wait_mount
+    wait_mount=$(cc_mount_root "$APPDATA_PATH")
+    [ -z "$wait_mount" ] && return 0
 
     local max_wait=120
     local waited=0
@@ -1120,6 +1196,8 @@ setup_claude_json() {
     local src="/root/.claude.json"
     local dest="$APPDATA_PATH/.claude.json"
 
+    cc_path_mounted "$APPDATA_PATH" || return 0
+
     # If real file exists (not symlink), move it to appdata
     if [ -f "$src" ] && [ ! -L "$src" ]; then
         mv "$src" "$dest"
@@ -1144,7 +1222,11 @@ setup_slash_project() {
     local src="$SLASH_PROJECT_RUNTIME" dest="$APPDATA_PATH/project-slash" f base aside missing=0
 
     # No appdata, nothing to persist into. Said once, without failing the
-    # install: the boot path calls this again on the next start.
+    # install: the boot path calls this again on the next start, and so does
+    # the array coming up. Mounted first, then present: a directory that merely
+    # exists may be one something else created in RAM before the array started
+    # (issue #2), and writing into it is exactly what must not happen.
+    cc_path_mounted "$APPDATA_PATH" || return 0
     [ -d "$APPDATA_PATH" ] || return 0
 
     [ -L "$src" ] && [ "$(readlink "$src")" = "$dest" ] && return 0
@@ -1331,6 +1413,34 @@ if [ "$1" = "launcher" ]; then
     exit 0
 fi
 
+# The array came up after this script last ran (event/disks_mounted). At boot
+# the body below waits a few minutes for appdata and then carries on without
+# it, so an array started later -- by hand, or after typing an encryption
+# passphrase -- never got persistence, the "/" project or the cached binary.
+# Only the steps that need appdata, and only once it really is mounted.
+if [ "$1" = "array-up" ]; then
+    exec 9> /var/run/claude-code-install.lock
+    flock 9
+    echo "=== Array started $(date): setting up what lives in appdata ==="
+    if ! cc_path_mounted "$APPDATA_PATH"; then
+        echo "Appdata ($APPDATA_PATH) is still not mounted; nothing to do."
+        exit 0
+    fi
+    setup_persistence
+    setup_claude_json
+    setup_slash_project
+    if [ -x /root/.local/bin/claude ] && ! cmp -s /root/.local/bin/claude "$CACHED_BINARY"; then
+        cache_binary
+    fi
+    exit 0
+fi
+
+# One install at a time. The boot run and the array coming up can overlap, and
+# both move ~/.claude into appdata: two copies of that migration running at once
+# is how a config directory gets merged twice or deleted under a copy.
+exec 9> /var/run/claude-code-install.lock
+flock 9
+
 # Set up persistence first so the native installer writes into appdata
 # (the installer writes to ~/.claude/local/ which follows our symlink)
 setup_persistence
@@ -1457,6 +1567,11 @@ if ! install_claude_code; then
     echo "Or install manually: curl -fsSL https://claude.ai/install.sh | bash"
 fi
 
+# Everything that moves things in and out of appdata is done. Let go of the
+# lock before anything below starts a long-lived process, which would otherwise
+# inherit the descriptor and hold it for as long as it runs.
+exec 9>&-
+
 # At boot, Remote Control is never auto-started (see README), so this is
 # always a no-op here -- restart_running_remote_control finds nothing running
 # and prints nothing. It only ever does something on a manual Reinstall that
@@ -1571,7 +1686,7 @@ publish "_DONE_" ""
      restore_cached_binary() restores from on every boot, so without
      re-caching here, any update would silently be reverted on next reboot. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/update-claude.sh" Mode="0755">
-<SHA256>7dadedc431a5f73a6c85edf3703f63ddb71d1ba8e60f350fac844ca7cb7974c5</SHA256>
+<SHA256>b724a28f9c9345f714672928b00d6d2bdf8b2899f292d2eeb7116529997fb2bd</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1587,6 +1702,7 @@ echo "=== Manual Update $(date) ==="
 
 PLUGIN_CFG="/boot/config/plugins/claude-code/claude-code.cfg"
 [ -f "$PLUGIN_CFG" ] && source "$PLUGIN_CFG"
+. /usr/local/emhttp/plugins/claude-code/scripts/appdata-mount.sh
 
 RUNTIME_BIN="/root/.local/bin/claude"
 VERSIONS_DIR="/root/.local/share/claude/versions"
@@ -1814,7 +1930,11 @@ if [ -n "$applied" ] && [ -n "$now" ] && [ "${now%% *}" != "$applied" ]; then
     echo "WARNING: expected $applied but $RUNTIME_BIN reports ${now%% *}."
 fi
 
-if [ -n "$APPDATA_PATH" ]; then
+if [ -n "$APPDATA_PATH" ] && ! cc_path_mounted "$APPDATA_PATH"; then
+    # Never build the path in RAM under an unmounted /mnt (issue #2). The array
+    # coming up caches whatever is running by then.
+    echo "WARNING: $APPDATA_PATH is not mounted (is the array started?), so the update was not cached -- it will be once the array starts."
+elif [ -n "$APPDATA_PATH" ]; then
     if [ -x "$RUNTIME_BIN" ]; then
         mkdir -p "$APPDATA_PATH/bin"
         if apply_binary "$RUNTIME_BIN" "$APPDATA_PATH/bin/claude"; then
@@ -1870,7 +1990,7 @@ prune_versions
      taken over as "most recent"; see the connect subcommand and the
      Settings page's Session ID field. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh" Mode="0755">
-<SHA256>e0c7ecf98c5048c6d7d79e2de45bf26ea8875d895846daa8c0a772baffb56996</SHA256>
+<SHA256>263b5d11f6650e9b0078dbf324c5545e8882940bc7e1429151c3e4b07c2459e6</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1880,6 +2000,12 @@ HISTORY_FILE="/boot/config/plugins/claude-code/session-history.log"
 PROFILES_SCRIPT="/usr/local/emhttp/plugins/claude-code/scripts/profiles.sh"
 ARCHIVED_FAIL_THRESHOLD=3
 SESSION_POLL_SECONDS=3
+
+# cc_path_mounted. A bridge keeps its sign-in, memory and session state in
+# ~/.claude, which is a link into appdata: started while the array is down it
+# either fails or writes into RAM under /mnt, which then stops Unraid mounting
+# the user shares at all (issue #2).
+. /usr/local/emhttp/plugins/claude-code/scripts/appdata-mount.sh
 
 # Which account this invocation is for, and everything that follows from it.
 #
@@ -1892,7 +2018,9 @@ set_profile() {
     MULTI_ACCOUNT="no"
     ACTIVE_PROFILE="default"
     REMOTE_CONTROL_DIR=""
+    APPDATA_PATH=""
     [ -f "$PLUGIN_CFG" ] && source "$PLUGIN_CFG"
+    APPDATA_PATH="${APPDATA_PATH:-/mnt/user/appdata/claude-code}"
     [ "$MULTI_ACCOUNT" = "yes" ] || PROFILE="default"
     [ -z "$PROFILE" ] && PROFILE="${ACTIVE_PROFILE:-default}"
 
@@ -1921,6 +2049,9 @@ set_profile() {
     # Set by "new": tells the supervisor to open a brand-new session on its
     # next turn instead of resuming anything.
     FRESHFILE="/var/run/claude-remote-control$SUFFIX.fresh"
+    # The exit status of the last "claude remote-control" attempt. run_claude
+    # runs inside a command substitution, so a variable would not survive it.
+    EXITFILE="/var/run/claude-remote-control$SUFFIX.exit"
 
     # The environment that selects this account, from the script that owns that
     # decision. Empty for the main account.
@@ -2063,10 +2194,11 @@ run_claude() {
     watch_for_sessions "$offset" "$rc_dir" "$self" > /dev/null 2>&1 &
     watcher=$!
     if [ -n "$PROFILE_ENV" ]; then
-        output=$(env "$PROFILE_ENV" claude remote-control "$@" --remote-control-session-name-prefix "$NAME_PREFIX" 2>&1 < /dev/null | tee -a "$LOGFILE")
+        output=$(env "$PROFILE_ENV" claude remote-control "$@" --remote-control-session-name-prefix "$NAME_PREFIX" 2>&1 < /dev/null | tee -a "$LOGFILE"; exit "${PIPESTATUS[0]}")
     else
-        output=$(claude remote-control "$@" --remote-control-session-name-prefix "$NAME_PREFIX" 2>&1 < /dev/null | tee -a "$LOGFILE")
+        output=$(claude remote-control "$@" --remote-control-session-name-prefix "$NAME_PREFIX" 2>&1 < /dev/null | tee -a "$LOGFILE"; exit "${PIPESTATUS[0]}")
     fi
+    echo "$?" > "$EXITFILE"
     kill "$watcher" 2>/dev/null
     wait "$watcher" 2>/dev/null
     # Also record on exit, in case the attempt was shorter than one poll.
@@ -2133,14 +2265,35 @@ close_inherited_fds() {
     done
 }
 
+# Both the account's data and the folder the bridge runs in have to be on a
+# mounted filesystem. Says which one is not, or nothing.
+unmounted_reason() {
+    local rc_dir="$1"
+    if ! cc_path_mounted "$APPDATA_PATH"; then
+        echo "appdata ($APPDATA_PATH) is not mounted"
+    elif ! cc_path_mounted "$rc_dir"; then
+        echo "its folder $rc_dir is on a disk that is not mounted"
+    fi
+}
+
 do_run() {
     local rc_dir output pinned_id own_id holder held_waits=0 fail_count=0
+    local why status delay reg_fails=0
     close_inherited_fds
     # The pid the page, the update script and the watchdog all look for. Written
     # here, by the supervisor itself: whoever launched it only knows the pid of
     # what it backgrounded, and with setsid in front that is not this shell.
     echo $$ > "$PIDFILE"
     rc_dir=$(get_rc_dir)
+    # Not while the array is down. The enabled flag stays, so the watchdog and
+    # the array coming up (event/disks_mounted) start it again by themselves.
+    why=$(unmounted_reason "$rc_dir")
+    if [ -n "$why" ]; then
+        echo "=== Remote Control for account '$PROFILE' is waiting: $why. It starts by itself once the array is started. $(date) ===" >> "$LOGFILE"
+        cc_log "Remote Control for account '$PROFILE' is waiting for the array: $why"
+        rm -f "$PIDFILE"
+        return 0
+    fi
     mkdir -p "$rc_dir"
     echo "=== Remote Control supervisor started $(date) (dir: $rc_dir) ===" >> "$LOGFILE"
     cc_log "Remote Control supervisor started for account '$PROFILE' (directory: $rc_dir)"
@@ -2153,8 +2306,15 @@ do_run() {
         "$PROFILES_SCRIPT" ensure "$PROFILE" >> "$LOGFILE" 2>&1
     fi
     while [ -f "$ENABLED_FLAG" ]; do
+        why=$(unmounted_reason "$rc_dir")
+        if [ -n "$why" ]; then
+            echo "=== Remote Control for account '$PROFILE' paused: $why (array stopping?). It starts again by itself once the array is started. $(date) ===" >> "$LOGFILE"
+            cc_log "Remote Control for account '$PROFILE' paused: $why"
+            break
+        fi
         cd "$rc_dir" || break
         output=""
+        rm -f "$EXITFILE"
 
         if [ -f "$FRESHFILE" ]; then
             # "Start a new session" was pressed. Nothing to resume, on purpose.
@@ -2282,9 +2442,31 @@ do_run() {
         fi
 
         [ -f "$ENABLED_FLAG" ] || break
-        echo "=== Remote Control exited, restarting in 5s: $(date) ===" >> "$LOGFILE"
-        cc_log "Remote Control for account '$PROFILE' exited; restarting it in 5s"
-        sleep 5
+
+        # Since 2.1.325 the exit status says why the bridge stopped: 69 when it
+        # could not register this server with Anthropic (signed out, or no way
+        # out to the internet), 4 when it stopped by itself. A refused
+        # registration says the same thing every five seconds for as long as
+        # the cause lasts, so those retries back off, up to five minutes. Older
+        # versions never exit with either and keep the plain five seconds.
+        status=$(cat "$EXITFILE" 2>/dev/null)
+        delay=5
+        if [ "$status" = "69" ]; then
+            reg_fails=$((reg_fails + 1))
+            delay=$((5 << (reg_fails < 7 ? reg_fails - 1 : 6)))
+            [ "$delay" -gt 300 ] && delay=300
+            echo "=== Remote Control could not register this server with Anthropic (exit 69): signed out, or no connection. Trying again in ${delay}s (attempt $reg_fails): $(date) ===" >> "$LOGFILE"
+            [ "$reg_fails" -eq 1 ] && cc_log "Remote Control for account '$PROFILE' could not register with Anthropic (signed out or offline); retrying with a growing delay"
+        else
+            reg_fails=0
+            if [ "$status" = "4" ]; then
+                echo "=== Remote Control stopped by itself (exit 4), restarting in ${delay}s: $(date) ===" >> "$LOGFILE"
+            else
+                echo "=== Remote Control exited, restarting in ${delay}s: $(date) ===" >> "$LOGFILE"
+            fi
+            cc_log "Remote Control for account '$PROFILE' exited${status:+ (status $status)}; restarting it in ${delay}s"
+        fi
+        sleep "$delay"
     done
     echo "=== Remote Control supervisor stopped $(date) ===" >> "$LOGFILE"
     cc_log "Remote Control supervisor stopped for account '$PROFILE'"
@@ -2359,7 +2541,7 @@ cc_log() {
 }
 
 stop_running() {
-    rm -f "$ENABLED_FLAG"
+    rm -f "$ENABLED_FLAG" "$EXITFILE"
     if [ -f "$PIDFILE" ]; then
         kill "$(cat "$PIDFILE")" 2>/dev/null
         rm -f "$PIDFILE"
@@ -2412,6 +2594,56 @@ spawn_supervisor() {
     echo $! > "$PIDFILE"
 }
 
+# Started while the array is down, the supervisor only notes that it is waiting
+# and exits, keeping the enabled flag. Said here too, where the person pressing
+# the button reads it.
+say_if_waiting_for_array() {
+    local why
+    why=$(unmounted_reason "$(get_rc_dir)")
+    [ -n "$why" ] && echo "The array is not started ($why). Remote Control for account '$PROFILE' will start by itself as soon as it is."
+}
+
+# Every process below a pid, children first found, deepest last.
+descendants() {
+    local todo="$1" pid kids all=""
+    while [ -n "$todo" ]; do
+        # shellcheck disable=SC2086  # a space-separated list of pids, split on purpose
+        set -- $todo; pid="$1"; shift; todo="$*"
+        kids=$(ps -eo pid=,ppid= | awk -v p="$pid" '$2 == p { print $1 }')
+        all="$all $kids"
+        todo="$todo $kids"
+        todo="${todo# }"
+    done
+    # shellcheck disable=SC2086  # same list, joined back onto one line
+    echo $all
+}
+
+# The array is about to be unmounted (event/unmounting_disks). A bridge, and the
+# MCP servers it started, keep files under appdata open, so Unraid cannot
+# unmount the user shares and the shutdown ends unclean, with a parity check on
+# the next boot (issue #2). Each running account is stopped -- all at once, so
+# the array waits for the slowest one rather than for the sum -- and whatever
+# its bridge started is stopped with it. Unlike "stop", the enabled flag is put
+# back: this was not the user's decision, so the account comes back by itself
+# once the array is started again.
+array_stop_one() {
+    local pid kids k
+    [ -f "$PIDFILE" ] && pid=$(cat "$PIDFILE" 2>/dev/null)
+    if [ -z "$pid" ] || [ ! -d "/proc/$pid" ]; then
+        return 0
+    fi
+    kids=$(descendants "$pid")
+    echo "=== The array is stopping: stopping Remote Control for account '$PROFILE' so the disks can be unmounted. It starts again by itself with the array. $(date) ===" >> "$LOGFILE"
+    cc_log "Array stopping: stopping Remote Control for account '$PROFILE' (it comes back with the array)"
+    stop_running
+    touch "$ENABLED_FLAG"
+    # MCP servers and the like that outlived the bridge, now orphans.
+    for k in $kids; do kill "$k" 2>/dev/null; done
+    sleep 2
+    for k in $kids; do [ -d "/proc/$k" ] && kill -9 "$k" 2>/dev/null; done
+    return 0
+}
+
 # Subcommands take the account as their first argument. Without one they act on
 # the account in use, except "stop", which with no account stops every one of
 # them: the uninstall path calls it that way and must leave nothing running.
@@ -2434,6 +2666,7 @@ case "$CMD" in
         fi
         rm -f "$PINFILE" "$FRESHFILE"
         touch "$ENABLED_FLAG"
+        say_if_waiting_for_array
         spawn_supervisor
         echo "Remote Control starting for account '$PROFILE' in directory: $(get_rc_dir)"
         cc_log "Remote Control asked to start for account '$PROFILE' (directory: $(get_rc_dir))"
@@ -2451,6 +2684,7 @@ case "$CMD" in
         save_cfg_var "$SESSION_ID_KEY" ""
         touch "$FRESHFILE"
         touch "$ENABLED_FLAG"
+        say_if_waiting_for_array
         spawn_supervisor
         echo "Starting a brand-new session for account '$PROFILE' in directory: $(get_rc_dir)"
         echo "The previous session is not deleted: it stays in the list below and can still be reconnected by its id."
@@ -2472,6 +2706,7 @@ case "$CMD" in
         stop_running
         echo "$SID" > "$PINFILE"
         touch "$ENABLED_FLAG"
+        say_if_waiting_for_array
         spawn_supervisor
         echo "Remote Control connecting account '$PROFILE' to session: $SID"
         echo "Use 'View live logs' below for status."
@@ -2508,6 +2743,12 @@ case "$CMD" in
         fi
         ;;
 
+    array-stop)
+        for p in $(all_profiles); do
+            ( set_profile "$p"; array_stop_one ) &
+        done
+        wait
+        ;;
     watchdog)
         # Whatever kills a supervisor from the outside -- the process group of a
         # web request going away, the kernel reclaiming memory -- leaves the
@@ -2521,6 +2762,9 @@ case "$CMD" in
             set_profile "$p"
             [ -f "$ENABLED_FLAG" ] || continue
             [ -f "$PIDFILE" ] && [ -d "/proc/$(cat "$PIDFILE" 2>/dev/null)" ] && continue
+            # Array down: nothing to start it on. The flag stays, and the array
+            # coming up runs this again straight away (event/disks_mounted).
+            [ -n "$(unmounted_reason "$(get_rc_dir)")" ] && continue
             echo "=== Remote Control was enabled but its supervisor was not running -- the watchdog is starting it again: $(date) ===" >> "$LOGFILE"
             cc_log "Remote Control for account '$PROFILE' was enabled but not running; the watchdog is starting it again"
             spawn_supervisor
@@ -2539,7 +2783,7 @@ esac
 <!-- Claude account profiles: several logins on one server, either sharing
      the agent memory and settings or fully isolated. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/profiles.sh" Mode="0755">
-<SHA256>7b8f1b5aa69ee1ceed4a8a6766f08294fe771908ce85d5b656de3f9330d67525</SHA256>
+<SHA256>3216931a1b668df2f3e9f5292065e42e0ae18065dd2a5dadc920edbe720c5de2</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -2581,6 +2825,10 @@ esac
 #     moved aside with a dated suffix and reported -- never removed.
 
 export PATH="/usr/local/bin:/root/.local/bin:$PATH"
+
+# cc_path_mounted: no account directory is created under an unmounted /mnt
+# (issue #2) -- "mkdir -p" would happily build it in RAM.
+. /usr/local/emhttp/plugins/claude-code/scripts/appdata-mount.sh
 
 PLUGIN_CFG="/boot/config/plugins/claude-code/claude-code.cfg"
 RC_SCRIPT="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh"
@@ -2686,6 +2934,7 @@ link_shared() {
 ensure_profile() {
     local slug="$1" dir seed
     dir=$(profile_dir "$slug") || return 0
+    cc_path_mounted "$dir" || { echo "Not setting up $dir: the disk it is on is not mounted -- is the array started?"; return 1; }
     [ -d "$dir" ] || mkdir -p "$dir" || { echo "Could not create $dir -- is the array started?"; return 1; }
     chmod 700 "$dir" 2>/dev/null
 
@@ -2963,6 +3212,10 @@ cmd_add() {
         return 1
     fi
     dir=$(profile_dir "$slug")
+    if ! cc_path_mounted "$dir"; then
+        echo "Could not create $dir: the disk it is on is not mounted -- is the array started?"
+        return 1
+    fi
     if ! mkdir -p "$dir"; then
         echo "Could not create $dir -- is the array started?"
         return 1
@@ -3268,7 +3521,7 @@ exec('/usr/local/emhttp/webGui/scripts/notify'
 
 <!-- Usage sampler: records the plan percentages on a schedule so the Dashboard can show how fast they are rising -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/usage-sampler.php" Mode="0644">
-<SHA256>ed411df8d0def726e15dcc4cd2f29f668151a0d66c919aa1e7bbee171111a7e0</SHA256>
+<SHA256>b36b7afc987b9e28f0cd347b99bb52f12046c073a4e7cb70355c52bed1e0cdd7</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -3320,6 +3573,8 @@ function s_hist_dir() {
     if (!is_dir($d)) @mkdir($d, 0700, true);
     return $d;
 }
+
+require_once '/usr/local/emhttp/plugins/claude-code/include/appdata-mount.php';
 
 function s_creds_file($slug) {
     return s_home($slug) . '/.credentials.json';
@@ -3428,6 +3683,13 @@ function s_last_line($file) {
     return $lines ? json_decode(end($lines), true) : null;
 }
 
+// Runs from cron every five minutes, and cron is running long before the array
+// is started, and while it is stopped. Creating the history folder then made
+// /mnt/user/appdata/... in RAM, and Unraid would not mount the user shares over
+// it (issue #2). Nothing to sample without appdata anyway: the credentials live
+// there too. The next run after the array starts picks up again.
+if (!cc_path_mounted(s_appdata())) exit(0);
+
 $hist = s_hist_dir();
 $now = time();
 foreach (s_accounts() as $slug) {
@@ -3479,6 +3741,48 @@ foreach (s_accounts() as $slug) {
 </FILE>
 
 <!-- Release check: the published Claude Code version for the configured channel -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/include/appdata-mount.php" Mode="0644">
+<SHA256>358497dbec87859a5633ec9f3dfde74147e64d66f4fa2f376c57714571b4ab33</SHA256>
+<INLINE>
+<![CDATA[
+<?php
+/*
+ * Is the filesystem a path lives on mounted? The PHP twin of
+ * scripts/appdata-mount.sh, and the same reason (issue #2): under /mnt, a
+ * directory created while the array is down is created in RAM, and anything
+ * under /mnt/user then stops Unraid from mounting the user shares at all. So
+ * nothing here makes a directory under /mnt without asking this first.
+ */
+
+// The mount point a path depends on, or '' for one outside /mnt.
+//   /mnt/user/..., /mnt/user0/...           -> /mnt/user, /mnt/user0
+//   /mnt/cache/..., /mnt/disk1/..., a pool   -> /mnt/<name>
+//   /mnt/disks/X/..., /mnt/remotes/X/...     -> /mnt/disks/X, /mnt/remotes/X
+function cc_mount_root($path) {
+    $parts = explode('/', (string)$path);
+    if (($parts[0] ?? null) !== '' || ($parts[1] ?? '') !== 'mnt' || ($parts[2] ?? '') === '') return '';
+    if (in_array($parts[2], ['disks', 'remotes', 'addons', 'rootshare'], true)) {
+        return ($parts[3] ?? '') !== '' ? "/mnt/{$parts[2]}/{$parts[3]}" : '';
+    }
+    return "/mnt/{$parts[2]}";
+}
+
+// True when that mount point is mounted, or when the path needs none.
+function cc_path_mounted($path) {
+    $root = cc_mount_root($path);
+    if ($root === '') return true;
+    $mounts = @file('/proc/mounts', FILE_IGNORE_NEW_LINES) ?: [];
+    foreach ($mounts as $line) {
+        $f = explode(' ', $line);
+        // /proc/mounts escapes spaces in paths as \040.
+        if (isset($f[1]) && str_replace('\\040', ' ', $f[1]) === $root) return true;
+    }
+    return false;
+}
+]]>
+</INLINE>
+</FILE>
+
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-version.php" Mode="0644">
 <SHA256>04a050450897ff65a6887bbbe3c89aeb82b5f5f2d6364d24c751e0f50e692f71</SHA256>
 <INLINE>
@@ -5092,7 +5396,7 @@ switch ($action) {
      tab: only paths this plugin built, one backup per save, unknown keys kept. -->
 <!-- Account synchronisation: the settings that cannot be shared by symlink -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-sync.php" Mode="0644">
-<SHA256>9d4bfe473becc12031aa5857e101451209bc20a43841c00cc8cbcb4a5065a4f9</SHA256>
+<SHA256>7c15e5c0fbbc073227904e32257ae67a8dc0628d9e04426bc595618c94dbeb87</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -5356,6 +5660,8 @@ function sync_entry($id, $meta, $mv, $pv, $bv) {
 // same directory and a rename, so a reader never sees a half-written document.
 function sync_write_json($path, $data) {
     $dir = dirname($path);
+    require_once '/usr/local/emhttp/plugins/claude-code/include/appdata-mount.php';
+    if (!cc_path_mounted($path)) return false;
     if (!is_dir($dir) && !@mkdir($dir, 0700, true)) return false;
     if (is_file($path)) @copy($path, $path . '.bak');
     $json = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -5581,7 +5887,7 @@ echo json_encode($out);
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-config.php" Mode="0644">
-<SHA256>236132626c32e9a329949e589c13edb7899c342a4ea7de84342fe5f35b179f55</SHA256>
+<SHA256>a04f4f5da65e466e22dc3d3e4cff03521a7f5cd70a41ed7b4cf605186907510f</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -5667,6 +5973,8 @@ function cc_encode($data) {
 
 function cc_write($path, $text) {
     $dir = dirname($path);
+    require_once '/usr/local/emhttp/plugins/claude-code/include/appdata-mount.php';
+    if (!cc_path_mounted($path)) return 'the disk it is on is not mounted -- start the array first';
     if (!is_dir($dir) && !@mkdir($dir, 0755, true)) return 'could not create ' . $dir;
     // Keep the version being replaced, so a bad save is one file copy away
     // from being undone.
@@ -5794,7 +6102,7 @@ cc_done(true, 'Saved to ' . $cc_path, [
 <!-- Permission rules: reads and writes settings.local.json, the file that records
      what has been granted for a working directory -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-permissions.php" Mode="0644">
-<SHA256>096f1b84b9381931b3a4c59f1ab9bf282b042e00437cc8ffbca1050a77c792e9</SHA256>
+<SHA256>a213afb309f32d89c6a1054894527c70a066ec7bd57770ae55d77ce79c4c6c90</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -5948,6 +6256,8 @@ function ccp_encode($data) {
 
 function ccp_write($path, $text) {
     $dir = dirname($path);
+    require_once '/usr/local/emhttp/plugins/claude-code/include/appdata-mount.php';
+    if (!cc_path_mounted($path)) return 'the disk it is on is not mounted -- start the array first';
     if (!is_dir($dir) && !@mkdir($dir, 0755, true)) return 'could not create ' . $dir;
     // Keep the version being replaced, so a bad save is one file copy away
     // from being undone.
@@ -8873,6 +9183,45 @@ Settings=Ajustes
 </FILE>
 
 <!-- rc.d startup script (runs on boot via Unraid's init system) -->
+<!-- Array events, through Unraid's own mechanism: emhttpd runs
+     plugins/<name>/event/<event> for every plugin (/usr/local/sbin/emhttp_event).
+     Issue #2: appdata only exists while the array is started. -->
+<FILE Name="/usr/local/emhttp/plugins/claude-code/event/disks_mounted" Mode="0755">
+<SHA256>5f9f2670b83dd74c73da75ef31373f22b2b5d338efe67a0e5f157bf45451f87d</SHA256>
+<INLINE>
+<![CDATA[
+#!/bin/bash
+# The disks and user shares are mounted. Whatever had to wait for appdata --
+# persistence of ~/.claude, the "/" project, the cached binary -- is done now,
+# and Remote Control comes back for every account that was running when the
+# array stopped. emhttpd waits for this script to finish before it carries on
+# starting the array, so the work goes to the background, in a session of its
+# own. At boot this overlaps the startup install, which holds the same lock.
+setsid bash -c '
+    /usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh array-up >> /var/log/claude-code-install.log 2>&1
+    /usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh watchdog > /dev/null 2>&1
+' < /dev/null > /dev/null 2>&1 &
+exit 0
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/claude-code/event/unmounting_disks" Mode="0755">
+<SHA256>c6d5cdb1351125388b43dcd541bc315a6f0efb375245b3735aeb11d7506f23c3</SHA256>
+<INLINE>
+<![CDATA[
+#!/bin/bash
+# The disks are about to be unmounted. A Remote Control bridge and the MCP
+# servers it started keep files under appdata open, and then Unraid cannot
+# unmount the user shares and the shutdown ends unclean. Stopped here, in the
+# foreground on purpose: the unmount has to wait for them. They come back with
+# the array (event/disks_mounted).
+/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh array-stop > /dev/null 2>&1
+exit 0
+]]>
+</INLINE>
+</FILE>
+
 <FILE Name="/etc/rc.d/rc.claude-code" Mode="0755">
 <SHA256>7eec70b77833d052a834c5c241972955e63b255c0eaf302e13511b2d77c94bbd</SHA256>
 <INLINE>
@@ -8976,7 +9325,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.11.11 has been installed!"
+    echo " Claude Code plugin v2026.11.13 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
@@ -9033,7 +9382,7 @@ for pidfile in /var/run/claude-remote-control*.pid; do
     kill "$(cat "$pidfile")" 2>/dev/null || true
     rm -f "$pidfile"
 done
-rm -f /var/run/claude-remote-control*.enabled /var/run/claude-remote-control*.pin /var/run/claude-remote-control*.fresh
+rm -f /var/run/claude-remote-control*.enabled /var/run/claude-remote-control*.pin /var/run/claude-remote-control*.fresh /var/run/claude-remote-control*.exit
 rm -f /var/run/claude-code-sync.lock
 # The supervisor runs as "bash .../remote-control.sh _run" and forks subshells
 # and a session watcher under it, none of which the pidfile covers.
