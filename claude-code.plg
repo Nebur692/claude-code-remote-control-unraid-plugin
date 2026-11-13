@@ -1,12 +1,34 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.11.13"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.11.14"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.11.14
+- Several Remote Control sessions at once, from the Remote Control tab, with
+  no terminal needed. Fixed sessions: each account can keep extra sessions
+  alongside its main one, each with a name (its title on claude.ai), a folder
+  and a choice between resuming the same session on every start or opening a
+  new one each time. They survive reboots and updates like the main session,
+  come back with the array, and can be started all at once.
+- Claude Code serves only one Remote Control per folder, so each fixed session
+  has a folder of its own (by default under appdata). It starts with a copy of
+  the permission rules approved for /, and by default shares the agent memory
+  of /, so it knows what the main session knows. A memory a folder already
+  had is kept aside, never deleted; removing a session leaves its folder.
+- Server mode, per account: the main session becomes a server that holds
+  several sessions at once, opened from claude.ai or the Claude app, which can
+  also be forked from there; restarting it brings back what it was serving.
+- Remote Control stops with a clear message, instead of retrying, when its
+  folder is already served by another "claude remote-control"; that case also
+  exits with 69, so the "could not register" note no longer blames the sign-in.
+- A new session from "Start a new session" is now explicitly a single session,
+  so its id is learnt and resumed by name from then on.
+- Updating Claude Code restarts every running session, extra ones included,
+  and each resumes the session it had.
 ###2026.11.13
 - Nothing is written under /mnt any more while the array is stopped (issue #2).
   The usage sampler, which runs every five minutes from boot, created the
@@ -839,7 +861,7 @@ cc_path_mounted() {
 
 <!-- Install/setup script -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh" Mode="0755">
-<SHA256>63e23d31282f0e60cca9ab2a2efa42011f27a632ff52e3c80e8232f787e361a4</SHA256>
+<SHA256>1af68bf7b8298c6d222694a91ba3b4a85bb3a388b1b0578e37fbae951670e24a</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -978,31 +1000,12 @@ apply_binary() {
 # under the same running bridge.
 restart_running_remote_control() {
     local script="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh"
-    local version="$1"
     [ -x "$script" ] || return 0
-
-    local MULTI_ACCOUNT="no" PROFILES=""
-    [ -f "$PLUGIN_CFG" ] && source "$PLUGIN_CFG"
-    local accounts="default"
-    [ "$MULTI_ACCOUNT" = "yes" ] && accounts="default $PROFILES"
-
-    local acct pidfile
-    for acct in $accounts; do
-        if [ "$acct" = "default" ]; then pidfile="/var/run/claude-remote-control.pid"
-        else pidfile="/var/run/claude-remote-control-$acct.pid"; fi
-
-        if [ -f "$pidfile" ] && [ -d "/proc/$(cat "$pidfile" 2>/dev/null)" ]; then
-            echo "Restarting Remote Control for account '$acct' so its bridge picks up ${version:-the new version} (it will drop for a few seconds)..."
-            "$script" stop "$acct"
-            "$script" start "$acct"
-            sleep 1
-            if [ -f "$pidfile" ] && [ -d "/proc/$(cat "$pidfile" 2>/dev/null)" ]; then
-                echo "Remote Control for account '$acct' is back up."
-            else
-                echo "WARNING: Remote Control for account '$acct' did not come back up -- start it by hand from the Remote Control tab."
-            fi
-        fi
-    done
+    # Every bridge that is running -- each account's main session and its extra
+    # ones -- restarts on the new binary and resumes the session it had. The
+    # script knows them all; this used to list the accounts itself and missed
+    # anything that was not an account's main session.
+    "$script" restart-running "$1"
 }
 
 restore_cached_binary() {
@@ -1686,7 +1689,7 @@ publish "_DONE_" ""
      restore_cached_binary() restores from on every boot, so without
      re-caching here, any update would silently be reverted on next reboot. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/update-claude.sh" Mode="0755">
-<SHA256>b724a28f9c9345f714672928b00d6d2bdf8b2899f292d2eeb7116529997fb2bd</SHA256>
+<SHA256>1bbc4209933ed18f5aa6ab4fbd9ac8418b703fa5638dcaf9eebab192600d1f67</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1734,31 +1737,12 @@ apply_binary() {
 # Reinstall can swap the same binary under the same running bridge.
 restart_running_remote_control() {
     local script="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh"
-    local version="$1"
     [ -x "$script" ] || return 0
-
-    local MULTI_ACCOUNT="no" PROFILES=""
-    [ -f "$PLUGIN_CFG" ] && source "$PLUGIN_CFG"
-    local accounts="default"
-    [ "$MULTI_ACCOUNT" = "yes" ] && accounts="default $PROFILES"
-
-    local acct pidfile
-    for acct in $accounts; do
-        if [ "$acct" = "default" ]; then pidfile="/var/run/claude-remote-control.pid"
-        else pidfile="/var/run/claude-remote-control-$acct.pid"; fi
-
-        if [ -f "$pidfile" ] && [ -d "/proc/$(cat "$pidfile" 2>/dev/null)" ]; then
-            echo "Restarting Remote Control for account '$acct' so its bridge picks up ${version:-the new version} (it will drop for a few seconds)..."
-            "$script" stop "$acct"
-            "$script" start "$acct"
-            sleep 1
-            if [ -f "$pidfile" ] && [ -d "/proc/$(cat "$pidfile" 2>/dev/null)" ]; then
-                echo "Remote Control for account '$acct' is back up."
-            else
-                echo "WARNING: Remote Control for account '$acct' did not come back up -- start it by hand from the Remote Control tab."
-            fi
-        fi
-    done
+    # Every bridge that is running -- each account's main session and its extra
+    # ones -- restarts on the new binary and resumes the session it had. The
+    # script knows them all; this used to list the accounts itself and missed
+    # anything that was not an account's main session.
+    "$script" restart-running "$1"
 }
 
 if ! command -v claude &> /dev/null; then
@@ -1990,7 +1974,7 @@ prune_versions
      taken over as "most recent"; see the connect subcommand and the
      Settings page's Session ID field. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh" Mode="0755">
-<SHA256>263b5d11f6650e9b0078dbf324c5545e8882940bc7e1429151c3e4b07c2459e6</SHA256>
+<SHA256>bc903d58e9c6fbc036ac8ed5bf277b5ce467586afdaf4fa57cee67f34a91a08c</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -2007,14 +1991,21 @@ SESSION_POLL_SECONDS=3
 # the user shares at all (issue #2).
 . /usr/local/emhttp/plugins/claude-code/scripts/appdata-mount.sh
 
-# Which account this invocation is for, and everything that follows from it.
+# Which bridge this invocation is for, and everything that follows from it.
 #
-# Each account gets its own supervisor, pid file, log and session history, so
-# two accounts can be connected at the same time. The main account deliberately
-# keeps the original unsuffixed paths: an upgrade must not orphan the
-# supervisor that is already running under the old names.
+# A bridge is an "instance": an account's main session, or one of the extra
+# sessions an account can keep alongside it, written "account/slot". Each one
+# has its own supervisor, pid file, log and remembered session, so they all run
+# at the same time.
+#
+# The main session of each account deliberately keeps the paths it always had
+# (no suffix for the main account, "-<account>" for the others): an upgrade
+# must not orphan a supervisor that is already running under the old names. An
+# extra session adds "--<slot>". Account names can contain "_" but never "-",
+# and slot names neither, so "--" cannot be produced by any other instance.
 set_profile() {
     PROFILE="${1:-}"
+    SLOT="${2:-}"
     MULTI_ACCOUNT="no"
     ACTIVE_PROFILE="default"
     REMOTE_CONTROL_DIR=""
@@ -2035,12 +2026,23 @@ set_profile() {
         NAME_PREFIX="unraid-$PROFILE"
     fi
 
-    # Where this account's own session id is remembered.
+    # Where this bridge's own session id is remembered.
     if [ "$PROFILE" = "default" ]; then
         SESSION_ID_KEY="LAST_SESSION_ID"
     else
         SESSION_ID_KEY="LAST_SESSION_ID_$PROFILE"
     fi
+
+    if [ -n "$SLOT" ]; then
+        SUFFIX="$SUFFIX--$SLOT"
+        NAME_PREFIX="$NAME_PREFIX--$SLOT"
+        # Upper-case infix: account and slot names are lower-case, so no
+        # account name can end up spelling another bridge's key.
+        SESSION_ID_KEY="LAST_SESSION_ID_${PROFILE}_S_$SLOT"
+    fi
+    INSTANCE="$PROFILE${SLOT:+/$SLOT}"
+    # How the logs and messages name it.
+    if [ -n "$SLOT" ]; then WHO="session '$SLOT' of account '$PROFILE'"; else WHO="account '$PROFILE'"; fi
 
     LOGFILE="/var/log/claude-code-remote-control$SUFFIX.log"
     PIDFILE="/var/run/claude-remote-control$SUFFIX.pid"
@@ -2086,6 +2088,20 @@ get_rc_dir() {
     local var value
     REMOTE_CONTROL_DIR=""
     [ -f "$PLUGIN_CFG" ] && source "$PLUGIN_CFG"
+    # An extra session never shares a folder: Claude Code serves one
+    # "claude remote-control" per folder and refuses a second. Unless one was
+    # chosen, it gets its own under appdata, which persists, so the permission
+    # rules approved in it survive a reboot.
+    if [ -n "$SLOT" ]; then
+        value=$(slot_get DIR)
+        if [ -n "$value" ]; then echo "$value"; return; fi
+        if [ "$PROFILE" = "default" ]; then
+            echo "$APPDATA_PATH/sessions/$SLOT"
+        else
+            echo "$APPDATA_PATH/sessions/$PROFILE-$SLOT"
+        fi
+        return
+    fi
     if [ "$PROFILE" = "default" ]; then
         echo "${REMOTE_CONTROL_DIR:-/root/claude-remote-control}"
         return
@@ -2117,6 +2133,151 @@ get_cfg_var() {
     printf '%s' "${line#*=}" | sed -e 's/^"//' -e 's/"$//'
 }
 
+del_cfg_var() {
+    [ -f "$PLUGIN_CFG" ] || return 0
+    sed -i "/^$1=/d" "$PLUGIN_CFG"
+}
+
+# ---- Extra sessions ("slots") ----------------------------------------------
+#
+# Configured per account in the plugin's cfg:
+#   RCS_LIST_<account>="work notes"          the account's extra sessions
+#   RCS_NAME_<account>_S_<slot>="Work"       title shown on claude.ai
+#   RCS_MODE_<account>_S_<slot>=fixed|fresh  resume the same session on every
+#                                            start, or open a new one each time
+#   RCS_MEM_<account>_S_<slot>=shared|own    share the agent memory of "/"
+#   RCS_DIR_<account>_S_<slot>=/path         optional; see get_rc_dir
+#   LAST_SESSION_ID_<account>_S_<slot>       the session it resumes
+SLOT_RE='^[a-z][a-z0-9]{0,15}$'
+
+slot_get() {
+    get_cfg_var "RCS_$1_${PROFILE}_S_$SLOT"
+}
+
+list_slots() {
+    get_cfg_var "RCS_LIST_$1"
+}
+
+slot_listed() {
+    local s
+    for s in $(list_slots "$1"); do [ "$s" = "$2" ] && return 0; done
+    return 1
+}
+
+# Every bridge there is: each account's main session, then its extra ones.
+all_instances() {
+    local p s
+    for p in $(all_profiles); do
+        echo "$p"
+        for s in $(list_slots "$p"); do
+            [[ "$s" =~ $SLOT_RE ]] && echo "$p/$s"
+        done
+    done
+}
+
+# set_profile from an instance name, "account" or "account/slot".
+select_instance() {
+    case "$1" in
+        */*) set_profile "${1%%/*}" "${1#*/}" ;;
+        *)   set_profile "$1" "" ;;
+    esac
+}
+
+is_running() {
+    [ -f "$PIDFILE" ] && [ -d "/proc/$(cat "$PIDFILE" 2>/dev/null)" ]
+}
+
+# Server mode, for an account's main session: one "claude remote-control"
+# that holds several sessions at once, opened from claude.ai or the app, and
+# can fork them. Extra sessions are always single-session bridges.
+server_mode() {
+    [ -z "$SLOT" ] && [ "$(get_cfg_var "RC_SERVER_$PROFILE")" = "yes" ]
+}
+
+# The display name passed to Claude Code when a session is created: the one the
+# user gave an extra session. The main sessions keep the generated names they
+# always had.
+name_args() {
+    local n
+    [ -n "$SLOT" ] || return 0
+    n=$(slot_get NAME)
+    [ -n "$n" ] && printf '%s\n' --name "$n"
+}
+
+# Another bridge of this plugin, running, in the same folder. Claude Code would
+# refuse it anyway ("This folder is already served"), after a minute of waiting
+# and an exit status that reads like a sign-in problem; said here instead,
+# with the name of the bridge in the way.
+folder_taken_by() {
+    local dir="$1" me="$INSTANCE" i other
+    for i in $(all_instances); do
+        [ "$i" = "$me" ] && continue
+        other=$(select_instance "$i"; is_running && get_rc_dir)
+        [ -n "$other" ] && [ "$other" = "$dir" ] && { echo "$i"; return 0; }
+    done
+    return 1
+}
+
+# The agent memory lives per working folder: ~/.claude/projects/<folder>/memory.
+# The main session works in "/", so an extra session in its own folder would
+# start with none of what has been learnt there. Sharing it is a link from the
+# extra folder's project to the memory of "/", made before each start.
+#
+# Never deletes a memory: a real directory already there with anything in it is
+# moved aside under a dated name and said in the log; an empty one or a link
+# that points elsewhere is replaced. Choosing "own" afterwards only removes the
+# link, never what it points at.
+link_slot_memory() {
+    local rc_dir="$1" mode home projects enc d link stamp
+    mode=$(slot_get MEM)
+    if [ "$PROFILE" = "default" ]; then home="$APPDATA_PATH/.claude"; else home="$APPDATA_PATH/profiles/$PROFILE"; fi
+    projects="$home/projects"
+    [ -d "$projects" ] || return 0
+    # Claude names a project folder after its path with every character other
+    # than a letter or a digit turned into "-". Its own pointer file names the
+    # real directory too, once a bridge has run there; both are covered.
+    enc=$(printf '%s' "$rc_dir" | sed 's/[^A-Za-z0-9]/-/g')
+    for d in "$projects/$enc" $(grep -lF "\"dir\":\"$rc_dir\"" "$projects"/*/bridge-pointer.json 2>/dev/null | xargs -r -n1 dirname); do
+        [ "$d" = "$projects/-" ] && continue
+        link="$d/memory"
+        if [ "$mode" = "own" ]; then
+            [ -L "$link" ] && [ "$(readlink "$link")" = "../-/memory" ] && rm -f "$link"
+            continue
+        fi
+        mkdir -p "$projects/-/memory" "$d" || continue
+        if [ -L "$link" ]; then
+            [ "$(readlink "$link")" = "../-/memory" ] && continue
+            rm -f "$link"
+        elif [ -d "$link" ]; then
+            if rmdir "$link" 2>/dev/null; then
+                :
+            else
+                stamp=$(date +%Y%m%d%H%M%S)
+                mv "$link" "$link.propia-$stamp" || continue
+                echo "=== This session's folder already had a memory of its own; it was kept as $link.propia-$stamp and the session now shares the memory of / : $(date) ===" >> "$LOGFILE"
+            fi
+        elif [ -e "$link" ]; then
+            continue
+        fi
+        ln -s ../-/memory "$link"
+    done
+}
+
+# The first time an extra session's folder is used, it starts with a copy of
+# the permission rules approved for "/" (/.claude/settings.local.json), so the
+# phone does not ask again for everything already allowed there. A copy, not a
+# link: from then on each session keeps its own, and the folder lives in
+# appdata, so they survive reboots.
+seed_slot_rules() {
+    local rc_dir="$1" src="/.claude/settings.local.json"
+    [ -e "$rc_dir/.claude" ] && return 0
+    mkdir -p "$rc_dir/.claude" || return 0
+    if [ -f "$src" ]; then
+        cp "$src" "$rc_dir/.claude/settings.local.json" &&
+            echo "=== First start in $rc_dir: copied the permission rules approved for / into this session's folder: $(date) ===" >> "$LOGFILE"
+    fi
+}
+
 # Which lines of claude's output actually announce a session this bridge is
 # serving. Everything else is not evidence, and a plain grep for "session_"
 # treated it as if it were: the log also carries this script's own
@@ -2145,7 +2306,7 @@ record_sid() {
         # The account goes in brackets at the end: a directory can contain
         # spaces, so appending it bare would make the line ambiguous. Lines
         # written before accounts existed simply have no bracket.
-        echo "$(date -Iseconds) $sid $rc_dir [$PROFILE]" >> "$HISTORY_FILE"
+        echo "$(date -Iseconds) $sid $rc_dir [$INSTANCE]" >> "$HISTORY_FILE"
     fi
     # Remember it as this account's own session, outside the history check
     # above: that check is about not writing the same line twice, while this
@@ -2242,11 +2403,20 @@ session_gone_reason() {
 }
 
 run_fresh() {
-    local rc_dir="$1"
+    local rc_dir="$1" names=()
     echo "=== Starting a fresh session in $rc_dir: $(date) ===" >> "$LOGFILE"
+    mapfile -t names < <(name_args)
     # Kept in $output like every other attempt, so the checks at the end of
     # the supervisor's loop see what this one said too. The log already has it.
-    output=$(run_claude "$rc_dir")
+    if server_mode; then
+        output=$(run_claude "$rc_dir" "${SERVER_ARGS[@]}")
+    else
+        # Explicitly a single session. Without a mode, "claude remote-control"
+        # starts a server, which announces the folder rather than the session,
+        # so the id was never learnt and the next start fell back to
+        # --continue instead of asking for this session by name.
+        output=$(run_claude "$rc_dir" --spawn session "${names[@]}")
+    fi
 }
 
 # emhttpd gives every command it runs extra copies of its descriptors, the web
@@ -2289,14 +2459,24 @@ do_run() {
     # the array coming up (event/disks_mounted) start it again by themselves.
     why=$(unmounted_reason "$rc_dir")
     if [ -n "$why" ]; then
-        echo "=== Remote Control for account '$PROFILE' is waiting: $why. It starts by itself once the array is started. $(date) ===" >> "$LOGFILE"
-        cc_log "Remote Control for account '$PROFILE' is waiting for the array: $why"
+        echo "=== Remote Control for $WHO is waiting: $why. It starts by itself once the array is started. $(date) ===" >> "$LOGFILE"
+        cc_log "Remote Control for $WHO is waiting for the array: $why"
         rm -f "$PIDFILE"
         return 0
     fi
     mkdir -p "$rc_dir"
     echo "=== Remote Control supervisor started $(date) (dir: $rc_dir) ===" >> "$LOGFILE"
-    cc_log "Remote Control supervisor started for account '$PROFILE' (directory: $rc_dir)"
+    # Server mode: how many sessions it may hold at once, when one was set.
+    SERVER_ARGS=(--spawn same-dir)
+    status=$(get_cfg_var "RC_CAPACITY_$PROFILE")
+    [[ "$status" =~ ^[0-9]+$ ]] && [ "$status" -ge 1 ] && SERVER_ARGS+=(--capacity "$status")
+    status=""
+    server_mode && echo "=== Server mode: sessions are opened from claude.ai or the Claude app, several at a time: $(date) ===" >> "$LOGFILE"
+    if [ -n "$SLOT" ]; then
+        seed_slot_rules "$rc_dir"
+        link_slot_memory "$rc_dir"
+    fi
+    cc_log "Remote Control supervisor started for $WHO (directory: $rc_dir)"
     # With the bridge not yet running is the moment to fix this account's config
     # home: the links to the shared memory and settings, and the MCP servers and
     # rules the main account leads on. Doing it here rather than in the launcher
@@ -2308,8 +2488,8 @@ do_run() {
     while [ -f "$ENABLED_FLAG" ]; do
         why=$(unmounted_reason "$rc_dir")
         if [ -n "$why" ]; then
-            echo "=== Remote Control for account '$PROFILE' paused: $why (array stopping?). It starts again by itself once the array is started. $(date) ===" >> "$LOGFILE"
-            cc_log "Remote Control for account '$PROFILE' paused: $why"
+            echo "=== Remote Control for $WHO paused: $why (array stopping?). It starts again by itself once the array is started. $(date) ===" >> "$LOGFILE"
+            cc_log "Remote Control for $WHO paused: $why"
             break
         fi
         cd "$rc_dir" || break
@@ -2335,6 +2515,12 @@ do_run() {
                 run_fresh "$rc_dir"
             fi
             fail_count=0
+        elif server_mode; then
+            # Brings back every session it was serving when it stopped (Claude
+            # Code keeps that in the folder's bridge-pointer.json) and accepts
+            # new ones from claude.ai and the app.
+            output=$(run_claude "$rc_dir" "${SERVER_ARGS[@]}")
+            fail_count=0
         else
             # "--continue" resumes the most recent session *of this directory*,
             # whichever account started it. With accounts sharing a directory
@@ -2355,6 +2541,10 @@ do_run() {
             own_id=$(get_cfg_var "$SESSION_ID_KEY")
             if [ -n "$own_id" ]; then
                 output=$(run_claude "$rc_dir" --session-id "$own_id")
+            elif [ -n "$SLOT" ]; then
+                # An extra session that has never had one: its folder is its
+                # own, so there is nothing to continue.
+                run_fresh "$rc_dir"
             else
                 output=$(run_claude "$rc_dir" --continue)
             fi
@@ -2374,23 +2564,23 @@ do_run() {
                tr '\0' ' ' < "/proc/$holder/cmdline" 2>/dev/null | grep -q -- "--remote-control-session-name-prefix $NAME_PREFIX *\$"; then
                 held_waits=$((held_waits + 1))
                 echo "=== Session $own_id is still held by this account's previous bridge (pid $holder), which is shutting down -- waiting for it and asking for the same session again: $(date) ===" >> "$LOGFILE"
-                cc_log "Session $own_id is still held by the previous bridge of account '$PROFILE'; waiting for it to exit"
+                cc_log "Session $own_id is still held by the previous bridge of $WHO; waiting for it to exit"
                 local w=0
                 while [ -d "/proc/$holder" ] && [ "$w" -lt 30 ]; do sleep 1; w=$((w + 1)); done
                 [ -d "/proc/$holder" ] && kill -9 "$holder" 2>/dev/null
                 continue
             fi
             if echo "$output" | grep -q "already being served by another"; then
-                echo "=== The session in $rc_dir is already held by another instance${own_id:+ (}${own_id}${own_id:+)} -- starting a new session for account '$PROFILE': $(date) ===" >> "$LOGFILE"
-                cc_log "The session in $rc_dir is already held by another instance; starting a new session for account '$PROFILE'"
+                echo "=== The session in $rc_dir is already held by another instance${own_id:+ (}${own_id}${own_id:+)} -- starting a new session for $WHO: $(date) ===" >> "$LOGFILE"
+                cc_log "The session in $rc_dir is already held by another instance; starting a new session for $WHO"
                 fail_count=0
                 [ -n "$own_id" ] && save_cfg_var "$SESSION_ID_KEY" ""
                 run_fresh "$rc_dir"
             # Gone for good: no point retrying, and no threshold to wait
             # out either -- the CLI has told us the id itself is unusable.
             elif session_is_gone "$output"; then
-                echo "=== ARCHIVED_SESSION_FALLBACK: session ${own_id:-in $rc_dir} can no longer be resumed because $(session_gone_reason "$output") -- starting a new session for account '$PROFILE': $(date) ===" >> "$LOGFILE"
-                cc_log "Session ${own_id:-in $rc_dir} can no longer be resumed; starting a new session for account '$PROFILE'"
+                echo "=== ARCHIVED_SESSION_FALLBACK: session ${own_id:-in $rc_dir} can no longer be resumed because $(session_gone_reason "$output") -- starting a new session for $WHO: $(date) ===" >> "$LOGFILE"
+                cc_log "Session ${own_id:-in $rc_dir} can no longer be resumed; starting a new session for $WHO"
                 fail_count=0
                 [ -n "$own_id" ] && save_cfg_var "$SESSION_ID_KEY" ""
                 run_fresh "$rc_dir"
@@ -2424,7 +2614,7 @@ do_run() {
         # for good, by design, so that one needs another folder.
         if printf '%s\n' "$output" | grep -q "Workspace not trusted"; then
             echo "=== Remote Control cannot start in $rc_dir: Claude Code has not been told to trust this folder. Open a terminal, run claude in $rc_dir once and accept the question about trusting it, then start Remote Control again. If $rc_dir is your home directory, pick another folder: trust is never saved for that one. $(date) ===" >> "$LOGFILE"
-            cc_log "Remote Control for account '$PROFILE' stopped: $rc_dir is not a trusted folder (run claude there once, then start it again)"
+            cc_log "Remote Control for $WHO stopped: $rc_dir is not a trusted folder (run claude there once, then start it again)"
             rm -f "$ENABLED_FLAG"
             break
         fi
@@ -2436,7 +2626,18 @@ do_run() {
         # ENOENT"; retrying every five seconds would only repeat it.
         if printf '%s\n' "$output" | grep -qa "working folder not found"; then
             echo "=== Remote Control cannot start in $rc_dir: Claude Code cannot find or enter that folder. Check that the share it is on is mounted (the array started), then start Remote Control again. $(date) ===" >> "$LOGFILE"
-            cc_log "Remote Control for account '$PROFILE' stopped: its folder $rc_dir could not be found (is its share mounted?)"
+            cc_log "Remote Control for $WHO stopped: its folder $rc_dir could not be found (is its share mounted?)"
+            rm -f "$ENABLED_FLAG"
+            break
+        fi
+
+        # Claude Code serves one "claude remote-control" per folder and device.
+        # Another one already there -- started by hand in a terminal, or a
+        # bridge of this plugin set to the same folder -- is not something a
+        # retry fixes, and each attempt waits a minute before giving up.
+        if printf '%s\n' "$output" | grep -qa "already served by a terminal"; then
+            echo "=== Remote Control cannot start in $rc_dir: another \"claude remote-control\" is already serving that folder on this server, and Claude Code allows only one per folder. Stop it, or give this session a folder of its own, then start it again. $(date) ===" >> "$LOGFILE"
+            cc_log "Remote Control for $WHO stopped: $rc_dir is already served by another claude remote-control"
             rm -f "$ENABLED_FLAG"
             break
         fi
@@ -2444,8 +2645,9 @@ do_run() {
         [ -f "$ENABLED_FLAG" ] || break
 
         # Since 2.1.325 the exit status says why the bridge stopped: 69 when it
-        # could not register this server with Anthropic (signed out, or no way
-        # out to the internet), 4 when it stopped by itself. A refused
+        # could not register this server with Anthropic (signed out, no way out
+        # to the internet, or its folder already served -- handled just above),
+        # 4 when it stopped by itself. A refused
         # registration says the same thing every five seconds for as long as
         # the cause lasts, so those retries back off, up to five minutes. Older
         # versions never exit with either and keep the plain five seconds.
@@ -2455,8 +2657,8 @@ do_run() {
             reg_fails=$((reg_fails + 1))
             delay=$((5 << (reg_fails < 7 ? reg_fails - 1 : 6)))
             [ "$delay" -gt 300 ] && delay=300
-            echo "=== Remote Control could not register this server with Anthropic (exit 69): signed out, or no connection. Trying again in ${delay}s (attempt $reg_fails): $(date) ===" >> "$LOGFILE"
-            [ "$reg_fails" -eq 1 ] && cc_log "Remote Control for account '$PROFILE' could not register with Anthropic (signed out or offline); retrying with a growing delay"
+            echo "=== Remote Control could not register this server with Anthropic (exit 69): signed out, no connection, or refused for another reason the lines above give. Trying again in ${delay}s (attempt $reg_fails): $(date) ===" >> "$LOGFILE"
+            [ "$reg_fails" -eq 1 ] && cc_log "Remote Control for $WHO could not register with Anthropic (signed out or offline); retrying with a growing delay"
         else
             reg_fails=0
             if [ "$status" = "4" ]; then
@@ -2464,12 +2666,12 @@ do_run() {
             else
                 echo "=== Remote Control exited, restarting in ${delay}s: $(date) ===" >> "$LOGFILE"
             fi
-            cc_log "Remote Control for account '$PROFILE' exited${status:+ (status $status)}; restarting it in ${delay}s"
+            cc_log "Remote Control for $WHO exited${status:+ (status $status)}; restarting it in ${delay}s"
         fi
         sleep "$delay"
     done
     echo "=== Remote Control supervisor stopped $(date) ===" >> "$LOGFILE"
-    cc_log "Remote Control supervisor stopped for account '$PROFILE'"
+    cc_log "Remote Control supervisor stopped for $WHO"
     rm -f "$PIDFILE"
 }
 
@@ -2483,14 +2685,14 @@ do_run() {
 # bridge-pointer.json inside the appdata tree.
 forget_session() {
     local sid="$1" p key appdata ptr pid cmd found=no
-    for p in $(all_profiles); do
-        if [ "$p" = "default" ]; then key="LAST_SESSION_ID"; else key="LAST_SESSION_ID_$p"; fi
-        if [ "$(get_cfg_var "$key")" = "$sid" ]; then
-            echo "Session $sid is the one account '$p' is set to use, so it is not an old session."
-            echo "Start a new session for that account first, then delete this one."
-            return 1
-        fi
-    done
+    # Every bridge's remembered session: the accounts' main ones and their
+    # extra sessions alike (LAST_SESSION_ID, _<account>, _<account>_S_<slot>).
+    if [ -f "$PLUGIN_CFG" ] && key=$(grep -m1 -E "^LAST_SESSION_ID[A-Za-z0-9_]*=\"?$sid\"?$" "$PLUGIN_CFG"); then
+        key="${key%%=*}"
+        echo "Session $sid is the one $key points to, so it is not an old session."
+        echo "Start a new session for that account or session first, then delete this one."
+        return 1
+    fi
 
     APPDATA_PATH=""
     [ -f "$PLUGIN_CFG" ] && source "$PLUGIN_CFG"
@@ -2551,7 +2753,7 @@ stop_running() {
     # identical apart from the session name prefix -- which is exactly why the
     # prefix carries the account. Anchored at the end so "unraid" does not also
     # match "unraid-work".
-    pkill -f "remote-control.sh _run $PROFILE\$" 2>/dev/null
+    pkill -f "remote-control.sh _run $INSTANCE\$" 2>/dev/null
     pkill -f "remote-control-session-name-prefix $NAME_PREFIX\$" 2>/dev/null
     # Signalling is not stopping. A bridge with a session attached shuts it down
     # before it exits, and every caller of this starts a new bridge straight
@@ -2562,9 +2764,9 @@ stop_running() {
     # force them after a grace period long enough for an orderly shutdown.
     local waited=0
     while pgrep -f "remote-control-session-name-prefix $NAME_PREFIX\$" >/dev/null 2>&1 ||
-          pgrep -f "remote-control.sh _run $PROFILE\$" >/dev/null 2>&1; do
+          pgrep -f "remote-control.sh _run $INSTANCE\$" >/dev/null 2>&1; do
         if [ "$waited" -ge 30 ]; then
-            pkill -9 -f "remote-control.sh _run $PROFILE\$" 2>/dev/null
+            pkill -9 -f "remote-control.sh _run $INSTANCE\$" 2>/dev/null
             pkill -9 -f "remote-control-session-name-prefix $NAME_PREFIX\$" 2>/dev/null
             break
         fi
@@ -2584,9 +2786,9 @@ stop_running() {
 # the supervisor where no other process group can reach it.
 spawn_supervisor() {
     if command -v setsid >/dev/null 2>&1; then
-        setsid "$0" _run "$PROFILE" > /dev/null 2>&1 &
+        setsid "$0" _run "$INSTANCE" > /dev/null 2>&1 &
     else
-        nohup "$0" _run "$PROFILE" > /dev/null 2>&1 &
+        nohup "$0" _run "$INSTANCE" > /dev/null 2>&1 &
     fi
     # Only a first guess: with setsid in front, this can be the pid of setsid
     # rather than of the shell that matters. The supervisor overwrites it with
@@ -2600,7 +2802,7 @@ spawn_supervisor() {
 say_if_waiting_for_array() {
     local why
     why=$(unmounted_reason "$(get_rc_dir)")
-    [ -n "$why" ] && echo "The array is not started ($why). Remote Control for account '$PROFILE' will start by itself as soon as it is."
+    [ -n "$why" ] && echo "The array is not started ($why). Remote Control for $WHO will start by itself as soon as it is."
 }
 
 # Every process below a pid, children first found, deepest last.
@@ -2633,8 +2835,8 @@ array_stop_one() {
         return 0
     fi
     kids=$(descendants "$pid")
-    echo "=== The array is stopping: stopping Remote Control for account '$PROFILE' so the disks can be unmounted. It starts again by itself with the array. $(date) ===" >> "$LOGFILE"
-    cc_log "Array stopping: stopping Remote Control for account '$PROFILE' (it comes back with the array)"
+    echo "=== The array is stopping: stopping Remote Control for $WHO so the disks can be unmounted. It starts again by itself with the array. $(date) ===" >> "$LOGFILE"
+    cc_log "Array stopping: stopping Remote Control for $WHO (it comes back with the array)"
     stop_running
     touch "$ENABLED_FLAG"
     # MCP servers and the like that outlived the bridge, now orphans.
@@ -2644,49 +2846,150 @@ array_stop_one() {
     return 0
 }
 
-# Subcommands take the account as their first argument. Without one they act on
-# the account in use, except "stop", which with no account stops every one of
-# them: the uninstall path calls it that way and must leave nothing running.
+# Subcommands take the bridge as their first argument: an account, or
+# "account/slot" for one of its extra sessions. Without one they act on the
+# main session of the account in use, except "stop", which with nothing named
+# stops every bridge: the uninstall path calls it that way and must leave
+# nothing running.
 CMD="${1:-}"
-SLUG=""
-case "${2:-}" in
-    session_*) ;;              # "connect/forget <sid>": a session id, not an account
-    "")        ;;
-    *) SLUG="$2" ;;
+TARGET=""
+case "$CMD:${2:-}" in
+    *:session_*) ;;            # "connect/forget <sid>": a session id, not a bridge
+    *:)          ;;
+    restart-running:*) ;;      # its argument is a version, not a bridge
+    *) TARGET="$2" ;;
 esac
-if [ -n "$SLUG" ]; then SID="${3:-}"; else SID="${2:-}"; fi
+if [ -n "$TARGET" ]; then SID="${3:-}"; else SID="${2:-}"; fi
+SLUG="${TARGET%%/*}"
+TSLOT=""
+case "$TARGET" in */*) TSLOT="${TARGET#*/}" ;; esac
+if [ -n "$TSLOT" ] && ! [[ "$TSLOT" =~ $SLOT_RE ]]; then
+    echo "Not a session name: $TSLOT"
+    exit 1
+fi
 
-set_profile "$SLUG"
+set_profile "$SLUG" "$TSLOT"
+
+# An extra session has to exist to be started. Stopping one that no longer does
+# is still allowed, so nothing can be left running by a removal half done.
+require_listed() {
+    if [ -n "$SLOT" ] && ! slot_listed "$PROFILE" "$SLOT"; then
+        echo "Account '$PROFILE' has no session called '$SLOT'."
+        exit 1
+    fi
+}
+
+require_free_folder() {
+    local dir other
+    dir=$(get_rc_dir)
+    if other=$(folder_taken_by "$dir"); then
+        echo "Not starting $WHO: its folder $dir is already served by '$other', and Claude Code allows only one Remote Control per folder. Give one of them a folder of its own."
+        exit 1
+    fi
+}
+
+require_not_server() {
+    if server_mode; then
+        echo "Server mode is on for $WHO: open new sessions from claude.ai or the Claude app, where each one appears on its own. To connect to a particular session id, turn server mode off first."
+        exit 1
+    fi
+}
+
+# Starts the supervisor. "fresh" opens a new session, "pin <id>" connects to
+# that one, anything else resumes. The request is in place before the
+# supervisor exists, so its first turn already sees it.
+start_instance() {
+    rm -f "$PINFILE" "$FRESHFILE"
+    case "$1" in
+        fresh) touch "$FRESHFILE" ;;
+        pin)   echo "$2" > "$PINFILE" ;;
+    esac
+    touch "$ENABLED_FLAG"
+    say_if_waiting_for_array
+    spawn_supervisor
+}
+
+# Name -> slot id: lower-case letters and digits, starting with a letter, at
+# most 16 characters, and not taken. Anything else in the name is left out of
+# the id (it stays in the name).
+slot_id_from_name() {
+    local base id n=2
+    base=$(printf '%s' "$1" | tr 'A-Z' 'a-z' | LC_ALL=C tr -cd 'a-z0-9')
+    base="${base#"${base%%[a-z]*}"}"
+    base=$(printf '%s' "$base" | cut -c1-14)
+    [ -z "$base" ] && base="s"
+    id="$base"
+    while slot_listed "$PROFILE" "$id" || [ "$id" = "s" ]; do
+        id="$base$n"; n=$((n + 1))
+    done
+    echo "$id"
+}
+
+# What a value may contain to be written into the cfg safely: it is sourced by
+# bash, read by parse_ini_file and edited with sed.
+valid_name() {
+    [ -n "$1" ] && [ "${#1}" -le 40 ] && ! printf '%s' "$1" | grep -q '["\\|&$`;<>]'
+}
+valid_dir() {
+    [ -z "$1" ] && return 0
+    printf '%s' "$1" | grep -qE '^/[A-Za-z0-9._@+/-]*$' &&
+        ! printf '%s' "$1" | grep -qE '(^|/)\.\.?(/|$)|//'
+}
+
+# Every folder a bridge of this plugin is set to use, except the given one's.
+folder_configured_by() {
+    local dir="${1%/}" me="$2" i other
+    [ -z "$dir" ] && dir="/"
+    for i in $(all_instances); do
+        [ "$i" = "$me" ] && continue
+        other=$(select_instance "$i"; get_rc_dir)
+        other="${other%/}"; [ -z "$other" ] && other="/"
+        [ "$other" = "$dir" ] && { echo "$i"; return 0; }
+    done
+    return 1
+}
 
 case "$CMD" in
     start)
-        if [ -f "$PIDFILE" ] && [ -d "/proc/$(cat "$PIDFILE")" ]; then
-            echo "Remote Control is already running for account '$PROFILE'."
+        require_listed
+        if is_running; then
+            echo "Remote Control is already running for $WHO."
             exit 0
         fi
-        rm -f "$PINFILE" "$FRESHFILE"
-        touch "$ENABLED_FLAG"
-        say_if_waiting_for_array
-        spawn_supervisor
-        echo "Remote Control starting for account '$PROFILE' in directory: $(get_rc_dir)"
-        cc_log "Remote Control asked to start for account '$PROFILE' (directory: $(get_rc_dir))"
+        require_free_folder
+        if [ -n "$SLOT" ] && [ "$(slot_get MODE)" = "fresh" ]; then
+            start_instance fresh
+            echo "Remote Control starting a new session for $WHO in directory: $(get_rc_dir)"
+        else
+            start_instance keep
+            echo "Remote Control starting for $WHO in directory: $(get_rc_dir)"
+        fi
+        cc_log "Remote Control asked to start for $WHO (directory: $(get_rc_dir))"
         echo "Use 'View live logs' below for the session URL / QR code."
         ;;
     _run)
         do_run
         ;;
+    restart)
+        # For the plugin itself: a new binary, an account switch. Resumes what
+        # was running, whatever the session's mode -- "a new session each time"
+        # means each time someone starts it, not each time the plugin has to.
+        require_listed
+        stop_running
+        start_instance keep
+        echo "Remote Control restarted for $WHO."
+        ;;
     new)
         # A session that cannot be resumed used to leave no way out from the
         # page: Start resumes the remembered id, and Connect needs an id you
         # already have. This is the missing third door -- open a new one.
+        require_listed
+        require_not_server
         stop_running
-        rm -f "$PINFILE"
+        require_free_folder
         save_cfg_var "$SESSION_ID_KEY" ""
-        touch "$FRESHFILE"
-        touch "$ENABLED_FLAG"
-        say_if_waiting_for_array
-        spawn_supervisor
-        echo "Starting a brand-new session for account '$PROFILE' in directory: $(get_rc_dir)"
+        start_instance fresh
+        echo "Starting a brand-new session for $WHO in directory: $(get_rc_dir)"
         echo "The previous session is not deleted: it stays in the list below and can still be reconnected by its id."
         echo "Use 'View live log' for the new session URL."
         ;;
@@ -2699,30 +3002,30 @@ case "$CMD" in
         ;;
     connect)
         if ! echo "$SID" | grep -qE '^session_[A-Za-z0-9]+$'; then
-            echo "Usage: $0 connect [account] <session_id> (expected a session_... id)"
+            echo "Usage: $0 connect [account[/session]] <session_id> (expected a session_... id)"
             exit 1
         fi
+        require_listed
+        require_not_server
         save_cfg_var "$SESSION_ID_KEY" "$SID"
         stop_running
-        echo "$SID" > "$PINFILE"
-        touch "$ENABLED_FLAG"
-        say_if_waiting_for_array
-        spawn_supervisor
-        echo "Remote Control connecting account '$PROFILE' to session: $SID"
+        require_free_folder
+        start_instance pin "$SID"
+        echo "Remote Control connecting $WHO to session: $SID"
         echo "Use 'View live logs' below for status."
         ;;
     stop)
-        if [ -n "$SLUG" ]; then
+        if [ -n "$TARGET" ]; then
             stop_running
             rm -f "$PINFILE" "$FRESHFILE"
             echo "=== Remote Control stopped by user $(date) ===" >> "$LOGFILE"
-            echo "Remote Control stopped for account '$PROFILE'."
-            cc_log "Remote Control stopped for account '$PROFILE' from the web page"
+            echo "Remote Control stopped for $WHO."
+            cc_log "Remote Control stopped for $WHO from the web page"
         else
-            # No account named: stop all of them, so an uninstall or a blanket
-            # "stop" cannot leave another account's supervisor respawning.
-            for p in $(all_profiles); do
-                set_profile "$p"
+            # Nothing named: stop every bridge, so an uninstall or a blanket
+            # "stop" cannot leave another one's supervisor respawning.
+            for i in $(all_instances); do
+                select_instance "$i"
                 stop_running
                 rm -f "$PINFILE" "$FRESHFILE"
                 [ -f "$LOGFILE" ] && echo "=== Remote Control stopped by user $(date) ===" >> "$LOGFILE"
@@ -2730,8 +3033,50 @@ case "$CMD" in
             echo "Remote Control stopped."
         fi
         ;;
+    stop-account)
+        # An account's main session and all of its extra ones: what removing an
+        # account has to leave behind is nothing running.
+        for i in $(all_instances); do
+            [ "${i%%/*}" = "$PROFILE" ] || continue
+            select_instance "$i"
+            stop_running
+            rm -f "$PINFILE" "$FRESHFILE"
+        done
+        echo "Remote Control stopped for every session of account '$PROFILE'."
+        ;;
+    start-all)
+        # Every session of one account that is not running yet, each in its own
+        # mode. One that cannot start says why and the rest still start.
+        acct="$PROFILE"
+        for i in $(all_instances); do
+            [ "${i%%/*}" = "$acct" ] || continue
+            "$0" start "$i"
+        done
+        ;;
+    running)
+        for i in $(all_instances); do
+            ( select_instance "$i"; is_running && echo "$i" )
+        done
+        exit 0
+        ;;
+    restart-running)
+        # After a new binary is applied: every bridge that is running restarts
+        # so it runs the new one, and each resumes the session it had.
+        version="${2:-}"
+        for i in $(all_instances); do
+            ( select_instance "$i"; is_running ) || continue
+            echo "Restarting Remote Control for $(select_instance "$i"; echo "$WHO") so its bridge picks up ${version:-the new version} (it will drop for a few seconds)..."
+            "$0" restart "$i" > /dev/null
+            sleep 1
+            if ( select_instance "$i"; is_running ); then
+                echo "Remote Control for $(select_instance "$i"; echo "$WHO") is back up."
+            else
+                echo "WARNING: Remote Control for $(select_instance "$i"; echo "$WHO") did not come back up -- start it by hand from the Remote Control tab."
+            fi
+        done
+        ;;
     status)
-        if [ -f "$PIDFILE" ] && [ -d "/proc/$(cat "$PIDFILE")" ]; then
+        if is_running; then
             echo "running"
         elif [ -f "$ENABLED_FLAG" ]; then
             # Enabled, and yet no supervisor: this did not stop, it died. Worth
@@ -2742,10 +3087,79 @@ case "$CMD" in
             echo "stopped"
         fi
         ;;
-
+    slot-add)
+        # slot-add <account> <name> <fixed|fresh> <shared|own> [folder]
+        name="${3:-}" mode="${4:-fixed}" mem="${5:-shared}" dir="${6:-}"
+        dir="${dir%/}"
+        if ! valid_name "$name"; then
+            echo "The name must be 1 to 40 characters, without any of: \" \\ | & \$ \` ; < >"
+            exit 1
+        fi
+        case "$mode" in fixed|fresh) ;; *) echo "Mode must be fixed or fresh."; exit 1 ;; esac
+        case "$mem" in shared|own) ;; *) echo "Memory must be shared or own."; exit 1 ;; esac
+        if ! valid_dir "$dir"; then
+            echo "The folder must be an absolute path of letters, digits and . _ @ + - only."
+            exit 1
+        fi
+        id=$(slot_id_from_name "$name")
+        if [ -n "$dir" ] && other=$(folder_configured_by "$dir" ""); then
+            echo "The folder $dir is already used by '$other'. Claude Code allows only one Remote Control per folder."
+            exit 1
+        fi
+        save_cfg_var "RCS_NAME_${PROFILE}_S_$id" "$name"
+        save_cfg_var "RCS_MODE_${PROFILE}_S_$id" "$mode"
+        save_cfg_var "RCS_MEM_${PROFILE}_S_$id" "$mem"
+        [ -n "$dir" ] && save_cfg_var "RCS_DIR_${PROFILE}_S_$id" "$dir"
+        list=$(list_slots "$PROFILE")
+        save_cfg_var "RCS_LIST_$PROFILE" "${list:+$list }$id"
+        SLOT="$id"
+        echo "Added the session '$name' ($id) to account '$PROFILE', in $(get_rc_dir). Start it from the list."
+        cc_log "Remote Control session '$id' added to account '$PROFILE'"
+        ;;
+    slot-set)
+        # slot-set <account/slot> <name|mode|mem|dir> <value>
+        require_listed
+        [ -n "$SLOT" ] || { echo "Name a session: account/slot."; exit 1; }
+        field="${3:-}" value="${4:-}"
+        case "$field" in
+            name) valid_name "$value" || { echo "The name must be 1 to 40 characters, without any of: \" \\ | & \$ \` ; < >"; exit 1; }
+                  save_cfg_var "RCS_NAME_${PROFILE}_S_$SLOT" "$value"
+                  echo "Name saved. Claude Code uses it when it creates a session; a session that already exists keeps its title (rename it on claude.ai)." ;;
+            mode) case "$value" in fixed|fresh) ;; *) echo "Mode must be fixed or fresh."; exit 1 ;; esac
+                  save_cfg_var "RCS_MODE_${PROFILE}_S_$SLOT" "$value"
+                  echo "Mode saved. It applies the next time this session is started." ;;
+            mem)  case "$value" in shared|own) ;; *) echo "Memory must be shared or own."; exit 1 ;; esac
+                  save_cfg_var "RCS_MEM_${PROFILE}_S_$SLOT" "$value"
+                  echo "Saved. It applies the next time this session is started." ;;
+            dir)  value="${value%/}"
+                  valid_dir "$value" || { echo "The folder must be an absolute path of letters, digits and . _ @ + - only."; exit 1; }
+                  if [ -n "$value" ] && other=$(folder_configured_by "$value" "$INSTANCE"); then
+                      echo "The folder $value is already used by '$other'. Claude Code allows only one Remote Control per folder."
+                      exit 1
+                  fi
+                  if [ -n "$value" ]; then save_cfg_var "RCS_DIR_${PROFILE}_S_$SLOT" "$value"; else del_cfg_var "RCS_DIR_${PROFILE}_S_$SLOT"; fi
+                  echo "Folder saved: $(get_rc_dir). It applies the next time this session is started; the previous folder is left as it is." ;;
+            *)    echo "Unknown setting: $field"; exit 1 ;;
+        esac
+        ;;
+    slot-remove)
+        # Stops it and forgets its settings. Its folder, with the permission
+        # rules approved in it and its transcripts, is left where it is, and so
+        # is any memory: removing a session never deletes anything on disk.
+        [ -n "$SLOT" ] || { echo "Name a session: account/slot."; exit 1; }
+        dir=$(get_rc_dir)
+        name=$(slot_get NAME)
+        stop_running
+        rm -f "$PINFILE" "$FRESHFILE"
+        for k in NAME MODE MEM DIR; do del_cfg_var "RCS_${k}_${PROFILE}_S_$SLOT"; done
+        del_cfg_var "$SESSION_ID_KEY"
+        save_cfg_var "RCS_LIST_$PROFILE" "$(for s in $(list_slots "$PROFILE"); do [ "$s" = "$SLOT" ] || printf '%s ' "$s"; done | xargs)"
+        echo "Removed the session '${name:-$SLOT}' from account '$PROFILE'. Its folder $dir was left as it is."
+        cc_log "Remote Control session '$SLOT' removed from account '$PROFILE'"
+        ;;
     array-stop)
-        for p in $(all_profiles); do
-            ( set_profile "$p"; array_stop_one ) &
+        for i in $(all_instances); do
+            ( select_instance "$i"; array_stop_one ) &
         done
         wait
         ;;
@@ -2754,28 +3168,33 @@ case "$CMD" in
         # web request going away, the kernel reclaiming memory -- leaves the
         # enabled flag behind and nobody to act on it, so Remote Control stays
         # down in silence until someone happens to look at the page. Run from
-        # cron every few minutes. It starts an account only when that account
-        # asked to be running and is not; anything stopped on purpose has no
-        # enabled flag and is left alone. A pending "connect" or "new session"
-        # request is left where it is, so the supervisor still honours it.
-        for p in $(all_profiles); do
-            set_profile "$p"
+        # cron every few minutes. It starts a bridge only when it asked to be
+        # running and is not; anything stopped on purpose has no enabled flag
+        # and is left alone. A pending "connect" or "new session" request is
+        # left where it is, so the supervisor still honours it.
+        for i in $(all_instances); do
+            select_instance "$i"
             [ -f "$ENABLED_FLAG" ] || continue
-            [ -f "$PIDFILE" ] && [ -d "/proc/$(cat "$PIDFILE" 2>/dev/null)" ] && continue
+            is_running && continue
             # Array down: nothing to start it on. The flag stays, and the array
             # coming up runs this again straight away (event/disks_mounted).
             [ -n "$(unmounted_reason "$(get_rc_dir)")" ] && continue
             echo "=== Remote Control was enabled but its supervisor was not running -- the watchdog is starting it again: $(date) ===" >> "$LOGFILE"
-            cc_log "Remote Control for account '$PROFILE' was enabled but not running; the watchdog is starting it again"
+            cc_log "Remote Control for $WHO was enabled but not running; the watchdog is starting it again"
             spawn_supervisor
-            echo "Remote Control restarted for account '$PROFILE' (it was enabled but not running)."
+            echo "Remote Control restarted for $WHO (it was enabled but not running)."
         done
         ;;
     *)
-        echo "Usage: $0 {start [account]|new [account]|stop [account]|status [account]|connect [account] <session_id>|forget <session_id>}"
+        echo "Usage: $0 {start|new|stop|restart|status [account[/session]] | connect [account[/session]] <session_id> | forget <session_id> | start-all|stop-account <account> | running | restart-running [version] | slot-add <account> <name> <fixed|fresh> <shared|own> [folder] | slot-set <account/session> <name|mode|mem|dir> <value> | slot-remove <account/session> | watchdog | array-stop}"
         exit 1
         ;;
-esac
+# "exit" on the same line as "esac", so bash has read it before the case runs.
+# A plugin update rewrites this file in place while a supervisor is still
+# executing it; bash keeps reading a script from where it left off, and without
+# this a supervisor that returned normally would go on to run whatever lines of
+# the new file happened to sit past the old end.
+esac; exit "$?"
 ]]>
 </INLINE>
 </FILE>
@@ -2783,7 +3202,7 @@ esac
 <!-- Claude account profiles: several logins on one server, either sharing
      the agent memory and settings or fully isolated. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/profiles.sh" Mode="0755">
-<SHA256>3216931a1b668df2f3e9f5292065e42e0ae18065dd2a5dadc920edbe720c5de2</SHA256>
+<SHA256>b3260abbb2558ed71970c8472f6914e57d2ae7a6dc96942417aee4107679c8b6</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -3253,9 +3672,10 @@ cmd_remove() {
         cmd_activate default || return 1
         ACTIVE_PROFILE="default"
     fi
-    # Its own bridge must not keep running under an account that is no longer
-    # listed. Named explicitly: a bare "stop" would stop every account.
-    [ -x "$RC_SCRIPT" ] && "$RC_SCRIPT" stop "$slug" >/dev/null 2>&1
+    # Its own bridges must not keep running under an account that is no longer
+    # listed: its main session and every extra one. Named explicitly: a bare
+    # "stop" would stop every account.
+    [ -x "$RC_SCRIPT" ] && "$RC_SCRIPT" stop-account "$slug" >/dev/null 2>&1
     new=""
     for p in $PROFILES; do [ "$p" = "$slug" ] || new="$new $p"; done
     save_cfg_var "PROFILES" "$(echo $new | xargs)"
@@ -3267,6 +3687,14 @@ cmd_remove() {
     # and a directory it never asked for.
     del_cfg_var "LAST_SESSION_ID_$slug"
     del_cfg_var "REMOTE_CONTROL_DIR_$slug"
+    del_cfg_var "RC_SERVER_$slug"
+    del_cfg_var "RC_CAPACITY_$slug"
+    # Its extra Remote Control sessions. Only their settings: their folders,
+    # with whatever is in them, stay where they are.
+    del_cfg_var "RCS_LIST_$slug"
+    if [ -f "$PLUGIN_CFG" ]; then
+        sed -i -E "/^(RCS_(NAME|MODE|MEM|DIR)|LAST_SESSION_ID)_${slug}_S_[a-z0-9]+=/d" "$PLUGIN_CFG"
+    fi
     dir=$(profile_dir "$slug")
     if [ "$purge" = "purge" ]; then
         # Only ever inside the profiles directory, and only a path just built
@@ -3319,8 +3747,13 @@ cmd_activate() {
     fi
     # A live bridge keeps its credentials open; let it finish on the account it
     # started with rather than swapping underneath it.
-    if rc_running; then
-        was_running=yes
+    # The extra sessions that are running come back afterwards, as they were:
+    # each belongs to a named account, so switching which one is in use does
+    # not change them, but the bare "stop" below stops every bridge.
+    local extra_running=""
+    [ -x "$RC_SCRIPT" ] && extra_running=$("$RC_SCRIPT" running 2>/dev/null | grep /)
+    if rc_running || [ -n "$extra_running" ]; then
+        rc_running && was_running=yes
         echo "Stopping Remote Control..."
         [ -x "$RC_SCRIPT" ] && "$RC_SCRIPT" stop >/dev/null 2>&1
     fi
@@ -3333,6 +3766,10 @@ cmd_activate() {
         echo "Starting Remote Control again..."
         [ -x "$RC_SCRIPT" ] && "$RC_SCRIPT" start >/dev/null 2>&1
     fi
+    local i
+    for i in $extra_running; do
+        "$RC_SCRIPT" restart "$i" >/dev/null 2>&1
+    done
     echo "Interactive terminals already open keep the previous account until you"
     echo "start a new one."
 }
@@ -4598,7 +5035,7 @@ respond([
 <!-- Shared preamble and styling for the tabs. Every tab requires this once,
      so the state it computes is worked out a single time per request. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/common.php" Mode="0644">
-<SHA256>b8b4c0e4739c7dfcdfc9f8bd9c4e3f882f6068f8dd9cd6eb06d3a740d9d93344</SHA256>
+<SHA256>fca1bca4b4e1c2a40c887ae2d08fd85b5c31ea3f6f6686d5fd039f345eb53cd3</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -4786,6 +5223,47 @@ $log_exists = file_exists("/var/log/$log_name");
 //
 // The main account keeps the original unsuffixed paths on purpose: an upgrade
 // must not orphan a supervisor that is already running under the old names.
+// What a bridge's log says: the URL to open and, while it is still the last
+// word, why its previous session could not be resumed. The same for an
+// account's main session and for each of its extra ones.
+function cc_rc_log_state($log_file, $known_sid, $server) {
+    $session_url = '';
+    $archived = '';
+    if (file_exists($log_file)) {
+        $tail = shell_exec("tail -n 300 " . escapeshellarg($log_file) . " 2>/dev/null");
+        if ($tail && preg_match_all('#https://claude\.ai/code[^\s]*#', $tail, $m) && !empty($m[0])) {
+            $session_url = end($m[0]);
+        }
+        // A freshly created session announces itself with an environment URL
+        // rather than a session one, which opens the right place but does not
+        // say which session it is. When the account's own id is known, link
+        // straight at it: same destination, and it matches what the row says.
+        // In server mode the folder's URL is the right one: it lists every
+        // session the server holds.
+        if (!$server && $known_sid !== '' && strpos($session_url, $known_sid) === false) {
+            $session_url = "https://claude.ai/code/$known_sid";
+        }
+        // Only while it is still the last word on which session this account
+        // is on. The marker stays in the log forever, so matching it anywhere
+        // in the tail meant the notice kept claiming a session had been
+        // dropped long after the account had been started, or connected by
+        // hand, to a perfectly good session -- which is exactly what it looks
+        // like when it is wrong: alarming and untrue. Anything that chooses a
+        // session again (a supervisor start, a connect, a stop) supersedes it.
+        if ($tail && preg_match_all('/^=== ARCHIVED_SESSION_FALLBACK:.*$/m', $tail, $a, PREG_OFFSET_CAPTURE)) {
+            $last = end($a[0]);
+            $newer = 0;
+            if (preg_match_all('/^=== (Remote Control supervisor started|Remote Control stopped by user|Connecting to requested session id|New session requested)/m',
+                               $tail, $b, PREG_OFFSET_CAPTURE)) {
+                $newer = end($b[0])[1];
+            }
+            if ($last[1] > $newer) $archived = $last[0];
+        }
+    }
+
+    return [$session_url, $archived];
+}
+
 $rc_accounts = [];
 foreach (($profiles ?: [['slug' => 'default', 'label' => t('Main account', 'Cuenta principal'), 'email' => '']]) as $prow) {
     $slug = $prow['slug'];
@@ -4814,37 +5292,37 @@ foreach (($profiles ?: [['slug' => 'default', 'label' => t('Main account', 'Cuen
     // installation on the Settings tab opened the wrong file.
     $acct_log_name = "claude-code-remote-control$suffix.log";
     $acct_log_exists = file_exists("/var/log/$acct_log_name");
-    $session_url = '';
-    $archived = '';
-    if ($acct_log_exists) {
-        $tail = shell_exec("tail -n 300 /var/log/" . escapeshellarg($acct_log_name) . " 2>/dev/null");
-        if ($tail && preg_match_all('#https://claude\.ai/code[^\s]*#', $tail, $m) && !empty($m[0])) {
-            $session_url = end($m[0]);
-        }
-        // A freshly created session announces itself with an environment URL
-        // rather than a session one, which opens the right place but does not
-        // say which session it is. When the account's own id is known, link
-        // straight at it: same destination, and it matches what the row says.
-        $known_sid = $cfg[$slug === 'default' ? 'LAST_SESSION_ID' : "LAST_SESSION_ID_$slug"] ?? '';
-        if ($known_sid !== '' && strpos($session_url, $known_sid) === false) {
-            $session_url = "https://claude.ai/code/$known_sid";
-        }
-        // Only while it is still the last word on which session this account
-        // is on. The marker stays in the log forever, so matching it anywhere
-        // in the tail meant the notice kept claiming a session had been
-        // dropped long after the account had been started, or connected by
-        // hand, to a perfectly good session -- which is exactly what it looks
-        // like when it is wrong: alarming and untrue. Anything that chooses a
-        // session again (a supervisor start, a connect, a stop) supersedes it.
-        if ($tail && preg_match_all('/^=== ARCHIVED_SESSION_FALLBACK:.*$/m', $tail, $a, PREG_OFFSET_CAPTURE)) {
-            $last = end($a[0]);
-            $newer = 0;
-            if (preg_match_all('/^=== (Remote Control supervisor started|Remote Control stopped by user|Connecting to requested session id|New session requested)/m',
-                               $tail, $b, PREG_OFFSET_CAPTURE)) {
-                $newer = end($b[0])[1];
-            }
-            if ($last[1] > $newer) $archived = $last[0];
-        }
+    $rc_server = ($cfg["RC_SERVER_$slug"] ?? '') === 'yes';
+    [$session_url, $archived] = cc_rc_log_state("/var/log/$acct_log_name",
+        $cfg[$slug === 'default' ? 'LAST_SESSION_ID' : "LAST_SESSION_ID_$slug"] ?? '', $rc_server);
+
+    // The account's extra sessions, each its own bridge (see remote-control.sh,
+    // "Extra sessions"): same files as the main one plus "--<slot>".
+    $rc_slots = [];
+    foreach (preg_split('/\s+/', trim((string)($cfg["RCS_LIST_$slug"] ?? ''))) as $sl) {
+        if (!preg_match('/^[a-z][a-z0-9]{0,15}$/', $sl)) continue;
+        $sl_sfx = "$suffix--$sl";
+        $sl_pid = trim((string)@file_get_contents("/var/run/claude-remote-control$sl_sfx.pid"));
+        $sl_log = "claude-code-remote-control$sl_sfx.log";
+        $sl_sid = $cfg["LAST_SESSION_ID_{$slug}_S_$sl"] ?? '';
+        $sl_dir = $cfg["RCS_DIR_{$slug}_S_$sl"] ?? '';
+        [$sl_url, $sl_arch] = cc_rc_log_state("/var/log/$sl_log", $sl_sid, false);
+        $rc_slots[] = [
+            'id'          => $sl,
+            'target'      => "$slug/$sl",
+            'name'        => $cfg["RCS_NAME_{$slug}_S_$sl"] ?? $sl,
+            'mode'        => ($cfg["RCS_MODE_{$slug}_S_$sl"] ?? 'fixed') === 'fresh' ? 'fresh' : 'fixed',
+            'mem'         => ($cfg["RCS_MEM_{$slug}_S_$sl"] ?? 'shared') === 'own' ? 'own' : 'shared',
+            'dir_cfg'     => $sl_dir,
+            'dir'         => $sl_dir !== '' ? $sl_dir
+                             : ($slug === 'default' ? "$appdata_path/sessions/$sl" : "$appdata_path/sessions/$slug-$sl"),
+            'running'     => $sl_pid !== '' && file_exists("/proc/$sl_pid"),
+            'log_name'    => $sl_log,
+            'log_exists'  => file_exists("/var/log/$sl_log"),
+            'session_url' => $sl_url,
+            'archived'    => $sl_arch,
+            'last_sid'    => $sl_sid,
+        ];
     }
 
     $rc_accounts[] = [
@@ -4861,6 +5339,9 @@ foreach (($profiles ?: [['slug' => 'default', 'label' => t('Main account', 'Cuen
         'session_url' => $session_url,
         'archived'    => $archived,
         'last_sid'    => $cfg[$slug === 'default' ? 'LAST_SESSION_ID' : "LAST_SESSION_ID_$slug"] ?? '',
+        'server'      => $rc_server,
+        'capacity'    => preg_match('/^[0-9]+$/', (string)($cfg["RC_CAPACITY_$slug"] ?? '')) ? (string)$cfg["RC_CAPACITY_$slug"] : '',
+        'slots'       => $rc_slots,
     ];
 }
 
@@ -4912,7 +5393,7 @@ if (file_exists($rc_history_file)) {
         // The account is written in brackets at the end, because a directory can
         // contain spaces. Lines written before accounts existed have none, and
         // still parse: they belong to the main account.
-        if (preg_match('/^(\S+)\s+(session_\S+)\s+(.*?)(?:\s+\[([a-z0-9_]+)\])?$/', $rc_line, $rc_m)) {
+        if (preg_match('/^(\S+)\s+(session_\S+)\s+(.*?)(?:\s+\[([a-z0-9_]+(?:\/[a-z0-9]+)?)\])?$/', $rc_line, $rc_m)) {
             // Later lines are newer, so a repeated id keeps its latest entry.
             $rc_history[$rc_m[2]] = [
                 'time'      => $rc_m[1],
@@ -5341,12 +5822,13 @@ switch ($action) {
 <!-- Session actions for the Remote Control tab: taking an old session off
      the lists, and nothing else. Never a transcript, never memory. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-sessions.php" Mode="0644">
-<SHA256>0f2a30233b65d2567393d2c3d6aa3e3646a3fdb6c05c9b55342640f50377d700</SHA256>
+<SHA256>3a4a649b73918754de72b0b79262848c38b834ca75281f669287b657f268dd6c</SHA256>
 <INLINE>
 <![CDATA[
 <?php
-// Session actions from the Remote Control tab. Today there is one: taking an
-// old session off the lists this page shows.
+// Session actions from the Remote Control tab: taking an old session off the
+// lists this page shows, and adding, changing and removing an account's extra
+// sessions.
 //
 // Same shape as claude-accounts.php and for the same reason: posting straight
 // at the script through Unraid's #command form puts the answer in a one-line
@@ -5373,6 +5855,24 @@ function done($ok, $message) {
     exit;
 }
 
+// Runs the script with arguments that have each been checked for their shape
+// here as well as there: every one of them reaches a shell command.
+function run_script($script, $args) {
+    $cmd = escapeshellarg($script);
+    foreach ($args as $a) $cmd .= ' ' . escapeshellarg($a);
+    $lines = [];
+    $rc = 0;
+    exec($cmd . ' 2>&1', $lines, $rc);
+    done($rc === 0, implode("\n", $lines));
+}
+
+$account = (string)($_POST['account'] ?? '');
+$target  = (string)($_POST['target'] ?? '');
+$ok_account = preg_match('/^[a-z][a-z0-9_]{0,23}$/', $account) === 1;
+$ok_target  = preg_match('/^[a-z][a-z0-9_]{0,23}\/[a-z][a-z0-9]{0,15}$/', $target) === 1;
+$ok_name    = function ($n) { return $n !== '' && mb_strlen($n) <= 40 && !preg_match('/["\\\\|&$`;<>\x00-\x1f]/', $n); };
+$ok_dir     = function ($d) { return $d === '' || (preg_match('#^/[A-Za-z0-9._@+/-]*$#', $d) && !preg_match('#(^|/)\.\.?(/|$)|//#', $d)); };
+
 if (!is_executable($script)) { done(false, 'remote-control.sh is missing'); }
 
 switch ($action) {
@@ -5384,6 +5884,34 @@ switch ($action) {
         $rc = 0;
         exec(escapeshellarg($script) . ' forget ' . escapeshellarg($sid) . ' 2>&1', $lines, $rc);
         done($rc === 0, implode("\n", $lines));
+
+    case 'slot-add':
+        $name = trim((string)($_POST['name'] ?? ''));
+        $mode = (string)($_POST['mode'] ?? 'fixed');
+        $mem  = (string)($_POST['mem'] ?? 'shared');
+        $dir  = rtrim(trim((string)($_POST['dir'] ?? '')), '/');
+        if (!$ok_account) done(false, 'not an account');
+        if (!$ok_name($name)) done(false, 'The name must be 1 to 40 characters, without " \\ | & $ ` ; < >');
+        if (!in_array($mode, ['fixed', 'fresh'], true) || !in_array($mem, ['shared', 'own'], true)) done(false, 'bad option');
+        if (!$ok_dir($dir)) done(false, 'The folder must be an absolute path of letters, digits and . _ @ + - only.');
+        run_script($script, ['slot-add', $account, $name, $mode, $mem, $dir]);
+
+    case 'slot-set':
+        $field = (string)($_POST['field'] ?? '');
+        $value = trim((string)($_POST['value'] ?? ''));
+        if (!$ok_target) done(false, 'not a session');
+        switch ($field) {
+            case 'name': if (!$ok_name($value)) done(false, 'The name must be 1 to 40 characters, without " \\ | & $ ` ; < >'); break;
+            case 'mode': if (!in_array($value, ['fixed', 'fresh'], true)) done(false, 'bad option'); break;
+            case 'mem':  if (!in_array($value, ['shared', 'own'], true)) done(false, 'bad option'); break;
+            case 'dir':  $value = rtrim($value, '/'); if (!$ok_dir($value)) done(false, 'The folder must be an absolute path of letters, digits and . _ @ + - only.'); break;
+            default: done(false, 'unknown setting');
+        }
+        run_script($script, ['slot-set', $target, $field, $value]);
+
+    case 'slot-remove':
+        if (!$ok_target) done(false, 'not a session');
+        run_script($script, ['slot-remove', $target]);
 
     default:
         done(false, 'unknown action');
@@ -7269,7 +7797,7 @@ function cc_sync_value($v) {
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeRemote.page">
-<SHA256>cc4d114e54757c69972e337c968af32794d1f966aa75381c4f7fe2615ace51fd</SHA256>
+<SHA256>afdcb995775d38bac82b685c23ac7387626eb84e77436c71fa9a8a0fa7cac17a</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:3"
@@ -7299,6 +7827,14 @@ Tag="desktop"
 <p><?=t(
     'Two different things can stop a session being resumed, and only one of them is about archiving. A session the server no longer finds is archived and unreachable, expired or deleted. A session that is found but has no machine attached to it cannot be served from here either, and unarchiving the conversation on claude.ai does not bring its machine back -- that binding belongs to the bridge that served it, and it is gone with it. The conversation stays readable on claude.ai in both cases; what cannot be recovered is the session running on this server.',
     'Hay dos cosas distintas que impiden retomar una sesión, y solo una tiene que ver con el archivado. Una sesión que el servidor ya no encuentra está archivada e inaccesible, caducada o borrada. Una sesión que sí encuentra pero que ya no tiene una máquina asociada tampoco se puede servir desde aquí, y desarchivar la conversación en claude.ai no le devuelve esa máquina: ese vínculo era del puente que la servía y se fue con él. En los dos casos la conversación sigue ahí para leerla en claude.ai; lo que no se recupera es la sesión ejecutándose en este servidor.'
+)?></p>
+<p><?=t(
+    'Several sessions at once, two ways. Fixed sessions: each one is a bridge of its own, with a name, a folder and a choice between resuming the same session on every start or opening a new one each time -- they survive reboots and updates like the main session. Server mode: the main session becomes a server that holds several sessions, which you open whenever you like from claude.ai or the Claude app (and can fork); after a restart it brings back what it was serving.',
+    'Varias sesiones a la vez, de dos maneras. Sesiones fijas: cada una es un puente propio, con su nombre, su carpeta y la opción de retomar siempre la misma sesión o abrir una nueva cada vez que se inicia -- sobreviven a reinicios y actualizaciones igual que la sesión principal. Modo servidor: la sesión principal pasa a ser un servidor que sostiene varias sesiones, que abres cuando quieras desde claude.ai o la app de Claude (y puedes bifurcar); tras un reinicio, recupera las que estaba sirviendo.'
+)?></p>
+<p><?=t(
+    'Claude Code serves only one Remote Control per folder, so every fixed session has a folder of its own (by default under appdata, so its approved permissions survive a reboot). It starts with a copy of the permission rules approved for /, and by default shares the agent memory of / so it knows what the main session knows.',
+    'Claude Code solo admite un Control Remoto por carpeta, así que cada sesión fija tiene su propia carpeta (por defecto dentro de appdata, para que los permisos que apruebes sobrevivan a un reinicio). Empieza con una copia de las reglas de permisos aprobadas para /, y por defecto comparte la memoria persistente de /, así que sabe lo mismo que la sesión principal.'
 )?></p>
 <?php if ($multi_account && count($rc_accounts) > 1): ?>
 <p><?=t(
@@ -7357,6 +7893,20 @@ Tag="desktop"
 <dd><span class="buttons-spaced">
 <!-- display:contents makes each button a direct item of the row, so the two
      line up as native button rows do; the forms still submit as before. -->
+<?php if ($rc['server']): ?>
+<form method="POST" action="/update.php" target="progressFrame" style="display:contents;">
+<input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh">
+<input type="hidden" name="#arg[0]" value="<?=$rc['running'] ? 'stop' : 'start'?>">
+<input type="hidden" name="#arg[1]" value="<?=htmlspecialchars($rc['slug'])?>">
+<input type="submit" value="<?=$rc['running'] ? t('Stop', 'Detener') : t('Start', 'Iniciar')?>">
+</form>
+</span></dd>
+</dl>
+<blockquote class="inline_help"><?=t(
+    'In server mode, new sessions are opened from claude.ai or the Claude app: pick this server there and start one. Each appears in your session list on its own, and can be forked. Stopping and starting again brings back the sessions it was serving.',
+    'En modo servidor, las sesiones nuevas se abren desde claude.ai o la app de Claude: elige allí este servidor y empieza una. Cada una aparece por separado en tu lista de sesiones, y se pueden bifurcar. Al detenerlo e iniciarlo de nuevo recupera las sesiones que estaba sirviendo.'
+)?></blockquote>
+<?php else: ?>
 <form method="POST" action="/update.php" target="progressFrame" style="display:contents;">
 <input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh">
 <input type="hidden" name="#arg[0]" value="<?=$rc['running'] ? 'stop' : 'start'?>">
@@ -7390,8 +7940,151 @@ Tag="desktop"
     'Detiene la sesión actual de esta cuenta (si hay alguna) y conecta a un id de sesión concreto en vez de al más reciente. Solo se puede reconectar una sesión de Control Remoto que todavía tenga una máquina asociada, que en la práctica es una que haya arrancado y mantenido este servidor: un id copiado de claude.ai cuyo puente ya se paró no vuelve, por muy bien que se vea la conversación allí. Si no se puede retomar, arranca una sesión nueva automáticamente y el aviso de arriba explica por qué.'
 )?></blockquote>
 </form>
+<?php endif; ?>
+
+<form method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#file" value="<?=$cfg_file?>">
+<dl>
+<dt><?=t('Server mode:', 'Modo servidor:')?></dt>
+<dd><span class="buttons-spaced"><select name="RC_SERVER_<?=htmlspecialchars($rc['slug'])?>">
+<option value="no"<?=$rc['server'] ? '' : ' selected'?>><?=t('No', 'No')?></option>
+<option value="yes"<?=$rc['server'] ? ' selected' : ''?>><?=t('Yes', 'Sí')?></option>
+</select>
+<input type="number" min="1" max="32" name="RC_CAPACITY_<?=htmlspecialchars($rc['slug'])?>" value="<?=htmlspecialchars($rc['capacity'])?>" placeholder="32" title="<?=t('Most sessions at once', 'Máximo de sesiones a la vez')?>" style="width:6em;">
+<input type="submit" value="<?=t('Save', 'Guardar')?>"></span></dd>
+</dl>
+<blockquote class="inline_help"><?=t(
+    'Turns this account\'s main session into a server that holds several sessions at once (the number is the most it will take; empty is Claude Code\'s own limit, 32). Stop and Start it after changing this. Turning it off goes back to resuming one session by its id.',
+    'Convierte la sesión principal de esta cuenta en un servidor que sostiene varias sesiones a la vez (el número es el máximo que admite; vacío es el límite del propio Claude Code, 32). Detenlo e inícialo después de cambiarlo. Al quitarlo se vuelve a retomar una sola sesión por su id.'
+)?></blockquote>
+</form>
+
+<h4><?=t('Fixed sessions', 'Sesiones fijas')?></h4>
+<?php foreach ($rc['slots'] as $sl): ?>
+<div class="claude-slot">
+<?php if ($sl['archived']): ?>
+<div class="claude-notice">
+<b><?=t('Notice:', 'Aviso:')?></b>
+<?=t('The previous session could no longer be resumed -- a new session was started automatically.', 'La sesión anterior ya no se pudo retomar -- se inició una nueva automáticamente.')?>
+<br><code style="font-size:0.85em;"><?=htmlspecialchars($sl['archived'])?></code>
+</div>
+<?php endif; ?>
+<dl>
+<dt><b><?=htmlspecialchars($sl['name'])?></b></dt>
+<dd><span><span class="<?=$sl['running'] ? 'ok' : 'warn'?>"><?=$sl['running'] ? t('Running', 'Corriendo') : t('Stopped', 'Detenido')?></span>
+<?php if ($sl['session_url']): ?> &middot; <a href="<?=htmlspecialchars($sl['session_url'])?>" target="_blank"><?=t('Open session', 'Abrir sesión')?></a><?php endif; ?>
+&middot; <a onclick="openTerminal('log','claude-code-rc-<?=htmlspecialchars($rc['slug'] . '-' . $sl['id'])?>','<?=htmlspecialchars($sl['log_name'])?>')" style="cursor:pointer;"><i class="fa fa-book"></i> <u><?=t('Log', 'Log')?></u></a></span></dd>
+</dl>
+<dl>
+<dt><?=t('Actions:', 'Acciones:')?></dt>
+<dd><span class="buttons-spaced">
+<form method="POST" action="/update.php" target="progressFrame" style="display:contents;">
+<input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh">
+<input type="hidden" name="#arg[0]" value="<?=$sl['running'] ? 'stop' : 'start'?>">
+<input type="hidden" name="#arg[1]" value="<?=htmlspecialchars($sl['target'])?>">
+<input type="submit" value="<?=$sl['running'] ? t('Stop', 'Detener') : t('Start', 'Iniciar')?>">
+</form>
+<?php if ($sl['mode'] === 'fixed'): ?>
+<form method="POST" action="/update.php" target="progressFrame" style="display:contents;">
+<input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh">
+<input type="hidden" name="#arg[0]" value="new">
+<input type="hidden" name="#arg[1]" value="<?=htmlspecialchars($sl['target'])?>">
+<input type="submit" value="<?=t('Start a new session', 'Iniciar sesión nueva')?>">
+</form>
+<?php endif; ?>
+<input type="button" value="<?=t('Remove', 'Quitar')?>" onclick="claudeSlot('<?=htmlspecialchars($rc['slug'])?>', {action:'slot-remove', target:'<?=htmlspecialchars($sl['target'], ENT_QUOTES)?>'}, <?=htmlspecialchars(json_encode(sprintf(t('Remove the session "%s"? It is stopped and its settings forgotten; its folder %s and everything in it stay where they are.', '¿Quitar la sesión «%s»? Se detiene y se olvida su configuración; su carpeta %s y todo lo que contiene se quedan donde están.'), $sl['name'], $sl['dir'])), ENT_QUOTES)?>);">
+</span></dd>
+</dl>
+<dl>
+<dt><?=t('Each start:', 'Al iniciar:')?></dt>
+<dd><span class="buttons-spaced"><select onchange="claudeSlot('<?=htmlspecialchars($rc['slug'])?>', {action:'slot-set', target:'<?=htmlspecialchars($sl['target'], ENT_QUOTES)?>', field:'mode', value:this.value});">
+<option value="fixed"<?=$sl['mode'] === 'fixed' ? ' selected' : ''?>><?=t('Resume the same session', 'Retomar siempre la misma sesión')?></option>
+<option value="fresh"<?=$sl['mode'] === 'fresh' ? ' selected' : ''?>><?=t('Open a new session', 'Abrir una sesión nueva')?></option>
+</select>
+<select onchange="claudeSlot('<?=htmlspecialchars($rc['slug'])?>', {action:'slot-set', target:'<?=htmlspecialchars($sl['target'], ENT_QUOTES)?>', field:'mem', value:this.value});">
+<option value="shared"<?=$sl['mem'] === 'shared' ? ' selected' : ''?>><?=t('Memory shared with /', 'Memoria compartida con /')?></option>
+<option value="own"<?=$sl['mem'] === 'own' ? ' selected' : ''?>><?=t('Memory of its own', 'Memoria propia')?></option>
+</select></span></dd>
+</dl>
+<dl>
+<dt><?=t('Name and folder:', 'Nombre y carpeta:')?></dt>
+<dd><span class="buttons-spaced"><input type="text" id="claude-slot-name-<?=htmlspecialchars($rc['slug'] . '-' . $sl['id'])?>" value="<?=htmlspecialchars($sl['name'])?>" maxlength="40">
+<input type="button" value="<?=t('Save name', 'Guardar nombre')?>" onclick="claudeSlot('<?=htmlspecialchars($rc['slug'])?>', {action:'slot-set', target:'<?=htmlspecialchars($sl['target'], ENT_QUOTES)?>', field:'name', value:document.getElementById('claude-slot-name-<?=htmlspecialchars($rc['slug'] . '-' . $sl['id'])?>').value});">
+<input type="text" id="claude-slot-dir-<?=htmlspecialchars($rc['slug'] . '-' . $sl['id'])?>" value="<?=htmlspecialchars($sl['dir_cfg'])?>" placeholder="<?=htmlspecialchars($sl['dir'])?>">
+<input type="button" value="<?=t('Save folder', 'Guardar carpeta')?>" onclick="claudeSlot('<?=htmlspecialchars($rc['slug'])?>', {action:'slot-set', target:'<?=htmlspecialchars($sl['target'], ENT_QUOTES)?>', field:'dir', value:document.getElementById('claude-slot-dir-<?=htmlspecialchars($rc['slug'] . '-' . $sl['id'])?>').value});"></span></dd>
+</dl>
 </div>
 <?php endforeach; ?>
+<?php if (!$rc['slots']): ?>
+<p class="dim-text"><?=t('No fixed sessions yet.', 'Todavía no hay sesiones fijas.')?></p>
+<?php endif; ?>
+
+<dl>
+<dt><?=t('Add a session:', 'Añadir sesión:')?></dt>
+<dd><span class="buttons-spaced"><input type="text" id="claude-slot-new-name-<?=htmlspecialchars($rc['slug'])?>" maxlength="40" placeholder="<?=t('Name', 'Nombre')?>">
+<select id="claude-slot-new-mode-<?=htmlspecialchars($rc['slug'])?>">
+<option value="fixed"><?=t('Resume the same session', 'Retomar siempre la misma sesión')?></option>
+<option value="fresh"><?=t('Open a new session', 'Abrir una sesión nueva')?></option>
+</select>
+<select id="claude-slot-new-mem-<?=htmlspecialchars($rc['slug'])?>">
+<option value="shared"><?=t('Memory shared with /', 'Memoria compartida con /')?></option>
+<option value="own"><?=t('Memory of its own', 'Memoria propia')?></option>
+</select>
+<input type="text" id="claude-slot-new-dir-<?=htmlspecialchars($rc['slug'])?>" placeholder="<?=t('Folder (optional)', 'Carpeta (opcional)')?>">
+<input type="button" value="<?=t('Add', 'Añadir')?>" onclick="claudeSlot('<?=htmlspecialchars($rc['slug'])?>', {action:'slot-add', account:'<?=htmlspecialchars($rc['slug'], ENT_QUOTES)?>',
+  name:document.getElementById('claude-slot-new-name-<?=htmlspecialchars($rc['slug'])?>').value,
+  mode:document.getElementById('claude-slot-new-mode-<?=htmlspecialchars($rc['slug'])?>').value,
+  mem:document.getElementById('claude-slot-new-mem-<?=htmlspecialchars($rc['slug'])?>').value,
+  dir:document.getElementById('claude-slot-new-dir-<?=htmlspecialchars($rc['slug'])?>').value});"></span></dd>
+</dl>
+<?php if ($rc['slots']): ?>
+<dl>
+<dt>&nbsp;</dt>
+<dd><span class="buttons-spaced">
+<form method="POST" action="/update.php" target="progressFrame" style="display:contents;">
+<input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh">
+<input type="hidden" name="#arg[0]" value="start-all">
+<input type="hidden" name="#arg[1]" value="<?=htmlspecialchars($rc['slug'])?>">
+<input type="submit" value="<?=t('Start all', 'Iniciar todas')?>">
+</form>
+</span></dd>
+</dl>
+<?php endif; ?>
+<p id="claude-slot-msg-<?=htmlspecialchars($rc['slug'])?>"></p>
+<blockquote class="inline_help"><?=t(
+    '"Resume the same session" comes back to the same conversation on every start, like the main session. "Open a new session" starts a clean one each time you press Start (the old ones stay in your list on claude.ai); a restart the plugin does by itself, after an update, still resumes. The name is the title the session gets on claude.ai when it is created. The folder is optional: by default each session gets one under appdata, and two bridges can never share one. Remove forgets the session\'s settings and stops it; nothing on disk is deleted.',
+    '«Retomar siempre la misma sesión» vuelve a la misma conversación cada vez que se inicia, como la sesión principal. «Abrir una sesión nueva» empieza una limpia cada vez que pulsas Iniciar (las anteriores siguen en tu lista de claude.ai); un reinicio que haga el propio plugin, tras una actualización, sigue retomando. El nombre es el título que recibe la sesión en claude.ai al crearse. La carpeta es opcional: por defecto cada sesión tiene una dentro de appdata, y dos puentes nunca pueden compartir carpeta. Quitar olvida la configuración de la sesión y la detiene; no se borra nada del disco.'
+)?></blockquote>
+</div>
+<?php endforeach; ?>
+
+<script>
+(function () {
+  var L = <?=json_encode([
+      'working' => t('Working...', 'Trabajando...'),
+      'network' => t('Could not reach the server.', 'No se pudo contactar con el servidor.'),
+  ])?>;
+  // A POST to a webGUI PHP file without the token is answered with an empty
+  // body, which looks exactly like the server being unreachable.
+  var CSRF = <?=json_encode($var['csrf_token'] ?? '')?>;
+  window.claudeSlot = function (account, data, confirmText) {
+    if (confirmText && !confirm(confirmText)) return;
+    var msg = document.getElementById('claude-slot-msg-' + account);
+    msg.textContent = L.working;
+    msg.className = '';
+    data.csrf_token = CSRF;
+    fetch('/plugins/claude-code/include/claude-sessions.php',
+          { method: 'POST', cache: 'no-store', headers: { 'X-CSRF-TOKEN': CSRF }, body: new URLSearchParams(data) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        msg.textContent = d.message || '';
+        msg.className = d.ok ? 'ok' : 'error';
+        if (d.ok) setTimeout(function () { location.reload(); }, 1500);
+      })
+      .catch(function () { msg.textContent = L.network; msg.className = 'error'; });
+  };
+})();
+</script>
 
 <?php
 // A history line's time as people read it, in the offset it was written with:
@@ -7413,25 +8106,43 @@ function rc_when($iso) {
 // Delete would hurt, so they get no button at all rather than a refusal after
 // the fact -- the script checks the same thing again anyway.
 $rc_in_use = [];
+// The owner column says which account -- and now which of its sessions -- a
+// line belongs to, so it is shown whenever there is more than one bridge.
+$rc_show_owner = $multi_account;
+foreach ($rc_accounts as $rc_a) { if (!empty($rc_a['slots'])) $rc_show_owner = true; }
 foreach ($rc_accounts as $rc_a) {
     if (!empty($rc_a['last_sid'])) $rc_in_use[$rc_a['last_sid']] = true;
+    foreach ($rc_a['slots'] as $rc_s) {
+        if (!empty($rc_s['last_sid'])) $rc_in_use[$rc_s['last_sid']] = true;
+    }
 }
 ?>
 <?php if (!empty($rc_history)): ?>
 <div class="claude-box">
 <h4><?=t('Session history', 'Histórico de sesiones')?></h4>
 <table class="claude-history">
-<tr><th><?=t('When', 'Cuándo')?></th><th><?=t('Session ID', 'ID de sesión')?></th><?php if ($multi_account): ?><th><?=t('Account', 'Cuenta')?></th><?php endif; ?><th><?=t('Directory', 'Directorio')?></th><th><?=t('State', 'Estado')?></th><th></th></tr>
+<tr><th><?=t('When', 'Cuándo')?></th><th><?=t('Session ID', 'ID de sesión')?></th><?php if ($rc_show_owner): ?><th><?=t('Account', 'Cuenta')?></th><?php endif; ?><th><?=t('Directory', 'Directorio')?></th><th><?=t('State', 'Estado')?></th><th></th></tr>
 <?php foreach ($rc_history as $rc_sid => $rc_info): ?>
 <tr><td title="<?=htmlspecialchars($rc_info['time'])?>"><?=htmlspecialchars(rc_when($rc_info['time']))?></td><td><code><?=htmlspecialchars($rc_sid)?></code></td>
-<?php if ($multi_account): ?><td><?php
+<?php if ($rc_show_owner): ?><td><?php
 $rc_owner = $rc_info['profile'] ?? '';
 if ($rc_owner === '') {
     // Sessions found only through Claude's own pointer files carry no account.
     echo '<span class="dim-text" title="' . t('Started outside this plugin', 'Iniciada fuera de este plugin') . '">&mdash;</span>';
 } else {
+    // "account" or "account/slot": the account's label, and the session's name.
+    [$rc_oa, $rc_os] = array_pad(explode('/', $rc_owner, 2), 2, '');
     $rc_name = $rc_owner;
-    foreach ($rc_accounts as $rc_a) { if ($rc_a['slug'] === $rc_owner) { $rc_name = $rc_a['label']; break; } }
+    foreach ($rc_accounts as $rc_a) {
+        if ($rc_a['slug'] !== $rc_oa) continue;
+        $rc_name = $rc_a['label'];
+        if ($rc_os !== '') {
+            $rc_sn = $rc_os;
+            foreach ($rc_a['slots'] as $rc_s) { if ($rc_s['id'] === $rc_os) { $rc_sn = $rc_s['name']; break; } }
+            $rc_name .= ' / ' . $rc_sn;
+        }
+        break;
+    }
     echo htmlspecialchars($rc_name);
 }
 ?></td><?php endif; ?>
@@ -9325,7 +10036,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.11.13 has been installed!"
+    echo " Claude Code plugin v2026.11.14 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"

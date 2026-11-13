@@ -28,6 +28,13 @@ claim of authorship over the base plugin.
 
 ### ✨ What's new
 
+- **Several Remote Control sessions at once, from the plugin** — no terminal needed. Each account can
+  keep **fixed sessions** next to its main one: a name (its title on claude.ai), a folder, and a choice
+  between resuming the same session on every start or opening a new one each time. They survive
+  reboots and updates and come back with the array. Or turn on **server mode**, and the main session
+  holds several sessions that you open whenever you like from claude.ai or the Claude app — and can
+  fork. Claude Code serves only one Remote Control per folder, so each fixed session gets a folder of
+  its own; it starts with the permission rules approved for `/` and shares its agent memory.
 - Remote Control now writes what matters to the **system log**, tagged `claude-code`: a bridge
   starting, stopping, dying and being restarted, a session that could not be resumed, an account
   added, removed or switched to, and an account whose details could not be read. None of it used
@@ -271,6 +278,13 @@ claro al autor original, sin reclamar autoría del plugin base.
 
 ### ✨ Novedades
 
+- **Varias sesiones de Control Remoto a la vez, desde el plugin**, sin terminal. Cada cuenta puede
+  tener **sesiones fijas** junto a la principal: un nombre (su título en claude.ai), una carpeta y la
+  opción de retomar siempre la misma sesión o abrir una nueva cada vez que se inicia. Sobreviven a
+  reinicios y actualizaciones y vuelven con el array. O activa el **modo servidor**, y la sesión
+  principal sostiene varias sesiones que abres cuando quieras desde claude.ai o la app de Claude, y
+  que puedes bifurcar. Claude Code solo admite un Control Remoto por carpeta, así que cada sesión fija
+  tiene la suya; empieza con las reglas de permisos aprobadas para `/` y comparte su memoria.
 - El Control Remoto ya escribe lo que importa en el **syslog**, con la etiqueta `claude-code`: un
   puente que arranca, se para, se muere o se reinicia, una sesión que no se pudo retomar, una
   cuenta añadida, eliminada o seleccionada, y una cuenta cuyos datos no se pudieron leer. Nada de
