@@ -1,12 +1,25 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.11.14"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.11.17"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.11.17
+- Fixed sessions now render as cards: each session sits in its own
+  bordered, spaced card with its name as a heading, so a long list no
+  longer blurs together. Status shows as a pill (Running / Stopped).
+  Styling is monochrome to match the rest of the UI and both Unraid
+  themes.
+- One-click "Trust folder" button on a fixed session. Claude Code refuses
+  to run in a folder that was never trusted, which previously meant opening
+  a terminal and running `claude` by hand in the session's folder before
+  Start would work. The button records that trust from the page. It does
+  not trust anything automatically -- the trust gate stays; the button only
+  saves the terminal step, and only appears while a folder still needs
+  trust. A session that needs trust is marked "needs trust" until trusted.
 ###2026.11.14
 - Several Remote Control sessions at once, from the Remote Control tab, with
   no terminal needed. Fixed sessions: each account can keep extra sessions
@@ -1974,7 +1987,7 @@ prune_versions
      taken over as "most recent"; see the connect subcommand and the
      Settings page's Session ID field. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh" Mode="0755">
-<SHA256>bc903d58e9c6fbc036ac8ed5bf277b5ce467586afdaf4fa57cee67f34a91a08c</SHA256>
+<SHA256>fa82fe9a47c3b996d7d84e033a5106c841697c6d7fc3e22e2c921be3e94353de</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -2979,6 +2992,35 @@ case "$CMD" in
         start_instance keep
         echo "Remote Control restarted for $WHO."
         ;;
+    trust)
+        # One-click folder trust. Records Claude Code's workspace-trust flag
+        # (hasTrustDialogAccepted) for this session's directory in the account's
+        # .claude.json -- exactly what running "claude" in that folder once and
+        # accepting the dialog does. The gate itself is unchanged: a folder is
+        # only ever trusted by this explicit action (or the dialog by hand), so
+        # nothing is trusted automatically. The web page offers the button only
+        # while a session's folder is not yet trusted.
+        require_listed
+        rc_dir=$(get_rc_dir)
+        mkdir -p "$rc_dir" 2>/dev/null
+        if [ "$PROFILE" = "default" ]; then
+            cfg_json="$APPDATA_PATH/.claude.json"
+        else
+            cfg_json="$APPDATA_PATH/profiles/$PROFILE/.claude.json"
+        fi
+        if [ ! -f "$cfg_json" ]; then
+            echo "Cannot trust $rc_dir: $cfg_json not found -- sign this account in first."
+            exit 1
+        fi
+        if php /usr/local/emhttp/plugins/claude-code/scripts/trust-folder.php "$cfg_json" "$rc_dir" >/dev/null; then
+            echo "=== Folder trusted for $WHO: $rc_dir ($(date)) ===" >> "$LOGFILE"
+            cc_log "Remote Control: trusted folder $rc_dir for $WHO"
+            echo "Trusted $rc_dir. Press Start to run $WHO."
+        else
+            echo "Could not record trust for $rc_dir."
+            exit 1
+        fi
+        ;;
     new)
         # A session that cannot be resumed used to leave no way out from the
         # page: Start resumes the remembered id, and Connect needs an id you
@@ -3198,6 +3240,77 @@ esac; exit "$?"
 ]]>
 </INLINE>
 </FILE>
+<FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/trust-folder.php" Mode="0644">
+<SHA256>053150687d2e39fbb81975c9a94d5310b37de78693eb10a55b2255efcc9d3051</SHA256>
+<INLINE>
+<![CDATA[
+<?php
+// trust-folder.php <claude.json path> <folder> [<folder> ...]
+//
+// Records Claude Code's workspace-trust flag (hasTrustDialogAccepted=true) for
+// one or more folders in the given .claude.json. This is exactly what accepting
+// Claude Code's trust dialog in a terminal does; it is only ever run from an
+// explicit "Trust folder" action, never automatically. The trust gate itself is
+// unchanged -- an untrusted folder still refuses to start until trusted here.
+//
+// Decodes to objects (not associative arrays) so empty JSON objects stay "{}"
+// and are not silently rewritten as "[]". Backs the file up first and writes
+// atomically (temp file + rename).
+
+$path = $argv[1] ?? '';
+$folders = array_slice($argv, 2);
+if ($path === '' || !$folders) { fwrite(STDERR, "usage: trust-folder.php <json> <folder>...\n"); exit(2); }
+
+if (!is_file($path)) { fwrite(STDERR, "no such file: $path\n"); exit(1); }
+$raw = file_get_contents($path);
+if ($raw === false) { fwrite(STDERR, "cannot read: $path\n"); exit(1); }
+$j = json_decode($raw);                        // objects, not assoc arrays
+if (!($j instanceof stdClass)) { fwrite(STDERR, "invalid JSON: $path\n"); exit(1); }
+if (!isset($j->projects) || !($j->projects instanceof stdClass)) { $j->projects = new stdClass(); }
+
+// Clone an existing trusted entry so a new one has the same shape; else a
+// minimal default matching what Claude Code writes.
+$template = null;
+foreach ($j->projects as $v) { if (isset($v->hasTrustDialogAccepted)) { $template = $v; break; } }
+
+$changed = [];
+foreach ($folders as $folder) {
+    if (isset($j->projects->{$folder}) && ($j->projects->{$folder}->hasTrustDialogAccepted ?? false) === true) {
+        continue; // already trusted
+    }
+    if (!isset($j->projects->{$folder})) {
+        if ($template) {
+            $entry = unserialize(serialize($template));   // deep copy
+        } else {
+            $entry = new stdClass();
+            $entry->allowedTools = [];
+            $entry->mcpContextUris = [];
+            $entry->enabledMcpjsonServers = [];
+            $entry->disabledMcpjsonServers = [];
+            $entry->mcpServers = [];
+            $entry->hasClaudeMdExternalIncludesApproved = false;
+            $entry->hasClaudeMdExternalIncludesWarningShown = false;
+        }
+        $j->projects->{$folder} = $entry;
+    }
+    $j->projects->{$folder}->hasTrustDialogAccepted = true;
+    $changed[] = $folder;
+}
+
+if (!$changed) { echo "already trusted\n"; exit(0); }
+
+$out = json_encode($j, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+if ($out === false) { fwrite(STDERR, "encode failed\n"); exit(1); }
+@copy($path, $path . '.bak.' . time());
+$tmp = $path . '.tmp.' . getmypid();
+if (file_put_contents($tmp, $out) === false) { fwrite(STDERR, "write failed\n"); exit(1); }
+if (!rename($tmp, $path)) { @unlink($tmp); fwrite(STDERR, "rename failed\n"); exit(1); }
+foreach ($changed as $f) { echo "trusted: $f\n"; }
+exit(0);
+]]>
+</INLINE>
+</FILE>
+
 
 <!-- Claude account profiles: several logins on one server, either sharing
      the agent memory and settings or fully isolated. -->
@@ -5035,7 +5148,7 @@ respond([
 <!-- Shared preamble and styling for the tabs. Every tab requires this once,
      so the state it computes is worked out a single time per request. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/common.php" Mode="0644">
-<SHA256>fca1bca4b4e1c2a40c887ae2d08fd85b5c31ea3f6f6686d5fd039f345eb53cd3</SHA256>
+<SHA256>39c975512c62776b49f4fccee1ddf5c53559811365346724e19f3e26a059958e</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -5264,6 +5377,27 @@ function cc_rc_log_state($log_file, $known_sid, $server) {
     return [$session_url, $archived];
 }
 
+// Whether Claude Code has been told to trust a folder, read from the account's
+// .claude.json (projects.<dir>.hasTrustDialogAccepted). A session whose folder
+// is not trusted refuses to start, so the page can offer a one-click "Trust
+// folder" in that state instead of only a buried log message. Each .claude.json
+// is parsed once per request.
+function cc_folder_trusted($json_path, $dir) {
+    static $cache = [];
+    if ($dir === '') return false;
+    if (!array_key_exists($json_path, $cache)) {
+        $projects = [];
+        if (is_file($json_path)) {
+            $j = json_decode((string)@file_get_contents($json_path), true);
+            if (is_array($j) && isset($j['projects']) && is_array($j['projects'])) {
+                $projects = $j['projects'];
+            }
+        }
+        $cache[$json_path] = $projects;
+    }
+    return !empty($cache[$json_path][$dir]['hasTrustDialogAccepted']);
+}
+
 $rc_accounts = [];
 foreach (($profiles ?: [['slug' => 'default', 'label' => t('Main account', 'Cuenta principal'), 'email' => '']]) as $prow) {
     $slug = $prow['slug'];
@@ -5307,6 +5441,13 @@ foreach (($profiles ?: [['slug' => 'default', 'label' => t('Main account', 'Cuen
         $sl_sid = $cfg["LAST_SESSION_ID_{$slug}_S_$sl"] ?? '';
         $sl_dir = $cfg["RCS_DIR_{$slug}_S_$sl"] ?? '';
         [$sl_url, $sl_arch] = cc_rc_log_state("/var/log/$sl_log", $sl_sid, false);
+        $sl_resolved_dir = $sl_dir !== '' ? $sl_dir
+            : ($slug === 'default' ? "$appdata_path/sessions/$sl" : "$appdata_path/sessions/$slug-$sl");
+        // Trust lives in the account's .claude.json: $appdata/.claude.json for
+        // the main account, $appdata/profiles/<account>/.claude.json otherwise.
+        $sl_json = $slug === 'default'
+            ? "$appdata_path/.claude.json"
+            : "$appdata_path/profiles/$slug/.claude.json";
         $rc_slots[] = [
             'id'          => $sl,
             'target'      => "$slug/$sl",
@@ -5314,8 +5455,8 @@ foreach (($profiles ?: [['slug' => 'default', 'label' => t('Main account', 'Cuen
             'mode'        => ($cfg["RCS_MODE_{$slug}_S_$sl"] ?? 'fixed') === 'fresh' ? 'fresh' : 'fixed',
             'mem'         => ($cfg["RCS_MEM_{$slug}_S_$sl"] ?? 'shared') === 'own' ? 'own' : 'shared',
             'dir_cfg'     => $sl_dir,
-            'dir'         => $sl_dir !== '' ? $sl_dir
-                             : ($slug === 'default' ? "$appdata_path/sessions/$sl" : "$appdata_path/sessions/$slug-$sl"),
+            'dir'         => $sl_resolved_dir,
+            'trusted'     => cc_folder_trusted($sl_json, $sl_resolved_dir),
             'running'     => $sl_pid !== '' && file_exists("/proc/$sl_pid"),
             'log_name'    => $sl_log,
             'log_exists'  => file_exists("/var/log/$sl_log"),
@@ -5484,6 +5625,7 @@ uasort($rc_history, function($a, $b) { return $b['ts'] <=> $a['ts']; });
   border-radius: 4px;
   padding: 5px 15px 12px 15px;
   margin-bottom: 15px;
+  background-color: #f2f2f2;
 }
 .claude-box h4 {
   margin-top: 8px;
@@ -5529,6 +5671,61 @@ uasort($rc_history, function($a, $b) { return $b['ts'] <=> $a['ts']; });
   width: 100%;
   white-space: pre;
   overflow-x: auto;
+}
+/* Fixed-session cards: each session boxed and spaced so they stop blurring
+   together, with its name emphasised. Trust affordances are greyscale on
+   purpose -- hierarchy comes from weight and a dashed edge, not accent colour,
+   to match the rest of the UI and both Unraid themes. */
+.claude-slot {
+  border: 1px solid rgba(128,128,128,0.5);
+  border-radius: 8px;
+  padding: 10px 15px 12px 15px;
+  margin: 14px 0;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.14);
+  background-color: #fff;
+}
+.claude-slot-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  border-bottom: 1px solid rgba(128,128,128,0.3);
+  padding-bottom: 7px;
+  margin-bottom: 9px;
+}
+.claude-slot-title { font-size: 1.3em; font-weight: 700; line-height: 1.2; }
+.claude-slot-meta { font-size: 0.9em; }
+.claude-slot.needs-trust { border-style: dashed; }
+/* Greyscale status pills (mockup look): Running filled dark, Stopped light.
+   Scoped to the session cards so the main session and history keep their own
+   style. */
+.claude-slot-meta .ok, .claude-slot-meta .warn {
+  display: inline-block;
+  padding: 1px 10px;
+  border-radius: 10px;
+  font-size: 0.92em;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.claude-slot-meta .ok { background: var(--green-800, #4caf50); color: #fff; }
+.claude-slot-meta .warn { background: rgba(128,128,128,0.22); color: var(--text-color, #4a4a4a); }
+.claude-needstrust {
+  display: inline-block;
+  font-size: 0.86em;
+  font-weight: 600;
+  border: 1px solid rgba(128,128,128,0.75);
+  border-radius: 10px;
+  padding: 0 9px;
+  white-space: nowrap;
+}
+/* Trust folder is the primary action while a folder is untrusted: filled dark
+   so it reads as "click me", greyscale. */
+.claude-slot .claude-trust-btn {
+  background: #3c4653 !important;
+  color: #fff !important;
+  border: 1px solid #333b45 !important;
+  font-weight: 600;
 }
 </style>
 <script>
@@ -7797,7 +7994,7 @@ function cc_sync_value($v) {
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeRemote.page">
-<SHA256>afdcb995775d38bac82b685c23ac7387626eb84e77436c71fa9a8a0fa7cac17a</SHA256>
+<SHA256>80f97756d958ec2cf2b5f6235382a76a190c82837a1d9842d482e8450a6faab1</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:3"
@@ -7959,9 +8156,9 @@ Tag="desktop"
 )?></blockquote>
 </form>
 
-<h4><?=t('Fixed sessions', 'Sesiones fijas')?></h4>
+<h4 class="claude-slots-head"><?=t('Fixed sessions', 'Sesiones fijas')?></h4>
 <?php foreach ($rc['slots'] as $sl): ?>
-<div class="claude-slot">
+<div class="claude-slot<?=$sl['trusted'] ? '' : ' needs-trust'?>">
 <?php if ($sl['archived']): ?>
 <div class="claude-notice">
 <b><?=t('Notice:', 'Aviso:')?></b>
@@ -7969,15 +8166,21 @@ Tag="desktop"
 <br><code style="font-size:0.85em;"><?=htmlspecialchars($sl['archived'])?></code>
 </div>
 <?php endif; ?>
-<dl>
-<dt><b><?=htmlspecialchars($sl['name'])?></b></dt>
-<dd><span><span class="<?=$sl['running'] ? 'ok' : 'warn'?>"><?=$sl['running'] ? t('Running', 'Corriendo') : t('Stopped', 'Detenido')?></span>
-<?php if ($sl['session_url']): ?> &middot; <a href="<?=htmlspecialchars($sl['session_url'])?>" target="_blank"><?=t('Open session', 'Abrir sesión')?></a><?php endif; ?>
-&middot; <a onclick="openTerminal('log','claude-code-rc-<?=htmlspecialchars($rc['slug'] . '-' . $sl['id'])?>','<?=htmlspecialchars($sl['log_name'])?>')" style="cursor:pointer;"><i class="fa fa-book"></i> <u><?=t('Log', 'Log')?></u></a></span></dd>
-</dl>
+<div class="claude-slot-head">
+<span class="claude-slot-title"><?=htmlspecialchars($sl['name'])?></span>
+<span class="claude-slot-meta"><span class="<?=$sl['running'] ? 'ok' : 'warn'?>"><?=$sl['running'] ? t('Running', 'Corriendo') : t('Stopped', 'Detenido')?></span><?php if (!$sl['trusted']): ?> &middot; <span class="claude-needstrust"><?=t('needs trust', 'falta confiar')?></span><?php endif; ?><?php if ($sl['session_url']): ?> &middot; <a href="<?=htmlspecialchars($sl['session_url'])?>" target="_blank"><?=t('Open session', 'Abrir sesión')?></a><?php endif; ?> &middot; <a onclick="openTerminal('log','claude-code-rc-<?=htmlspecialchars($rc['slug'] . '-' . $sl['id'])?>','<?=htmlspecialchars($sl['log_name'])?>')" style="cursor:pointer;"><i class="fa fa-book"></i> <u><?=t('Log', 'Log')?></u></a></span>
+</div>
 <dl>
 <dt><?=t('Actions:', 'Acciones:')?></dt>
 <dd><span class="buttons-spaced">
+<?php if (!$sl['trusted']): ?>
+<form method="POST" action="/update.php" target="progressFrame" style="display:contents;">
+<input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh">
+<input type="hidden" name="#arg[0]" value="trust">
+<input type="hidden" name="#arg[1]" value="<?=htmlspecialchars($sl['target'])?>">
+<input type="submit" class="claude-trust-btn" value="<?=t('Trust folder', 'Confiar en la carpeta')?>">
+</form>
+<?php endif; ?>
 <form method="POST" action="/update.php" target="progressFrame" style="display:contents;">
 <input type="hidden" name="#command" value="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh">
 <input type="hidden" name="#arg[0]" value="<?=$sl['running'] ? 'stop' : 'start'?>">
@@ -7995,6 +8198,12 @@ Tag="desktop"
 <input type="button" value="<?=t('Remove', 'Quitar')?>" onclick="claudeSlot('<?=htmlspecialchars($rc['slug'])?>', {action:'slot-remove', target:'<?=htmlspecialchars($sl['target'], ENT_QUOTES)?>'}, <?=htmlspecialchars(json_encode(sprintf(t('Remove the session "%s"? It is stopped and its settings forgotten; its folder %s and everything in it stay where they are.', '¿Quitar la sesión «%s»? Se detiene y se olvida su configuración; su carpeta %s y todo lo que contiene se quedan donde están.'), $sl['name'], $sl['dir'])), ENT_QUOTES)?>);">
 </span></dd>
 </dl>
+<?php if (!$sl['trusted']): ?>
+<blockquote class="inline_help"><?=t(
+    'This session\'s folder has not been trusted yet, so Start will refuse it. "Trust folder" records your approval -- the same thing running claude in that folder once and accepting the prompt does -- then Start works. Nothing is trusted automatically.',
+    'La carpeta de esta sesión aún no es de confianza, así que Iniciar la rechazará. «Confiar en la carpeta» registra tu aprobación -- lo mismo que ejecutar claude una vez en esa carpeta y aceptar -- y entonces Iniciar funciona. Nada se confía automáticamente.'
+)?></blockquote>
+<?php endif; ?>
 <dl>
 <dt><?=t('Each start:', 'Al iniciar:')?></dt>
 <dd><span class="buttons-spaced"><select onchange="claudeSlot('<?=htmlspecialchars($rc['slug'])?>', {action:'slot-set', target:'<?=htmlspecialchars($sl['target'], ENT_QUOTES)?>', field:'mode', value:this.value});">
