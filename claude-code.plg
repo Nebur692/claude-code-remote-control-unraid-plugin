@@ -1,12 +1,39 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.11.25.1"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.11.25.2"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.11.25.2
+- Permissions tab: a "Starting point" for each file (issue #7). Claude Code
+  runs as root here and nothing is refused outright by default. A few
+  questions -- commands and edits, formatting disks, deleting files, removing
+  Docker containers and volumes, reboot and shutdown, packages and users, the
+  no-questions mode -- each fill in a group of allow, ask or deny rules, and
+  four presets (Observe, Locked down, Balanced, Open) answer them for you.
+  Nothing is saved until Save rules: the boxes change, every rule added,
+  moved or removed is listed, and Undo puts them back. Rules written by hand
+  are never removed. The deny-list for a root server is the one hernandito
+  proposed in #7.
+- Permissions tab: new "No-questions mode" field, to forbid bypassPermissions
+  (disableBypassPermissionsMode) in a single file.
+- Permissions tab: the default answer now also offers auto and dontAsk.
+  Before, saving the rules of a file set to either one quietly removed it.
+- Remote Control tab, by hernandito (#6, which also covers #5): each fixed
+  session is its own card, with its name as a heading, so a long list no
+  longer blurs together. A session whose folder Claude Code has not been told
+  to trust gets a dashed border, a "needs trust" badge and a "Trust folder"
+  button, which records the same approval as running claude in that folder
+  once and accepting the question. Nothing is trusted automatically. The
+  write keeps .claude.json's own mode, leaves a single .bak, takes the
+  plugin's lock and starts over if a running session changed the file in the
+  meantime, and writes nothing while the array is down.
+- The trust check behind that badge follows Claude Code all the way up to /,
+  as Claude Code does, stopping only at the top of a git repository. A folder
+  under /root is trusted when / is.
 ###2026.11.25.1
 - Checked against Claude Code 2.1.332 (2.1.323 to 2.1.332): every setting on
   the Config tab is still there and means the same, and none of the new ones
@@ -5287,7 +5314,7 @@ respond([
 <!-- Shared preamble and styling for the tabs. Every tab requires this once,
      so the state it computes is worked out a single time per request. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/common.php" Mode="0644">
-<SHA256>45b3f8aaaa4db92c946d94380d271de32fe2663f90df2a2b651de15a177a4184</SHA256>
+<SHA256>6e958ffebef636c4c801618402a64902a78e24c545a59387ec760d4f5ee3ae51</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -5526,9 +5553,12 @@ function cc_rc_log_state($log_file, $known_sid, $server) {
 // above it carries the flag, and then asks nothing at all -- so this walks up
 // the parents, not just the exact key, or a session under an already-trusted
 // folder would still be shown the dashed border, the badge and the button.
-// The walk stops before the home folder: Claude Code never stores trust for it,
-// and nothing above it bears on a session that runs below it. Claude Code runs
-// as root here, so the home folder is /root.
+// The walk is the one Claude Code 2.1.332 does: all the way up to /, except
+// that it stops at the top of a git repository (a folder holding .git), so
+// trust given above a repository does not reach inside it. The home folder is
+// never trusted by itself -- Claude Code does not store trust for it -- but the
+// walk does go past it: a folder under /root is trusted when / is. Claude Code
+// runs as root here, so the home folder is /root.
 function cc_folder_trusted($json_path, $dir, $home = '/root') {
     static $cache = [];
     if ($dir === '') return false;
@@ -5546,10 +5576,10 @@ function cc_folder_trusted($json_path, $dir, $home = '/root') {
     $home = rtrim($home, '/');
     $d = rtrim($dir, '/');
     if ($d === '') $d = '/';
+    if ($home !== '' && $d === $home) return false;   // never stored for the home folder itself
     while (true) {
-        if ($home !== '' && $d === $home) break;   // never credited to the home folder
         if (!empty($projects[$d]['hasTrustDialogAccepted'])) return true;
-        if ($d === '/') break;
+        if ($d === '/' || file_exists("$d/.git")) break;   // top of the tree, or of a repository
         $parent = dirname($d);
         if ($parent === $d) break;
         $d = $parent;
@@ -6975,7 +7005,7 @@ cc_done(true, 'Saved to ' . $cc_path, [
 <!-- Permission rules: reads and writes settings.local.json, the file that records
      what has been granted for a working directory -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/claude-permissions.php" Mode="0644">
-<SHA256>a213afb309f32d89c6a1054894527c70a066ec7bd57770ae55d77ce79c4c6c90</SHA256>
+<SHA256>59941f381a8f7f36437a2718cbe346eab07af330e18ca21a74a8a8eaef652f54</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -7117,6 +7147,9 @@ function ccp_rules($settings) {
         $out[$list] = $vals;
     }
     if (isset($perm['defaultMode']) && is_string($perm['defaultMode'])) $out['defaultMode'] = $perm['defaultMode'];
+    // "disable" is the only value Claude Code accepts here; anything else is
+    // shown as unset, as Claude Code itself treats it.
+    $out['disableBypassPermissionsMode'] = (($perm['disableBypassPermissionsMode'] ?? '') === 'disable') ? 'disable' : '';
     return $out;
 }
 
@@ -7156,6 +7189,10 @@ function ccp_apply_rules(&$data, $rules) {
     if (array_key_exists('defaultMode', $rules)) {
         if ($rules['defaultMode'] !== '') $perm['defaultMode'] = $rules['defaultMode']; else unset($perm['defaultMode']);
     }
+    if (array_key_exists('disableBypassPermissionsMode', $rules)) {
+        if ($rules['disableBypassPermissionsMode'] === 'disable') $perm['disableBypassPermissionsMode'] = 'disable';
+        else unset($perm['disableBypassPermissionsMode']);
+    }
     if ($perm) $data['permissions'] = $perm; else unset($data['permissions']);
 }
 
@@ -7169,7 +7206,7 @@ function ccp_done($ok, $message, $extra = []) {
 // about not writing a document that no longer loads, or that nothing can
 // display afterwards.
 function ccp_clean_rules($raw) {
-    $modes = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
+    $modes = ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'];
     if (!is_array($raw)) return 'No rules received';
     $out = [];
     foreach (['allow', 'ask', 'deny', 'additionalDirectories'] as $list) {
@@ -7192,6 +7229,11 @@ function ccp_clean_rules($raw) {
         $mode = is_string($raw['defaultMode']) ? trim($raw['defaultMode']) : '';
         if ($mode !== '' && !in_array($mode, $modes, true)) return 'Unknown default mode: ' . $mode;
         $out['defaultMode'] = $mode;
+    }
+    if (array_key_exists('disableBypassPermissionsMode', $raw)) {
+        $bp = is_string($raw['disableBypassPermissionsMode']) ? trim($raw['disableBypassPermissionsMode']) : '';
+        if ($bp !== '' && $bp !== 'disable') return 'disableBypassPermissionsMode can only be "disable" or unset';
+        $out['disableBypassPermissionsMode'] = $bp;
     }
     if (!$out) return 'No rules received';
     return $out;
@@ -9694,7 +9736,7 @@ foreach ($cc_fields as $cc_g) foreach ($cc_g['fields'] as $cc_fd) $cc_types[$cc_
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodePermissions.page">
-<SHA256>72d08e60f01bcc9c06b95c044783aa4355063a1c034e173c82c720d47ff06959</SHA256>
+<SHA256>a6aeca8827dea76ea224ae6797566b714972aa5b50c2fecd89ada6fb6bfd60a9</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:5"
@@ -9774,6 +9816,87 @@ $ccp_lists = [
     ['key' => 'additionalDirectories', 'label' => t('Other folders it may reach', 'Otras carpetas a las que puede llegar'),
      'help' => t('One absolute path per line. A session normally only reads and writes inside its working directory; these are the extra folders it is allowed to use as well.',
                  'Una ruta absoluta por línea. Una sesión normalmente sólo lee y escribe dentro de su carpeta de trabajo; éstas son las carpetas adicionales que además puede usar.')],
+];
+
+// The "Starting point" box: a short set of questions, each one owning a group
+// of rules, and four presets that only answer the questions. It never writes
+// anything itself -- it fills the boxes above and the normal Save writes them --
+// and it only ever adds, moves or removes the rules listed here, so a rule the
+// user wrote by hand survives whatever is answered. The deny-list for a root
+// server is the one hernandito proposed in issue #7.
+$ccp_groups = [
+    'delete' => ['rm', 'rmdir', 'shred', 'truncate'],
+    'disks'  => ['dd', 'mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.vfat',
+                 'mkfs.fat', 'mkfs.ntfs', 'mke2fs', 'mkswap', 'wipefs', 'blkdiscard', 'badblocks', 'parted',
+                 'fdisk', 'sgdisk', 'gdisk', 'cfdisk', 'nvme format', 'nvme sanitize', 'flashrom', 'mdcmd',
+                 'zpool destroy', 'zpool remove', 'zfs destroy'],
+    'docker' => ['docker rm', 'docker rmi', 'docker container rm', 'docker image rm', 'docker volume rm',
+                 'docker system prune', 'docker network rm', 'docker container prune', 'docker volume prune'],
+    'power'  => ['reboot', 'shutdown', 'poweroff', 'halt', 'init', 'telinit'],
+    'system' => ['installpkg', 'removepkg', 'upgradepkg', 'slackpkg',
+                 'passwd', 'useradd', 'userdel', 'usermod', 'groupadd', 'chpasswd'],
+];
+foreach ($ccp_groups as $ccp_g => $ccp_cmds) {
+    $ccp_groups[$ccp_g] = array_map(function ($c) { return "Bash($c:*)"; }, $ccp_cmds);
+}
+
+$ccp_three = function ($what) {
+    return [
+        'deny' => t('Never -- refused without asking', 'Nunca: se rechaza sin preguntar'),
+        'ask'  => t('Always ask, even if something else allows it', 'Preguntar siempre, aunque otra cosa lo permita'),
+        'none' => sprintf(t('No rule of its own for %s (follows the first question)', 'Sin regla propia para %s (sigue a la primera pregunta)'), $what),
+    ];
+};
+$ccp_questions = [
+    ['key' => 'mode', 'label' => t('Commands and edits', 'Órdenes y ediciones'),
+     'options' => [
+        'plan'        => t('Look only -- plan, change nothing', 'Solo mirar: planificar, no cambiar nada'),
+        'default'     => t('Ask before each command and each edit', 'Preguntar antes de cada orden y cada edición'),
+        'acceptEdits' => t('Edit files freely, ask before commands', 'Editar archivos sin preguntar, preguntar antes de las órdenes'),
+        'free'        => t('Edit and run commands freely', 'Editar y ejecutar órdenes sin preguntar'),
+     ],
+     'help' => t('Sets the default answer above. "Freely" also adds Bash to the allowed list; the rules from the other questions still win over it.',
+                 'Pone la respuesta por defecto de arriba. «Sin preguntar» además añade Bash a la lista de permitidos; las reglas de las demás preguntas siguen ganándole.')],
+    ['key' => 'disks', 'label' => t('Formatting disks and the array', 'Formatear discos y el array'),
+     'options' => $ccp_three(t('disks', 'discos')),
+     'help' => t('dd, mkfs.*, wipefs, blkdiscard, parted, fdisk, gdisk, nvme format, flashrom, mdcmd, zpool/zfs destroy and the like.',
+                 'dd, mkfs.*, wipefs, blkdiscard, parted, fdisk, gdisk, nvme format, flashrom, mdcmd, zpool/zfs destroy y similares.')],
+    ['key' => 'delete', 'label' => t('Deleting files', 'Borrar archivos'),
+     'options' => $ccp_three(t('deleting', 'borrar')),
+     'help' => t('rm, rmdir, shred and truncate. "Never" also stops Claude from tidying up its own temporary files with rm.',
+                 'rm, rmdir, shred y truncate. «Nunca» también impide que Claude limpie con rm sus propios archivos temporales.')],
+    ['key' => 'docker', 'label' => t('Removing Docker containers, images and volumes', 'Quitar contenedores, imágenes y volúmenes de Docker'),
+     'options' => $ccp_three('Docker'),
+     'help' => t('docker rm, rmi, volume rm, the prunes and network rm. Starting, stopping and reading logs are not affected.',
+                 'docker rm, rmi, volume rm, los prune y network rm. Arrancar, parar y leer logs no se ven afectados.')],
+    ['key' => 'power', 'label' => t('Reboot and shutdown', 'Reiniciar y apagar'),
+     'options' => $ccp_three(t('power', 'apagar')),
+     'help' => t('reboot, shutdown, poweroff, halt, init and telinit.', 'reboot, shutdown, poweroff, halt, init y telinit.')],
+    ['key' => 'system', 'label' => t('Packages and users', 'Paquetes y usuarios'),
+     'options' => $ccp_three(t('the system', 'el sistema')),
+     'help' => t('installpkg, removepkg, upgradepkg, slackpkg, passwd, useradd, userdel, usermod, groupadd and chpasswd.',
+                 'installpkg, removepkg, upgradepkg, slackpkg, passwd, useradd, userdel, usermod, groupadd y chpasswd.')],
+    ['key' => 'bypass', 'label' => t('No-questions mode', 'Modo sin preguntas'),
+     'options' => [
+        'disable' => t('Forbid it', 'Prohibirlo'),
+        'allow'   => t('Allow it to be switched on', 'Permitir que se active'),
+     ],
+     'help' => t('Whether bypassPermissions (or --dangerously-skip-permissions) can be used at all. It sets the No-questions mode field above.',
+                 'Si se puede usar bypassPermissions (o --dangerously-skip-permissions). Pone el campo Modo sin preguntas de arriba.')],
+];
+$ccp_presets = [
+    'observe'  => ['label' => t('Observe', 'Observar'),
+                   'help'  => t('looks and plans, changes nothing; everything dangerous refused.', 'mira y planifica, no cambia nada; todo lo peligroso, rechazado.'),
+                   'answers' => ['mode' => 'plan', 'disks' => 'deny', 'delete' => 'deny', 'docker' => 'deny', 'power' => 'deny', 'system' => 'deny', 'bypass' => 'disable']],
+    'locked'   => ['label' => t('Locked down', 'Bloqueado'),
+                   'help'  => t('edits files freely, asks before commands, and everything dangerous is refused, deleting included.', 'edita archivos sin preguntar, pregunta antes de las órdenes y rechaza todo lo peligroso, borrar incluido.'),
+                   'answers' => ['mode' => 'acceptEdits', 'disks' => 'deny', 'delete' => 'deny', 'docker' => 'deny', 'power' => 'deny', 'system' => 'deny', 'bypass' => 'disable']],
+    'balanced' => ['label' => t('Balanced', 'Equilibrado'),
+                   'help'  => t('asks before each command; disks refused; deleting, Docker, power and the system always asked.', 'pregunta antes de cada orden; discos, rechazado; borrar, Docker, apagar y el sistema, siempre preguntado.'),
+                   'answers' => ['mode' => 'default', 'disks' => 'deny', 'delete' => 'ask', 'docker' => 'ask', 'power' => 'ask', 'system' => 'ask', 'bypass' => 'disable']],
+    'open'     => ['label' => t('Open', 'Abierto'),
+                   'help'  => t('runs freely; only disks and power are still asked.', 'ejecuta sin preguntar; solo se siguen preguntando los discos y apagar.'),
+                   'answers' => ['mode' => 'free', 'disks' => 'ask', 'delete' => 'none', 'docker' => 'none', 'power' => 'ask', 'system' => 'none', 'bypass' => 'allow']],
 ];
 ?>
 
@@ -9864,8 +9987,15 @@ $ccp_modes = [
     'default'           => t('default -- ask for anything not allowed above', 'default -- preguntar todo lo que no esté permitido arriba'),
     'acceptEdits'       => t('acceptEdits -- accept file edits without asking', 'acceptEdits -- aceptar ediciones de archivos sin preguntar'),
     'plan'              => t('plan -- plan only, change nothing', 'plan -- sólo planificar, no cambiar nada'),
+    'auto'              => t('auto -- no routine questions; a background check reviews commands first', 'auto -- sin preguntas rutinarias; una revisión de fondo comprueba los comandos antes'),
+    'dontAsk'           => t('dontAsk -- refuses whatever it would have asked about', 'dontAsk -- rechaza lo que habría preguntado'),
     'bypassPermissions' => t('bypassPermissions -- never ask about anything', 'bypassPermissions -- no preguntar nunca nada'),
 ];
+// A mode this list does not know is still shown as it is, so saving the rules
+// cannot quietly replace it with "Not set".
+if (!isset($ccp_modes[$ccp_f['rules']['defaultMode']])) {
+    $ccp_modes[$ccp_f['rules']['defaultMode']] = $ccp_f['rules']['defaultMode'] . ' -- ' . t('as found in the file', 'tal como está en el archivo');
+}
 foreach ($ccp_modes as $ccp_mv => $ccp_ml): ?>
 <option value="<?=htmlspecialchars($ccp_mv)?>"<?=$ccp_f['rules']['defaultMode'] === $ccp_mv ? ' selected' : ''?>><?=htmlspecialchars($ccp_ml)?></option>
 <?php endforeach; ?>
@@ -9876,6 +10006,17 @@ foreach ($ccp_modes as $ccp_mv => $ccp_ml): ?>
     'Qué pasa cuando nada de lo de arriba encaja. Déjalo sin definir salvo que tengas un motivo: bypassPermissions significa que una sesión en esta carpeta hace lo que decida hacer, sin preguntar nada y sin nada que la detenga.'
 )?></blockquote>
 <dl>
+<dt><?=t('No-questions mode', 'Modo sin preguntas')?></dt>
+<dd><select id="ccp-<?=str_replace(':', '-', htmlspecialchars($ccp_f['key']))?>-disableBypassPermissionsMode">
+<option value=""<?=$ccp_f['rules']['disableBypassPermissionsMode'] === '' ? ' selected' : ''?>><?=t('Not set (can be switched on)', 'Sin definir (se puede activar)')?></option>
+<option value="disable"<?=$ccp_f['rules']['disableBypassPermissionsMode'] === 'disable' ? ' selected' : ''?>><?=t('Forbidden here (disableBypassPermissionsMode)', 'Prohibido aquí (disableBypassPermissionsMode)')?></option>
+</select></dd>
+</dl>
+<blockquote class="inline_help"><?=t(
+    'Forbidden means no session governed by this file can be put into bypassPermissions, or started with --dangerously-skip-permissions, whatever the default answer above says. The Configuration tab has the same switch for a whole account, in settings.json.',
+    'Prohibido significa que ninguna sesión a la que mande este archivo puede pasar a bypassPermissions, ni arrancar con --dangerously-skip-permissions, diga lo que diga la respuesta por defecto de arriba. La pestaña de configuración tiene el mismo interruptor para una cuenta entera, en settings.json.'
+)?></blockquote>
+<dl>
 <dt>&nbsp;</dt>
 <dd><span class="buttons-spaced"><input type="button" value="<?=t('Save rules', 'Guardar reglas')?>" onclick="ccpSave('<?=htmlspecialchars($ccp_f['key'])?>')">
 <span id="ccp-msg-<?=htmlspecialchars($ccp_f['key'])?>"></span></span></dd>
@@ -9883,6 +10024,51 @@ foreach ($ccp_modes as $ccp_mv => $ccp_ml): ?>
 <blockquote class="inline_help"><?=t('Saves only the rules on this tab. Anything else in the file is read, kept and written back unchanged.',
                                      'Guarda sólo las reglas de esta pestaña. Lo demás que haya en el archivo se lee, se conserva y se vuelve a escribir igual.')?></blockquote>
 </div>
+
+<?php if ($ccp_f['valid']): $ccp_k = str_replace(':', '-', htmlspecialchars($ccp_f['key'])); ?>
+<div class="claude-box ccp-wizard" data-key="<?=htmlspecialchars($ccp_f['key'])?>">
+<h4><?=t('Starting point', 'Punto de partida')?></h4>
+<p><?=t(
+    'Claude Code runs as root on this server. Out of the box nothing is refused outright: the only thing between a session and a formatted disk is one permission prompt. Answer the questions below, or pick a preset to answer them for you, and the rules are filled into the boxes above.',
+    'En este servidor Claude Code corre como root. De serie no se rechaza nada de antemano: entre una sesión y un disco formateado solo hay una petición de permiso. Contesta las preguntas de abajo, o elige un preajuste que las conteste por ti, y las reglas se rellenan en las casillas de arriba.'
+)?></p>
+<dl>
+<dt><?=t('Presets:', 'Preajustes:')?></dt>
+<dd><span class="buttons-spaced">
+<?php foreach ($ccp_presets as $ccp_pk => $ccp_p): ?>
+<input type="button" value="<?=htmlspecialchars($ccp_p['label'])?>" title="<?=htmlspecialchars($ccp_p['help'])?>" onclick="ccpPreset('<?=htmlspecialchars($ccp_f['key'])?>', '<?=$ccp_pk?>')">
+<?php endforeach; ?>
+</span></dd>
+</dl>
+<blockquote class="inline_help"><?php foreach ($ccp_presets as $ccp_p): ?><b><?=htmlspecialchars($ccp_p['label'])?>:</b> <?=htmlspecialchars($ccp_p['help'])?><br><?php endforeach; ?></blockquote>
+<?php foreach ($ccp_questions as $ccp_q): ?>
+<dl>
+<dt><?=htmlspecialchars($ccp_q['label'])?></dt>
+<dd><select id="ccpw-<?=$ccp_k?>-<?=$ccp_q['key']?>" data-q="<?=$ccp_q['key']?>">
+<option value=""><?=t('Leave as it is', 'Dejar como está')?></option>
+<?php foreach ($ccp_q['options'] as $ccp_ov => $ccp_ol): ?>
+<option value="<?=$ccp_ov?>"><?=htmlspecialchars($ccp_ol)?></option>
+<?php endforeach; ?>
+</select></dd>
+</dl>
+<blockquote class="inline_help"><?=htmlspecialchars($ccp_q['help'])?></blockquote>
+<?php endforeach; ?>
+<dl>
+<dt>&nbsp;</dt>
+<dd><span class="buttons-spaced"><input type="button" value="<?=t('Fill in the boxes above', 'Rellenar las casillas de arriba')?>" onclick="ccpWizard('<?=htmlspecialchars($ccp_f['key'])?>')">
+<input type="button" id="ccpw-<?=$ccp_k?>-undo" value="<?=t('Undo', 'Deshacer')?>" style="display:none;" onclick="ccpWizardUndo('<?=htmlspecialchars($ccp_f['key'])?>')"></span></dd>
+</dl>
+<div id="ccpw-<?=$ccp_k?>-out"></div>
+<blockquote class="inline_help"><?=t(
+    'Nothing is saved here. The boxes above change, a list of every rule added or removed appears, and the file is only written when you press Save rules. A question left on "Leave as it is" touches nothing, and rules you wrote yourself are never removed: only the ones in this list are added, moved or taken out.',
+    'Aquí no se guarda nada. Cambian las casillas de arriba, aparece la lista de cada regla añadida o quitada, y el archivo solo se escribe cuando pulsas Guardar reglas. Una pregunta en «Dejar como está» no toca nada, y las reglas que escribiste tú nunca se quitan: solo se añaden, se mueven o se quitan las de esta lista.'
+)?></blockquote>
+<blockquote class="inline_help"><?=t(
+    'A seatbelt, not a wall. A rule matches the command a session asks to run, so it stops the obvious and the accidental. It does not make root safe: a script, another tool (find -delete, a one-line Python) or the same command written another way can still do the same damage. Keep backups.',
+    'Un cinturón, no un muro. Una regla encaja con la orden que una sesión pide ejecutar, así que para lo evidente y lo accidental. No hace seguro a root: un script, otra herramienta (find -delete, una línea de Python) o la misma orden escrita de otra forma pueden hacer el mismo daño. Ten copias de seguridad.'
+)?></blockquote>
+</div>
+<?php endif; ?>
 <?php endif; ?>
 
 <div class="claude-box">
@@ -9948,6 +10134,8 @@ foreach ($ccp_modes as $ccp_mv => $ccp_ml): ?>
     }
     var mode = el('ccp-' + idOf(key) + '-defaultMode');
     if (mode) rules.defaultMode = mode.value;
+    var bypass = el('ccp-' + idOf(key) + '-disableBypassPermissionsMode');
+    if (bypass) rules.disableBypassPermissionsMode = bypass.value;
     var body = new URLSearchParams();
     body.set('action', 'save');
     body.set('target', key);
@@ -9968,6 +10156,114 @@ foreach ($ccp_modes as $ccp_mv => $ccp_ml): ?>
     body.set('target', key);
     body.set('raw', el('ccp-raw-' + key).value);
     post(body, node, function () { setTimeout(function () { location.reload(); }, 900); });
+  };
+
+  // ---- Starting point: questions and presets that fill the boxes above ----
+  var GROUPS  = <?=json_encode($ccp_groups)?>;
+  var PRESETS = <?=json_encode(array_map(function ($p) { return $p['answers']; }, $ccp_presets))?>;
+  var QKEYS   = <?=json_encode(array_column($ccp_questions, 'key'))?>;
+  var W = <?=json_encode([
+      'added'    => t('added to', 'añadida a'),
+      'removed'  => t('removed from', 'quitada de'),
+      'mode'     => t('Default answer', 'Respuesta por defecto'),
+      'bypass'   => t('No-questions mode', 'Modo sin preguntas'),
+      'nothing'  => t('Nothing to change: the boxes already say this.', 'Nada que cambiar: las casillas ya dicen esto.'),
+      'unsaved'  => t('Not saved yet. Check the boxes above and press Save rules.', 'Aún sin guardar. Revisa las casillas de arriba y pulsa Guardar reglas.'),
+      'undone'   => t('Boxes put back as they were.', 'Casillas devueltas a como estaban.'),
+      'lists'    => ['allow' => t('Allowed without asking', 'Permitido sin preguntar'),
+                     'ask'   => t('Always ask', 'Preguntar siempre'),
+                     'deny'  => t('Never allowed', 'Nunca permitido')],
+  ])?>;
+  var RULE_LISTS = ['allow', 'ask', 'deny'];
+  var undo = {};
+
+  function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+  function boxOf(key, list) { return el('ccp-' + idOf(key) + '-' + list); }
+  function optText(sel, v) {
+    for (var j = 0; j < sel.options.length; j++) if (sel.options[j].value === v) return sel.options[j].text;
+    return v;
+  }
+
+  window.ccpPreset = function (key, preset) {
+    var a = PRESETS[preset] || {};
+    QKEYS.forEach(function (q) {
+      var s = el('ccpw-' + idOf(key) + '-' + q);
+      if (s) s.value = a[q] || '';
+    });
+  };
+
+  window.ccpWizard = function (key) {
+    var k = idOf(key), lists = {}, before = {}, removed = [], added = [];
+    RULE_LISTS.forEach(function (l) {
+      var b = boxOf(key, l);
+      before[l] = b ? b.value : '';
+      lists[l] = b ? b.value.split('\n').map(function (s) { return s.trim(); }).filter(function (s) { return s !== ''; }) : [];
+    });
+    var modeSel = el('ccp-' + k + '-defaultMode'), bypSel = el('ccp-' + k + '-disableBypassPermissionsMode');
+    before.mode = modeSel ? modeSel.value : '';
+    before.bypass = bypSel ? bypSel.value : '';
+
+    // Put a rule in exactly one list (or none): out of every other list, into
+    // the one asked for if it is not there already.
+    function place(rule, target) {
+      RULE_LISTS.forEach(function (l) {
+        if (l === target) return;
+        var i = lists[l].indexOf(rule);
+        if (i >= 0) { lists[l].splice(i, 1); removed.push([l, rule]); }
+      });
+      if (target && lists[target].indexOf(rule) < 0) { lists[target].push(rule); added.push([target, rule]); }
+    }
+
+    var ans = {};
+    QKEYS.forEach(function (q) { var s = el('ccpw-' + k + '-' + q); ans[q] = s ? s.value : ''; });
+
+    Object.keys(GROUPS).forEach(function (g) {
+      var a = ans[g];
+      if (a !== 'deny' && a !== 'ask' && a !== 'none') return;   // "Leave as it is"
+      GROUPS[g].forEach(function (rule) { place(rule, a === 'none' ? '' : a); });
+    });
+    if (ans.mode) {
+      // "Freely" is Bash allowed plus edits accepted; every other answer takes
+      // the blanket Bash rule back out, or it would quietly outrank the mode.
+      if (ans.mode === 'free') place('Bash', 'allow');
+      else if (lists.allow.indexOf('Bash') >= 0) place('Bash', '');
+      if (modeSel) modeSel.value = ans.mode === 'free' ? 'acceptEdits' : ans.mode;
+    }
+    if (ans.bypass && bypSel) bypSel.value = ans.bypass === 'disable' ? 'disable' : '';
+
+    RULE_LISTS.forEach(function (l) { var b = boxOf(key, l); if (b) b.value = lists[l].join('\n'); });
+
+    // The report: a rule taken out of one list and put in another is one move.
+    var html = [], to = {};
+    if (modeSel && modeSel.value !== before.mode) html.push(esc(W.mode + ': ' + optText(modeSel, before.mode) + ' → ' + optText(modeSel, modeSel.value)));
+    if (bypSel && bypSel.value !== before.bypass) html.push(esc(W.bypass + ': ' + optText(bypSel, before.bypass) + ' → ' + optText(bypSel, bypSel.value)));
+    added.forEach(function (e) { to[e[1]] = e[0]; });
+    removed.forEach(function (e) {
+      if (to[e[1]] && to[e[1]] !== 'shown') { html.push('<code>' + esc(e[1]) + '</code>: ' + esc(W.lists[e[0]] + ' → ' + W.lists[to[e[1]]])); to[e[1]] = 'shown'; }
+      else html.push('− <code>' + esc(e[1]) + '</code> ' + esc(W.removed + ' ' + W.lists[e[0]]));
+    });
+    added.forEach(function (e) {
+      if (to[e[1]] !== 'shown') html.push('+ <code>' + esc(e[1]) + '</code> ' + esc(W.added + ' ' + W.lists[e[0]]));
+    });
+
+    var out = el('ccpw-' + k + '-out');
+    if (!html.length) { out.innerHTML = '<p>' + esc(W.nothing) + '</p>'; return; }
+    // Undo goes back to the boxes as they were before the first fill, however
+    // many times the questions are changed and filled in again.
+    if (!undo[key]) undo[key] = before;
+    el('ccpw-' + k + '-undo').style.display = '';
+    out.innerHTML = '<div class="claude-notice"><b>' + esc(W.unsaved) + '</b><br>' + html.join('<br>') + '</div>';
+  };
+
+  window.ccpWizardUndo = function (key) {
+    var k = idOf(key), b = undo[key];
+    if (!b) return;
+    RULE_LISTS.forEach(function (l) { var x = boxOf(key, l); if (x) x.value = b[l]; });
+    var m = el('ccp-' + k + '-defaultMode'); if (m) m.value = b.mode;
+    var p = el('ccp-' + k + '-disableBypassPermissionsMode'); if (p) p.value = b.bypass;
+    delete undo[key];
+    el('ccpw-' + k + '-undo').style.display = 'none';
+    el('ccpw-' + k + '-out').innerHTML = '<p>' + esc(W.undone) + '</p>';
   };
 })();
 </script>
@@ -10409,7 +10705,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.11.25.1 has been installed!"
+    echo " Claude Code plugin v2026.11.25.2 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"

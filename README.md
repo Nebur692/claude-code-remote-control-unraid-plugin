@@ -28,6 +28,16 @@ claim of authorship over the base plugin.
 
 ### ✨ What's new
 
+- **A safe starting point on the Permissions tab** (thanks to hernandito, #7). Claude Code runs as
+  root on Unraid, and out of the box nothing is refused outright. A few plain questions — formatting
+  disks, deleting files, removing Docker containers and volumes, reboot and shutdown, packages and
+  users, the no-questions mode — each fill in a group of rules, and four presets (*Observe*,
+  *Locked down*, *Balanced*, *Open*) answer them for you. Nothing is saved until you press
+  *Save rules*, every change is listed first, and rules you wrote yourself are never removed.
+- **Fixed sessions as cards, and trusting a folder in one click** (thanks to hernandito, #6). Each
+  fixed session on the Remote Control tab is its own card. One whose folder Claude Code has not been
+  told to trust says so and offers *Trust folder*: the same approval as running `claude` there once,
+  without opening a terminal. Nothing is trusted automatically.
 - **Remote Control can come back by itself after a reboot.** A new setting per account, *After a
   reboot*, off by default: with *Come back as it was*, whatever of that account was running when the
   server went down (its main session and its fixed sessions) starts again once the array is up. A
@@ -284,6 +294,17 @@ claro al autor original, sin reclamar autoría del plugin base.
 
 ### ✨ Novedades
 
+- **Un punto de partida seguro en la pestaña Permisos** (gracias a hernandito, #7). En Unraid Claude
+  Code corre como root, y de serie no se rechaza nada de antemano. Unas pocas preguntas sencillas
+  (formatear discos, borrar archivos, quitar contenedores y volúmenes de Docker, reiniciar y apagar,
+  paquetes y usuarios, el modo sin preguntas) rellenan cada una un grupo de reglas, y cuatro
+  preajustes (*Observar*, *Bloqueado*, *Equilibrado*, *Abierto*) las contestan por ti. No se guarda
+  nada hasta que pulsas *Guardar reglas*, antes se lista cada cambio y las reglas que escribiste tú
+  nunca se quitan.
+- **Sesiones fijas en tarjetas, y confiar en una carpeta con un clic** (gracias a hernandito, #6).
+  Cada sesión fija de la pestaña Control Remoto es una tarjeta. La que tiene una carpeta en la que
+  Claude Code aún no confía lo dice y ofrece *Confiar en la carpeta*: la misma aprobación que ejecutar
+  `claude` una vez ahí, sin abrir una terminal. Nada se confía automáticamente.
 - **El Control Remoto puede volver solo tras un reinicio.** Un ajuste nuevo por cuenta, *Tras un
   reinicio*, apagado por defecto: con *Volver como estaba*, lo que de esa cuenta estuviera corriendo
   cuando se apagó el servidor (su sesión principal y sus sesiones fijas) arranca de nuevo en cuanto el
