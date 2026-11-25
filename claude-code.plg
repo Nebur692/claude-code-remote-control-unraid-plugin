@@ -1,12 +1,20 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.11.25"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.11.25.1"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.11.25.1
+- Checked against Claude Code 2.1.332 (2.1.323 to 2.1.332): every setting on
+  the Config tab is still there and means the same, and none of the new ones
+  belongs on it (they are for managed settings, self-hosted runners or
+  internal use). No new models for the model list.
+- Remote Control tab: the server mode help says how sessions get their names.
+  From Claude Code 2.1.329, a title set with /rename inside a session of
+  "claude remote-control" also shows on claude.ai and in the app.
 ###2026.11.25
 - Remote Control can come back by itself after a reboot (issue #3). New
   setting per account on the Remote Control tab, "After a reboot", off by
@@ -7888,7 +7896,7 @@ function cc_sync_value($v) {
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeRemote.page">
-<SHA256>9d796896f54d6ee8ee3d158a7861d34ad9781916b472722a0aa73f977f61ee85</SHA256>
+<SHA256>c80d8d9b3d52f52b7afa981b446953dcb1e097b881a99e1aed24ae7a07b52c6b</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:3"
@@ -8045,8 +8053,8 @@ Tag="desktop"
 <input type="submit" value="<?=t('Save', 'Guardar')?>"></span></dd>
 </dl>
 <blockquote class="inline_help"><?=t(
-    'Turns this account\'s main session into a server that holds several sessions at once (the number is the most it will take; empty is Claude Code\'s own limit, 32). Stop and Start it after changing this. Turning it off goes back to resuming one session by its id.',
-    'Convierte la sesión principal de esta cuenta en un servidor que sostiene varias sesiones a la vez (el número es el máximo que admite; vacío es el límite del propio Claude Code, 32). Detenlo e inícialo después de cambiarlo. Al quitarlo se vuelve a retomar una sola sesión por su id.'
+    'Turns this account\'s main session into a server that holds several sessions at once (the number is the most it will take; empty is Claude Code\'s own limit, 32). Stop and Start it after changing this. Turning it off goes back to resuming one session by its id. Each session is named on claude.ai or in the app, or with /rename inside the session: from Claude Code 2.1.329 that title shows on claude.ai and in the app too.',
+    'Convierte la sesión principal de esta cuenta en un servidor que sostiene varias sesiones a la vez (el número es el máximo que admite; vacío es el límite del propio Claude Code, 32). Detenlo e inícialo después de cambiarlo. Al quitarlo se vuelve a retomar una sola sesión por su id. Cada sesión se nombra en claude.ai o en la app, o con /rename dentro de la sesión: desde Claude Code 2.1.329 ese título también aparece en claude.ai y en la app.'
 )?></blockquote>
 </form>
 
@@ -10143,7 +10151,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.11.25 has been installed!"
+    echo " Claude Code plugin v2026.11.25.1 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
