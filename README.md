@@ -28,6 +28,12 @@ claim of authorship over the base plugin.
 
 ### ✨ What's new
 
+- **Remote Control can come back by itself after a reboot.** A new setting per account, *After a
+  reboot*, off by default: with *Come back as it was*, whatever of that account was running when the
+  server went down (its main session and its fixed sessions) starts again once the array is up. A
+  Stop pressed before the reboot is respected.
+- **The Remote Control log no longer fills `/var/log`.** Past 4 MB it is cut down to its last 1 MB,
+  so the syslog keeps working however long a bridge stays connected.
 - **Several Remote Control sessions at once, from the plugin** — no terminal needed. Each account can
   keep **fixed sessions** next to its main one: a name (its title on claude.ai), a folder, and a choice
   between resuming the same session on every start or opening a new one each time. They survive
@@ -278,6 +284,12 @@ claro al autor original, sin reclamar autoría del plugin base.
 
 ### ✨ Novedades
 
+- **El Control Remoto puede volver solo tras un reinicio.** Un ajuste nuevo por cuenta, *Tras un
+  reinicio*, apagado por defecto: con *Volver como estaba*, lo que de esa cuenta estuviera corriendo
+  cuando se apagó el servidor (su sesión principal y sus sesiones fijas) arranca de nuevo en cuanto el
+  array está arriba. Lo que detuviste antes del reinicio sigue detenido.
+- **El registro del Control Remoto ya no llena `/var/log`.** Al pasar de 4 MB se recorta a su último
+  1 MB, así que el syslog sigue funcionando por mucho que un puente esté conectado.
 - **Varias sesiones de Control Remoto a la vez, desde el plugin**, sin terminal. Cada cuenta puede
   tener **sesiones fijas** junto a la principal: un nombre (su título en claude.ai), una carpeta y la
   opción de retomar siempre la misma sesión o abrir una nueva cada vez que se inicia. Sobreviven a

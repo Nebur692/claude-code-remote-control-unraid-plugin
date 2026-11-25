@@ -1,12 +1,24 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="claude-code" author="Nebur692" version="2026.11.14"
+<PLUGIN name="claude-code" author="Nebur692" version="2026.11.25"
         launch="Settings/claude-code"
         pluginURL="https://raw.githubusercontent.com/Nebur692/claude-code-remote-control-unraid-plugin/main/claude-code.plg"
         supportURL="https://github.com/Nebur692/claude-code-remote-control-unraid-plugin/issues"
         min="6.12.0">
 
 <CHANGES>
+###2026.11.25
+- Remote Control can come back by itself after a reboot (issue #3). New
+  setting per account on the Remote Control tab, "After a reboot", off by
+  default: with "Come back as it was", whatever of that account was running
+  when the server went down starts again once the array is up. A Stop pressed
+  before the reboot is respected. Until now a reboot always left it stopped,
+  because the flag that says "running" only lived in RAM.
+- The Remote Control log no longer fills /var/log. Claude Code redraws its
+  status screen into it, about once a second in server mode, so it could reach
+  the 128 MB of /var/log within days and silence the syslog. Past 4 MB it is
+  now cut down to its last 1 MB. The supervisor also stops keeping a bridge's
+  whole output in memory, only its last 1 MB.
 ###2026.11.14
 - Several Remote Control sessions at once, from the Remote Control tab, with
   no terminal needed. Fixed sessions: each account can keep extra sessions
@@ -861,7 +873,7 @@ cc_path_mounted() {
 
 <!-- Install/setup script -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/install-claude.sh" Mode="0755">
-<SHA256>1af68bf7b8298c6d222694a91ba3b4a85bb3a388b1b0578e37fbae951670e24a</SHA256>
+<SHA256>d1e6faa4445146eb7771110f2649a0af62e6a35dd514cbff23c089b81f39e31e</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1575,9 +1587,10 @@ fi
 # inherit the descriptor and hold it for as long as it runs.
 exec 9>&-
 
-# At boot, Remote Control is never auto-started (see README), so this is
-# always a no-op here -- restart_running_remote_control finds nothing running
-# and prints nothing. It only ever does something on a manual Reinstall that
+# At boot nothing is running yet: a bridge set to come back after a reboot is
+# started later, by the watchdog once the array is up -- so this is always a
+# no-op here, restart_running_remote_control finds nothing running and prints
+# nothing. It only ever does something on a manual Reinstall that
 # found a newer binary already cached, with a bridge live under the old one.
 if [ "$binary_changed" = "yes" ] && command -v claude &> /dev/null; then
     echo
@@ -1950,8 +1963,8 @@ prune_versions
 </FILE>
 
 <!-- Remote Control: a supervised background "claude remote-control" process,
-     started/stopped only from the Settings page (never at boot, see
-     README). It always resumes the same session in its working directory
+     started/stopped from the Settings page (and, for an account set to come
+     back after a reboot, started again by the watchdog after one). It always resumes the same session in its working directory
      via the continue flag, falling back to a fresh session the first time
      (before any session exists, continue errors with "No recent session
      found"). Auto-respawns on transient exits (e.g. the ~10min
@@ -1974,7 +1987,7 @@ prune_versions
      taken over as "most recent"; see the connect subcommand and the
      Settings page's Session ID field. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/remote-control.sh" Mode="0755">
-<SHA256>bc903d58e9c6fbc036ac8ed5bf277b5ce467586afdaf4fa57cee67f34a91a08c</SHA256>
+<SHA256>24d7c9348f19da6d178f3efd290b27df166f8db06f032382c53190d0513a716b</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -1984,6 +1997,20 @@ HISTORY_FILE="/boot/config/plugins/claude-code/session-history.log"
 PROFILES_SCRIPT="/usr/local/emhttp/plugins/claude-code/scripts/profiles.sh"
 ARCHIVED_FAIL_THRESHOLD=3
 SESSION_POLL_SECONDS=3
+# Which bridges were running, kept on the flash: the enabled flags in /var/run
+# are gone after a reboot. Read back once per boot, and only for an account set
+# to come back after a reboot (RC_AUTOSTART_<account>).
+RC_PERSIST_DIR="/boot/config/plugins/claude-code/rc-enabled"
+RC_RESTORED_FLAG="/var/run/claude-remote-control.restored"
+# A bridge's log sits in /var/log, a 128 MB RAM disk shared with the syslog.
+# The CLI redraws its status screen into it, about once a second in server
+# mode, so left alone it fills that disk within days and the syslog goes quiet.
+# Past the limit it is cut down to its most recent part.
+RC_LOG_MAX_BYTES=4194304
+RC_LOG_KEEP_BYTES=1048576
+# How much of one attempt's output is kept in memory to look for error
+# messages, which come at the end. A bridge can stay connected for weeks.
+RC_OUTPUT_KEEP_BYTES=1048576
 
 # cc_path_mounted. A bridge keeps its sign-in, memory and session state in
 # ~/.claude, which is a link into appdata: started while the array is down it
@@ -2047,6 +2074,7 @@ set_profile() {
     LOGFILE="/var/log/claude-code-remote-control$SUFFIX.log"
     PIDFILE="/var/run/claude-remote-control$SUFFIX.pid"
     ENABLED_FLAG="/var/run/claude-remote-control$SUFFIX.enabled"
+    PERSIST_FLAG="$RC_PERSIST_DIR/claude-remote-control$SUFFIX.enabled"
     PINFILE="/var/run/claude-remote-control$SUFFIX.pin"
     # Set by "new": tells the supervisor to open a brand-new session on its
     # next turn instead of resuming anything.
@@ -2335,7 +2363,27 @@ watch_for_sessions() {
         sleep "$SESSION_POLL_SECONDS"
         sid=$(tail -c "+$((offset + 1))" "$LOGFILE" 2>/dev/null | extract_sid)
         [ -n "$sid" ] && record_sid "$sid" "$rc_dir"
+        # Ids already read; from here on only what comes after the cut counts.
+        trim_log && offset=$(stat -c %s "$LOGFILE" 2>/dev/null || echo 0)
     done
+}
+
+# Cuts this bridge's log down to its most recent part once it passes the limit.
+# In place, not with a new file: the running "tee -a" keeps writing to the one
+# it opened, and in append mode its next line lands at the new end. Returns 0
+# only when it cut something.
+trim_log() {
+    local size tmp
+    size=$(stat -c %s "$LOGFILE" 2>/dev/null || echo 0)
+    [ "$size" -gt "$RC_LOG_MAX_BYTES" ] || return 1
+    tmp=$(mktemp /var/run/claude-remote-control-log.XXXXXX) || return 1
+    tail -c "$RC_LOG_KEEP_BYTES" "$LOGFILE" > "$tmp" 2>/dev/null
+    {
+        echo "=== Log cut to its last $((RC_LOG_KEEP_BYTES / 1024)) KB: it had reached $((size / 1024)) KB. $(date) ==="
+        cat "$tmp"
+    } > "$LOGFILE"
+    rm -f "$tmp"
+    return 0
 }
 
 # Runs one "claude remote-control" attempt with the watcher above attached,
@@ -2355,9 +2403,9 @@ run_claude() {
     watch_for_sessions "$offset" "$rc_dir" "$self" > /dev/null 2>&1 &
     watcher=$!
     if [ -n "$PROFILE_ENV" ]; then
-        output=$(env "$PROFILE_ENV" claude remote-control "$@" --remote-control-session-name-prefix "$NAME_PREFIX" 2>&1 < /dev/null | tee -a "$LOGFILE"; exit "${PIPESTATUS[0]}")
+        output=$(env "$PROFILE_ENV" claude remote-control "$@" --remote-control-session-name-prefix "$NAME_PREFIX" 2>&1 < /dev/null | tee -a "$LOGFILE" | tail -c "$RC_OUTPUT_KEEP_BYTES"; exit "${PIPESTATUS[0]}")
     else
-        output=$(claude remote-control "$@" --remote-control-session-name-prefix "$NAME_PREFIX" 2>&1 < /dev/null | tee -a "$LOGFILE"; exit "${PIPESTATUS[0]}")
+        output=$(claude remote-control "$@" --remote-control-session-name-prefix "$NAME_PREFIX" 2>&1 < /dev/null | tee -a "$LOGFILE" | tail -c "$RC_OUTPUT_KEEP_BYTES"; exit "${PIPESTATUS[0]}")
     fi
     echo "$?" > "$EXITFILE"
     kill "$watcher" 2>/dev/null
@@ -2615,7 +2663,7 @@ do_run() {
         if printf '%s\n' "$output" | grep -q "Workspace not trusted"; then
             echo "=== Remote Control cannot start in $rc_dir: Claude Code has not been told to trust this folder. Open a terminal, run claude in $rc_dir once and accept the question about trusting it, then start Remote Control again. If $rc_dir is your home directory, pick another folder: trust is never saved for that one. $(date) ===" >> "$LOGFILE"
             cc_log "Remote Control for $WHO stopped: $rc_dir is not a trusted folder (run claude there once, then start it again)"
-            rm -f "$ENABLED_FLAG"
+            disable_flag
             break
         fi
 
@@ -2627,7 +2675,7 @@ do_run() {
         if printf '%s\n' "$output" | grep -qa "working folder not found"; then
             echo "=== Remote Control cannot start in $rc_dir: Claude Code cannot find or enter that folder. Check that the share it is on is mounted (the array started), then start Remote Control again. $(date) ===" >> "$LOGFILE"
             cc_log "Remote Control for $WHO stopped: its folder $rc_dir could not be found (is its share mounted?)"
-            rm -f "$ENABLED_FLAG"
+            disable_flag
             break
         fi
 
@@ -2638,7 +2686,7 @@ do_run() {
         if printf '%s\n' "$output" | grep -qa "already served by a terminal"; then
             echo "=== Remote Control cannot start in $rc_dir: another \"claude remote-control\" is already serving that folder on this server, and Claude Code allows only one per folder. Stop it, or give this session a folder of its own, then start it again. $(date) ===" >> "$LOGFILE"
             cc_log "Remote Control for $WHO stopped: $rc_dir is already served by another claude remote-control"
-            rm -f "$ENABLED_FLAG"
+            disable_flag
             break
         fi
 
@@ -2742,8 +2790,24 @@ cc_log() {
     logger -t claude-code "$*"
 }
 
+# Asked to run / asked to stop. The flag in /var/run is what the supervisor
+# and the watchdog go by; the copy on the flash only says, after a reboot,
+# what was running before it. Written only when it changes: it is a USB stick.
+enable_flag() {
+    touch "$ENABLED_FLAG"
+    if [ ! -f "$PERSIST_FLAG" ]; then
+        mkdir -p "$RC_PERSIST_DIR" 2>/dev/null && touch "$PERSIST_FLAG" 2>/dev/null
+    fi
+    return 0
+}
+
+disable_flag() {
+    rm -f "$ENABLED_FLAG" "$PERSIST_FLAG"
+}
+
 stop_running() {
-    rm -f "$ENABLED_FLAG" "$EXITFILE"
+    disable_flag
+    rm -f "$EXITFILE"
     if [ -f "$PIDFILE" ]; then
         kill "$(cat "$PIDFILE")" 2>/dev/null
         rm -f "$PIDFILE"
@@ -2838,7 +2902,7 @@ array_stop_one() {
     echo "=== The array is stopping: stopping Remote Control for $WHO so the disks can be unmounted. It starts again by itself with the array. $(date) ===" >> "$LOGFILE"
     cc_log "Array stopping: stopping Remote Control for $WHO (it comes back with the array)"
     stop_running
-    touch "$ENABLED_FLAG"
+    enable_flag
     # MCP servers and the like that outlived the bridge, now orphans.
     for k in $kids; do kill "$k" 2>/dev/null; done
     sleep 2
@@ -2904,7 +2968,7 @@ start_instance() {
         fresh) touch "$FRESHFILE" ;;
         pin)   echo "$2" > "$PINFILE" ;;
     esac
-    touch "$ENABLED_FLAG"
+    enable_flag
     say_if_waiting_for_array
     spawn_supervisor
 }
@@ -3172,8 +3236,30 @@ case "$CMD" in
         # running and is not; anything stopped on purpose has no enabled flag
         # and is left alone. A pending "connect" or "new session" request is
         # left where it is, so the supervisor still honours it.
+        #
+        # Its first run after a boot also brings back what was running before
+        # the reboot, for the accounts set to come back (RC_AUTOSTART_<account>,
+        # off unless turned on), from the copy of the flags kept on the flash.
+        # A Stop pressed before the reboot removed that copy, so it stays
+        # stopped. For any other account the copy is dropped: it is stale.
+        first_pass=""
+        if [ ! -f "$RC_RESTORED_FLAG" ]; then
+            first_pass="yes"
+            touch "$RC_RESTORED_FLAG"
+        fi
         for i in $(all_instances); do
             select_instance "$i"
+            if [ -n "$first_pass" ] && [ ! -f "$ENABLED_FLAG" ] && [ -f "$PERSIST_FLAG" ]; then
+                if [ "$(get_cfg_var "RC_AUTOSTART_$PROFILE")" = "yes" ]; then
+                    touch "$ENABLED_FLAG"
+                    echo "=== The server restarted while Remote Control for $WHO was running, and this account is set to come back after a reboot: starting it again. $(date) ===" >> "$LOGFILE"
+                    cc_log "Remote Control for $WHO was running before the reboot; bringing it back (set to come back after a reboot)"
+                else
+                    rm -f "$PERSIST_FLAG"
+                fi
+            fi
+            # Started by a version that kept no copy on the flash.
+            [ -f "$ENABLED_FLAG" ] && [ ! -f "$PERSIST_FLAG" ] && enable_flag
             [ -f "$ENABLED_FLAG" ] || continue
             is_running && continue
             # Array down: nothing to start it on. The flag stays, and the array
@@ -3202,7 +3288,7 @@ esac; exit "$?"
 <!-- Claude account profiles: several logins on one server, either sharing
      the agent memory and settings or fully isolated. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/scripts/profiles.sh" Mode="0755">
-<SHA256>b3260abbb2558ed71970c8472f6914e57d2ae7a6dc96942417aee4107679c8b6</SHA256>
+<SHA256>52cc6c03d71e09cd0a929bb2d62b393dc486cd27b7bb3c09a16a170eae6022c8</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -3689,6 +3775,10 @@ cmd_remove() {
     del_cfg_var "REMOTE_CONTROL_DIR_$slug"
     del_cfg_var "RC_SERVER_$slug"
     del_cfg_var "RC_CAPACITY_$slug"
+    del_cfg_var "RC_AUTOSTART_$slug"
+    # What was running, kept for after a reboot: its bridges are stopped by now.
+    rm -f "/boot/config/plugins/claude-code/rc-enabled/claude-remote-control-$slug.enabled" \
+          /boot/config/plugins/claude-code/rc-enabled/claude-remote-control-"$slug"--*.enabled
     # Its extra Remote Control sessions. Only their settings: their folders,
     # with whatever is in them, stay where they are.
     del_cfg_var "RCS_LIST_$slug"
@@ -5035,7 +5125,7 @@ respond([
 <!-- Shared preamble and styling for the tabs. Every tab requires this once,
      so the state it computes is worked out a single time per request. -->
 <FILE Name="/usr/local/emhttp/plugins/claude-code/include/common.php" Mode="0644">
-<SHA256>fca1bca4b4e1c2a40c887ae2d08fd85b5c31ea3f6f6686d5fd039f345eb53cd3</SHA256>
+<SHA256>fcc0d522b013010df09757f792706c325636c5408a73c7a5377b7c0af7cff2b7</SHA256>
 <INLINE>
 <![CDATA[
 <?php
@@ -5340,6 +5430,7 @@ foreach (($profiles ?: [['slug' => 'default', 'label' => t('Main account', 'Cuen
         'archived'    => $archived,
         'last_sid'    => $cfg[$slug === 'default' ? 'LAST_SESSION_ID' : "LAST_SESSION_ID_$slug"] ?? '',
         'server'      => $rc_server,
+        'autostart'   => ($cfg["RC_AUTOSTART_$slug"] ?? '') === 'yes',
         'capacity'    => preg_match('/^[0-9]+$/', (string)($cfg["RC_CAPACITY_$slug"] ?? '')) ? (string)$cfg["RC_CAPACITY_$slug"] : '',
         'slots'       => $rc_slots,
     ];
@@ -7797,7 +7888,7 @@ function cc_sync_value($v) {
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/claude-code/ClaudeCodeRemote.page">
-<SHA256>afdcb995775d38bac82b685c23ac7387626eb84e77436c71fa9a8a0fa7cac17a</SHA256>
+<SHA256>9d796896f54d6ee8ee3d158a7861d34ad9781916b472722a0aa73f977f61ee85</SHA256>
 <INLINE>
 <![CDATA[
 Menu="claude-code:3"
@@ -7813,8 +7904,8 @@ Tag="desktop"
 )?></p>
 <blockquote class="inline_help">
 <p><?=t(
-    'Each account always resumes the session it was last using, asking for it by its id, so the context carries over between restarts instead of starting over. It only runs when started below -- never launched automatically at boot.',
-    'Cada cuenta retoma siempre la sesión que estaba usando, pidiéndola por su id, así que el contexto se mantiene entre reinicios en vez de empezar de cero. Solo corre cuando lo inicias abajo -- nunca se lanza solo al arrancar Unraid.'
+    'Each account always resumes the session it was last using, asking for it by its id, so the context carries over between restarts instead of starting over. It only runs when started below. After a reboot it stays stopped, unless the account is set to come back after a reboot (further down).',
+    'Cada cuenta retoma siempre la sesión que estaba usando, pidiéndola por su id, así que el contexto se mantiene entre reinicios en vez de empezar de cero. Solo corre cuando lo inicias abajo. Tras reiniciar Unraid se queda parado, salvo que la cuenta esté configurada para volver tras un reinicio (más abajo).'
 )?></p>
 <p><?=t(
     'If the session an account was using can no longer be resumed -- archived on claude.ai, expired, or never attached to a bridge in the first place -- a new one is started in its place automatically, and you can also ask for a brand-new session at any time with the button below.',
@@ -7956,6 +8047,22 @@ Tag="desktop"
 <blockquote class="inline_help"><?=t(
     'Turns this account\'s main session into a server that holds several sessions at once (the number is the most it will take; empty is Claude Code\'s own limit, 32). Stop and Start it after changing this. Turning it off goes back to resuming one session by its id.',
     'Convierte la sesión principal de esta cuenta en un servidor que sostiene varias sesiones a la vez (el número es el máximo que admite; vacío es el límite del propio Claude Code, 32). Detenlo e inícialo después de cambiarlo. Al quitarlo se vuelve a retomar una sola sesión por su id.'
+)?></blockquote>
+</form>
+
+<form method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#file" value="<?=$cfg_file?>">
+<dl>
+<dt><?=t('After a reboot:', 'Tras un reinicio:')?></dt>
+<dd><span class="buttons-spaced"><select name="RC_AUTOSTART_<?=htmlspecialchars($rc['slug'])?>">
+<option value="no"<?=$rc['autostart'] ? '' : ' selected'?>><?=t('Stay stopped', 'Quedarse parado')?></option>
+<option value="yes"<?=$rc['autostart'] ? ' selected' : ''?>><?=t('Come back as it was', 'Volver como estaba')?></option>
+</select>
+<input type="submit" value="<?=t('Save', 'Guardar')?>"></span></dd>
+</dl>
+<blockquote class="inline_help"><?=t(
+    'With "Come back as it was", whatever of this account was running when the server went down -- its main session and its fixed sessions -- starts again by itself once the array is up after the reboot. Anything you stopped before the reboot stays stopped. In server mode the main session comes back at once and the others wake up when you write to them. Off by default: Remote Control then only starts when you press Start.',
+    'Con «Volver como estaba», lo que de esta cuenta estuviera corriendo cuando se apagó el servidor (su sesión principal y sus sesiones fijas) arranca solo en cuanto el array está arriba tras el reinicio. Lo que detuviste antes del reinicio sigue detenido. En modo servidor la sesión principal vuelve al momento y las demás despiertan cuando les escribes. Apagado por defecto: entonces el Control Remoto solo arranca cuando pulsas Iniciar.'
 )?></blockquote>
 </form>
 
@@ -10036,7 +10143,7 @@ if ! grep -q "rc.claude-code" "$GO_FILE" 2>/dev/null; then
 
     echo ""
     echo "-----------------------------------------------------------"
-    echo " Claude Code plugin v2026.11.14 has been installed!"
+    echo " Claude Code plugin v2026.11.25 has been installed!"
     echo ""
     echo " To use: Open terminal and run: claude"
     echo " Web UI: Settings -> Utilities -> Claude Code"
@@ -10094,6 +10201,10 @@ for pidfile in /var/run/claude-remote-control*.pid; do
     rm -f "$pidfile"
 done
 rm -f /var/run/claude-remote-control*.enabled /var/run/claude-remote-control*.pin /var/run/claude-remote-control*.fresh /var/run/claude-remote-control*.exit
+rm -f /var/run/claude-remote-control.restored
+# The flash copy of what was running: removing the plugin stops everything, so
+# a reinstall must not bring any of it back after the next reboot.
+rm -rf /boot/config/plugins/claude-code/rc-enabled
 rm -f /var/run/claude-code-sync.lock
 # The supervisor runs as "bash .../remote-control.sh _run" and forks subshells
 # and a session watcher under it, none of which the pidfile covers.
